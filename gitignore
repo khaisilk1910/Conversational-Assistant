@@ -1,0 +1,73 @@
+# Python bytecode and caches
+__pycache__/
+*.py[cod]
+*$py.class
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.pyright/
+
+# Virtual environments
+.venv/
+venv/
+env/
+ENV/
+
+# Test and coverage output
+.coverage
+.coverage.*
+htmlcov/
+coverage.xml
+junit.xml
+.tox/
+.nox/
+
+# Build and release artifacts
+build/
+dist/
+*.egg-info/
+.eggs/
+*.whl
+*.zip
+
+# Home Assistant local/runtime data
+config/
+.storage/
+.cloud/
+deps/
+tts/
+home-assistant.log*
+home-assistant_v2.db*
+*.db-shm
+*.db-wal
+secrets.yaml
+known_devices.yaml
+
+# Environment variables and local secrets
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+*.crt
+
+# IDE and editor files
+.vscode/
+.idea/
+*.code-workspace
+*.swp
+*.swo
+*~
+
+# Operating system files
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# Temporary files
+*.tmp
+*.temp
+*.bak
+*.orig
+.cache/
+tmp/
