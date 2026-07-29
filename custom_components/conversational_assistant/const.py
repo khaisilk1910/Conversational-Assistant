@@ -56,6 +56,11 @@ ZALO_TYPE_GROUP = "1"
 
 ZALO_WEBHOOK_SEEN_MESSAGE_LIMIT = 512
 
+# Device/entity discovery is intentionally lazy.  A short cache keeps repeated
+# reminder/camera requests fast without scanning Home Assistant registries while
+# Home Assistant is starting.
+DISCOVERY_CACHE_SECONDS = 60
+
 TTS_DOMAIN = "tts"
 TTS_SERVICE_SPEAK = "speak"
 MEDIA_PLAYER_DOMAIN = "media_player"

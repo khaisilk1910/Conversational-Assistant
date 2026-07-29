@@ -11,6 +11,7 @@ from datetime import datetime, timedelta
 import logging
 import os
 import re
+from time import monotonic
 from typing import Any
 import unicodedata
 import uuid
@@ -32,11 +33,12 @@ from homeassistant.components.homeassistant.exposed_entities import (
 )
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.const import ATTR_SUPPORTED_FEATURES, STATE_UNAVAILABLE, STATE_UNKNOWN
-from homeassistant.core import Context, Event, HomeAssistant, callback
+from homeassistant.core import Context, CoreState, Event, HomeAssistant, callback
 from homeassistant.helpers import device_registry as dr
 from homeassistant.helpers import entity_registry as er
 from homeassistant.helpers.dispatcher import async_dispatcher_send
 from homeassistant.helpers.event import async_track_point_in_time
+from homeassistant.helpers.start import async_at_started
 from homeassistant.helpers.storage import Store
 from homeassistant.util import dt as dt_util
 
@@ -74,6 +76,7 @@ from .const import (
     DEFAULT_ZALO_TYPE,
     DEFAULT_ZALO_WEBHOOK_BOT_ACCOUNT_ID,
     DEFAULT_ZALO_WEBHOOK_ENABLED,
+    DISCOVERY_CACHE_SECONDS,
     DOMAIN,
     EVENT_NOTIFICATION_ACTION,
     EVENT_NOTIFICATION_CLEARED,
@@ -311,6 +314,18 @@ class ConversationalAssistantManager(NoteManagerMixin):
         self._unsub_pending_trigger: Callable[[], None] | None = None
         self._unsub_pending_expiry_timer: Callable[[], None] | None = None
         self._unsubs: list[Callable[[], None]] = []
+        # Optional targets are discovered only when a command actually needs
+        # them.  Never populate these caches from async_setup(), otherwise a
+        # large device/entity registry can delay Home Assistant startup.
+        self._mobile_targets_cache: list[NotificationTarget] | None = None
+        self._mobile_targets_cache_until = 0.0
+        self._speaker_targets_cache: list[NotificationTarget] | None = None
+        self._speaker_targets_cache_until = 0.0
+        self._camera_targets_cache: list[CameraTarget] | None = None
+        self._camera_targets_cache_until = 0.0
+        self._tts_entity_id_cache: str | None = None
+        self._tts_entity_id_cache_set = False
+        self._tts_entity_id_cache_until = 0.0
 
     @property
     def update_signal(self) -> str:
@@ -490,8 +505,18 @@ class ConversationalAssistantManager(NoteManagerMixin):
                 ),
             ]
         )
-        self._schedule_next()
+        self._unsubs.append(
+            async_at_started(self.hass, self._async_home_assistant_started)
+        )
         self._notify_update()
+
+        # Do not scan Mobile App devices, speakers, TTS entities, or cameras
+        # here.  Those optional resources are resolved lazily on first use.
+
+    @callback
+    def _async_home_assistant_started(self, _hass: HomeAssistant) -> None:
+        """Start reminder scheduling only after Home Assistant is ready."""
+        self._schedule_next()
 
     async def async_unload(self) -> None:
         """Unload listeners and timer."""
@@ -513,8 +538,22 @@ class ConversationalAssistantManager(NoteManagerMixin):
         self._zalo_pending_creations.clear()
         self._zalo_pending_deletions.clear()
         self._zalo_pending_cameras.clear()
+        self._clear_discovery_caches()
         self._clear_all_note_pending()
         await self._store.async_save(self._serialize())
+
+    @callback
+    def _clear_discovery_caches(self) -> None:
+        """Drop lazily populated optional-device caches."""
+        self._mobile_targets_cache = None
+        self._mobile_targets_cache_until = 0.0
+        self._speaker_targets_cache = None
+        self._speaker_targets_cache_until = 0.0
+        self._camera_targets_cache = None
+        self._camera_targets_cache_until = 0.0
+        self._tts_entity_id_cache = None
+        self._tts_entity_id_cache_set = False
+        self._tts_entity_id_cache_until = 0.0
 
     def _serialize(self) -> dict[str, Any]:
         """Serialize all reminders."""
@@ -541,6 +580,11 @@ class ConversationalAssistantManager(NoteManagerMixin):
         if self._unsub_timer is not None:
             self._unsub_timer()
             self._unsub_timer = None
+
+        # Avoid firing overdue reminders and scanning notification targets
+        # while other integrations are still starting.
+        if self.hass.state is not CoreState.running:
+            return
 
         due = self._raw_next_due()
         if due is None:
@@ -1424,31 +1468,54 @@ class ConversationalAssistantManager(NoteManagerMixin):
         )
 
     def _discovered_camera_targets(self) -> list[CameraTarget]:
-        """Return every currently registered camera entity in Home Assistant."""
-        states = sorted(
-            self.hass.states.async_all("camera"),
-            key=lambda state: (
-                str(state.name or state.entity_id).casefold(),
-                state.entity_id,
-            ),
-        )
-        name_counts: dict[str, int] = {}
-        for state in states:
-            name = str(state.name or state.entity_id).strip()
-            key = normalize_text(name)
-            name_counts[key] = name_counts.get(key, 0) + 1
+        """Return cameras, scanning lazily and caching their identities."""
+        now = monotonic()
+        cached = self._camera_targets_cache
+        if cached is None or now >= self._camera_targets_cache_until:
+            states = sorted(
+                self.hass.states.async_all("camera"),
+                key=lambda state: (
+                    str(state.name or state.entity_id).casefold(),
+                    state.entity_id,
+                ),
+            )
+            name_counts: dict[str, int] = {}
+            for state in states:
+                name = str(state.name or state.entity_id).strip()
+                key = normalize_text(name)
+                name_counts[key] = name_counts.get(key, 0) + 1
 
+            cached = []
+            for state in states:
+                name = str(state.name or state.entity_id).strip()
+                if name_counts.get(normalize_text(name), 0) > 1:
+                    name = f"{name} ({state.entity_id})"
+                cached.append(
+                    CameraTarget(
+                        entity_id=state.entity_id,
+                        display_name=name,
+                        available=state.state
+                        not in {STATE_UNAVAILABLE, STATE_UNKNOWN},
+                    )
+                )
+            self._camera_targets_cache = cached
+            self._camera_targets_cache_until = (
+                now + DISCOVERY_CACHE_SECONDS
+            )
+
+        # Camera availability can change quickly, so refresh only the cheap
+        # state lookup while reusing the cached entity list and display names.
         cameras: list[CameraTarget] = []
-        for state in states:
-            name = str(state.name or state.entity_id).strip()
-            if name_counts.get(normalize_text(name), 0) > 1:
-                name = f"{name} ({state.entity_id})"
-            available = state.state not in {STATE_UNAVAILABLE, STATE_UNKNOWN}
+        for camera in cached:
+            state = self.hass.states.get(camera.entity_id)
+            if state is None:
+                continue
             cameras.append(
                 CameraTarget(
-                    entity_id=state.entity_id,
-                    display_name=name,
-                    available=available,
+                    entity_id=camera.entity_id,
+                    display_name=camera.display_name,
+                    available=state.state
+                    not in {STATE_UNAVAILABLE, STATE_UNKNOWN},
                 )
             )
         return cameras
@@ -1517,7 +1584,11 @@ class ConversationalAssistantManager(NoteManagerMixin):
         service_context: Context | None,
     ) -> ZaloDirectResponse | str:
         """Capture one camera snapshot and send it to the originating Zalo chat."""
-        if not camera.available:
+        camera_state = self.hass.states.get(camera.entity_id)
+        if (
+            camera_state is None
+            or camera_state.state in {STATE_UNAVAILABLE, STATE_UNKNOWN}
+        ):
             return (
                 f"Camera {camera.display_name} hiện không khả dụng. "
                 "Hãy kiểm tra kết nối camera rồi thử lại."
@@ -1975,7 +2046,32 @@ class ConversationalAssistantManager(NoteManagerMixin):
         }
 
     def _discovered_mobile_targets(self) -> list[NotificationTarget]:
-        """Auto-discover selectable Mobile App notification devices."""
+        """Auto-discover Mobile App devices lazily with a short cache."""
+        now = monotonic()
+        if (
+            self._mobile_targets_cache is not None
+            and now < self._mobile_targets_cache_until
+        ):
+            return list(self._mobile_targets_cache)
+
+        # Resolve usable Mobile App config entries once, instead of resolving
+        # config entries and notify services again for every device in the
+        # registry.  This changes discovery from repeated nested lookups to one
+        # linear registry pass.
+        usable_mobile_entry_ids: set[str] = set()
+        for config_entry in self.hass.config_entries.async_entries(
+            "mobile_app"
+        ):
+            webhook_id = config_entry.data.get(ATTR_WEBHOOK_ID)
+            if not webhook_id:
+                continue
+            try:
+                service = get_notify_service(self.hass, webhook_id)
+            except (KeyError, TypeError):
+                service = None
+            if service and self.hass.services.has_service("notify", service):
+                usable_mobile_entry_ids.add(config_entry.entry_id)
+
         registry = dr.async_get(self.hass)
         targets: list[NotificationTarget] = []
         devices = sorted(
@@ -1986,7 +2082,9 @@ class ConversationalAssistantManager(NoteManagerMixin):
             ),
         )
         for device in devices:
-            if not self._notification_services_for_device_ids([device.id]):
+            if not usable_mobile_entry_ids.intersection(
+                device.config_entries
+            ):
                 continue
             name = device.name_by_user or device.name or device.id
             targets.append(
@@ -1997,7 +2095,9 @@ class ConversationalAssistantManager(NoteManagerMixin):
                     mobile_device_id=device.id,
                 )
             )
-        return targets
+        self._mobile_targets_cache = targets
+        self._mobile_targets_cache_until = now + DISCOVERY_CACHE_SECONDS
+        return list(targets)
 
     def _configured_zalo_selection_targets(self) -> list[NotificationTarget]:
         """Return selectable Zalo destinations."""
@@ -2025,17 +2125,31 @@ class ConversationalAssistantManager(NoteManagerMixin):
         if configured and self.hass.states.get(configured) is not None:
             return configured
 
+        now = monotonic()
+        if (
+            self._tts_entity_id_cache_set
+            and now < self._tts_entity_id_cache_until
+        ):
+            return self._tts_entity_id_cache
+
         states = sorted(
             self.hass.states.async_all(TTS_DOMAIN),
             key=lambda state: state.entity_id,
         )
         for state in states:
             if state.state not in (STATE_UNAVAILABLE, STATE_UNKNOWN):
-                return state.entity_id
-        return states[0].entity_id if states else None
+                self._tts_entity_id_cache = state.entity_id
+                break
+        else:
+            self._tts_entity_id_cache = (
+                states[0].entity_id if states else None
+            )
+        self._tts_entity_id_cache_set = True
+        self._tts_entity_id_cache_until = now + DISCOVERY_CACHE_SECONDS
+        return self._tts_entity_id_cache
 
     def _configured_speaker_targets(self) -> list[NotificationTarget]:
-        """Auto-discover media players suitable for TTS announcements."""
+        """Auto-discover announcement speakers lazily with a short cache."""
         if not bool(
             self._option(CONF_SPEAKER_ENABLED, DEFAULT_SPEAKER_ENABLED)
         ):
@@ -2044,6 +2158,13 @@ class ConversationalAssistantManager(NoteManagerMixin):
             return []
         if not self.hass.services.has_service(TTS_DOMAIN, TTS_SERVICE_SPEAK):
             return []
+
+        now = monotonic()
+        if (
+            self._speaker_targets_cache is not None
+            and now < self._speaker_targets_cache_until
+        ):
+            return list(self._speaker_targets_cache)
 
         targets: list[NotificationTarget] = []
         states = sorted(
@@ -2084,7 +2205,9 @@ class ConversationalAssistantManager(NoteManagerMixin):
                     speaker_entity_id=state.entity_id,
                 )
             )
-        return targets
+        self._speaker_targets_cache = targets
+        self._speaker_targets_cache_until = now + DISCOVERY_CACHE_SECONDS
+        return list(targets)
 
     def _available_targets(self) -> list[NotificationTarget]:
         """Return all notification destinations selectable for a reminder."""
