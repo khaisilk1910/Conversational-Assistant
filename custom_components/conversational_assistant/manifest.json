@@ -1,0 +1,16 @@
+{
+  "domain": "conversational_assistant",
+  "name": "Conversational Assistant",
+  "codeowners": [],
+  "config_flow": true,
+  "dependencies": [
+    "conversation",
+    "mobile_app",
+    "media_player",
+    "tts"
+  ],
+  "integration_type": "service",
+  "iot_class": "local_push",
+  "requirements": [],
+  "version": "1.0.0"
+}

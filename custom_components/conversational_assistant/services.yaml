@@ -1,0 +1,20 @@
+process_zalo_webhook:
+  fields:
+    payload:
+      required: true
+      example:
+        type: 1
+        data:
+          msgId: "8092589555886"
+          uidFrom: "2036121378794772276"
+          content: "Bật đèn phòng khách"
+        threadId: "8606394172334558469"
+        isSelf: false
+        _accountId: "781454039143291053"
+      selector:
+        object:
+    config_entry_id:
+      required: false
+      selector:
+        config_entry:
+          integration: conversational_assistant

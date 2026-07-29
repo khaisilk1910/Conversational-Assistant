@@ -1,0 +1,141 @@
+{
+  "title": "Conversational Assistant",
+  "config": {
+    "step": {
+      "user": {
+        "title": "Set up Conversational Assistant",
+        "description": "Mobile App notification devices and speakers are discovered automatically. After setup, open Configure to add one or more named Zalo destinations.",
+        "data": {
+          "dismiss_on_clear": "Treat swiping away as dismiss (Android only)",
+          "confirm_targets": "Ask which destinations and speakers to use before saving each reminder",
+          "speaker_enabled": "Offer discovered speakers as reminder destinations",
+          "tts_entity_id": "TTS engine for speaker announcements",
+          "zalo_webhook_enabled": "Process commands from an existing Zalo webhook",
+          "zalo_webhook_bot_account_id": "Zalo bot account ID",
+          "zalo_webhook_account_selection": "Zalo account for webhook replies",
+          "zalo_home_assistant_enabled": "Allow Zalo to query and control Home Assistant",
+          "zalo_conversation_agent_id": "Conversation agent used for Zalo"
+        },
+        "data_description": {
+          "confirm_targets": "Voice Assist and Zalo commands list discovered phones, Zalo destinations, and speakers, then wait for a reply such as: choose 1 and 3.",
+          "speaker_enabled": "Compatible media_player entities are scanned automatically whenever a reminder is created.",
+          "tts_entity_id": "Optional. If left unset, Conversational Assistant automatically uses the first available TTS entity.",
+          "zalo_webhook_enabled": "Does not create a new endpoint. Your existing webhook or automation calls conversational_assistant.process_zalo_webhook and passes its JSON body in the payload field.",
+          "zalo_webhook_bot_account_id": "Used with isSelf and uidFrom to ignore messages sent by the bot itself.",
+          "zalo_webhook_account_selection": "The account selector expected by zalo_bot.send_message, usually the bot phone number. If empty, the first configured Zalo destination account is used.",
+          "zalo_home_assistant_enabled": "Routes device control, state, room, area, floor, weather, and calendar requests from Zalo into Home Assistant. Only entities exposed to Assist can be used.",
+          "zalo_conversation_agent_id": "Choose the Home Assistant or custom Conversation agent that should interpret Zalo commands. Home Assistant Assist exposure settings are still enforced for calendars and built-in controls."
+        }
+      }
+    },
+    "abort": {
+      "single_instance_allowed": "Only one Conversational Assistant instance is supported."
+    }
+  },
+  "options": {
+    "step": {
+      "init": {
+        "title": "Conversational Assistant options",
+        "description": "Manage automatic phone/speaker discovery and Zalo destinations. Currently configured Zalo destinations: {zalo_count}.",
+        "menu_options": {
+          "general": "General settings and automatic discovery",
+          "add_zalo": "Add Zalo destination",
+          "edit_zalo_select": "Edit Zalo destination",
+          "delete_zalo": "Delete Zalo destination",
+          "finish": "Save and finish"
+        }
+      },
+      "general": {
+        "title": "General settings",
+        "description": "Mobile App notification devices and compatible speakers are discovered automatically and appear in the same destination list as Zalo.",
+        "data": {
+          "dismiss_on_clear": "Treat swiping away as dismiss (Android only)",
+          "confirm_targets": "Ask which destinations and speakers to use before saving each reminder",
+          "speaker_enabled": "Offer discovered speakers as reminder destinations",
+          "tts_entity_id": "TTS engine for speaker announcements",
+          "zalo_webhook_enabled": "Process commands from an existing Zalo webhook",
+          "zalo_webhook_bot_account_id": "Zalo bot account ID",
+          "zalo_webhook_account_selection": "Zalo account for webhook replies",
+          "zalo_home_assistant_enabled": "Allow Zalo to query and control Home Assistant",
+          "zalo_conversation_agent_id": "Conversation agent used for Zalo"
+        },
+        "data_description": {
+          "confirm_targets": "When enabled, both Voice Assist and Zalo reminders are saved only after you reply with destination numbers or names.",
+          "speaker_enabled": "Conversational Assistant automatically scans media players that support play_media and excludes unavailable TVs and projectors.",
+          "tts_entity_id": "If no engine is selected, the first available TTS entity is used automatically.",
+          "zalo_webhook_enabled": "Does not create a new endpoint. Your existing webhook or automation calls conversational_assistant.process_zalo_webhook and passes its JSON body in the payload field.",
+          "zalo_webhook_bot_account_id": "Used with isSelf and uidFrom to ignore messages sent by the bot itself.",
+          "zalo_webhook_account_selection": "The account selector expected by zalo_bot.send_message, usually the bot phone number. If empty, the first configured Zalo destination account is used.",
+          "zalo_home_assistant_enabled": "Routes device control, state, room, area, floor, weather, and calendar requests from Zalo into Home Assistant. Only entities exposed to Assist can be used.",
+          "zalo_conversation_agent_id": "Choose the Home Assistant or custom Conversation agent that should interpret Zalo commands. Home Assistant Assist exposure settings are still enforced for calendars and built-in controls."
+        }
+      },
+      "add_zalo": {
+        "title": "Add Zalo destination",
+        "description": "Give this destination a short spoken name, such as Family or Anh Nam.",
+        "data": {
+          "name": "Spoken destination name",
+          "enabled": "Offer this destination in voice choices",
+          "zalo_type": "Zalo recipient type",
+          "zalo_thread_id": "Zalo thread ID",
+          "zalo_account_selection": "Zalo sending account"
+        },
+        "data_description": {
+          "name": "This name is spoken by Assist and can be used in replies.",
+          "zalo_type": "User maps to type 0; Group maps to type 1.",
+          "zalo_thread_id": "ID of the user or group receiving the message.",
+          "zalo_account_selection": "Zalo Bot account phone number, for example +84376861184."
+        }
+      },
+      "edit_zalo_select": {
+        "title": "Select Zalo destination",
+        "data": {
+          "selected_zalo_target": "Zalo destination"
+        }
+      },
+      "edit_zalo": {
+        "title": "Edit Zalo destination",
+        "data": {
+          "name": "Spoken destination name",
+          "enabled": "Offer this destination in voice choices",
+          "zalo_type": "Zalo recipient type",
+          "zalo_thread_id": "Zalo thread ID",
+          "zalo_account_selection": "Zalo sending account"
+        },
+        "data_description": {
+          "name": "This name is spoken by Assist and can be used in replies.",
+          "zalo_type": "User maps to type 0; Group maps to type 1."
+        }
+      },
+      "delete_zalo": {
+        "title": "Delete Zalo destination",
+        "description": "Existing reminders keep a snapshot of a Zalo destination already selected for them.",
+        "data": {
+          "selected_zalo_target": "Zalo destination to delete"
+        }
+      },
+      "finish": {
+        "title": "Save Conversational Assistant options"
+      }
+    },
+    "error": {
+      "required": "This field is required."
+    }
+  },
+  "services": {
+    "process_zalo_webhook": {
+      "name": "Process Zalo payload",
+      "description": "Accept JSON from an existing Zalo webhook, reject self-sent messages, manage reminders and notes, and query or control exposed Home Assistant entities.",
+      "fields": {
+        "payload": {
+          "name": "Zalo payload",
+          "description": "The complete JSON body received from the Zalo server, such as trigger.json."
+        },
+        "config_entry_id": {
+          "name": "Conversational Assistant configuration",
+          "description": "Optional because the integration currently allows only one configuration."
+        }
+      }
+    }
+  }
+}
