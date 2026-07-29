@@ -163,7 +163,18 @@ Conversational Assistant **không tự tạo endpoint webhook Zalo**. Bạn cầ
 
 ## Cài đặt
 
-### Cách 1 — Cài qua HACS
+
+### Cài tự động
+
+  - Nhấn nút bên dưới để thêm vào HACS trên Home Assistant.
+
+  [![Open your Home Assistant instance and open a repository inside the Home Assistant Community Store.](https://my.home-assistant.io/badges/hacs_repository.svg)](https://my.home-assistant.io/redirect/hacs_repository/?owner=khaisilk1910&repository=Conversational-Assistant&category=integration)
+
+  - Sau khi thêm trong HACS và khởi động lại Home Assistant
+     
+  - Vào Settings -> Integrations -> Add integration -> Tìm `Conversational Assistant`
+
+### Cài thủ công qua HACS
 
 Repository chưa nằm trong danh sách mặc định của HACS có thể được thêm dưới dạng **Custom repository**.
 
@@ -326,13 +337,13 @@ actions:
 {
   "type": 1,
   "data": {
-    "msgId": "8092589555886",
-    "uidFrom": "2036121378794772276",
+    "msgId": "32321323231",
+    "uidFrom": "32321321321321321321",
     "content": "Bật đèn phòng khách"
   },
-  "threadId": "8606394172334558469",
+  "threadId": "32132132132132131",
   "isSelf": false,
-  "_accountId": "781454039143291053"
+  "_accountId": "3213213213232313"
 }
 ```
 
