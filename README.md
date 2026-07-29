@@ -181,7 +181,7 @@ Repository chưa nằm trong danh sách mặc định của HACS có thể đư�
 1. Mở **HACS** trong Home Assistant.
 2. Chọn menu dấu ba chấm ở góc trên bên phải.
 3. Chọn **Custom repositories**.
-4. Nhập URL repository GitHub của Conversational Assistant.
+4. Nhập URL repository GitHub của Conversational Assistant: `https://github.com/khaisilk1910/Conversational-Assistant`
 5. Chọn loại **Integration**.
 6. Nhấn **Add**.
 7. Tìm **Conversational Assistant** trong HACS và chọn **Download**.
