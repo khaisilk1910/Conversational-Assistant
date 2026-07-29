@@ -373,7 +373,7 @@ Các lệnh
 
 Bot sẽ trả về danh sách lệnh rút gọn.
 
-Xem thêm: [ZALO_WEBHOOK.md](ZALO_WEBHOOK.md)
+Xem thêm: [ZALO_WEBHOOK.md](https://github.com/smarthomeblack/zalo_bot)
 
 ---
 
