@@ -51,10 +51,17 @@ ATTR_CONFIG_ENTRY_ID = "config_entry_id"
 ZALO_DOMAIN = "zalo_bot"
 ZALO_SERVICE_SEND_MESSAGE = "send_message"
 ZALO_SERVICE_SEND_IMAGE = "send_image"
+ZALO_SERVICE_SEND_IMAGES_TO_GROUP = "send_images_to_group"
+ZALO_SERVICE_SEND_TYPING_EVENT = "send_typing_event"
 ZALO_TYPE_USER = "0"
 ZALO_TYPE_GROUP = "1"
 
 ZALO_WEBHOOK_SEEN_MESSAGE_LIMIT = 512
+
+# Refresh the native Zalo typing indicator while a command is still being
+# processed. The task is created only for an active webhook request and is
+# stopped immediately after the final text/image response is delivered.
+ZALO_TYPING_REFRESH_SECONDS = 4
 
 # Device/entity discovery is intentionally lazy.  A short cache keeps repeated
 # reminder/camera requests fast without scanning Home Assistant registries while

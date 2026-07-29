@@ -91,7 +91,10 @@ from .const import (
     TTS_SERVICE_SPEAK,
     ZALO_DOMAIN,
     ZALO_SERVICE_SEND_IMAGE,
+    ZALO_SERVICE_SEND_IMAGES_TO_GROUP,
     ZALO_SERVICE_SEND_MESSAGE,
+    ZALO_SERVICE_SEND_TYPING_EVENT,
+    ZALO_TYPING_REFRESH_SECONDS,
     ZALO_TYPE_GROUP,
     ZALO_TYPE_USER,
     ZALO_WEBHOOK_SEEN_MESSAGE_LIMIT,
@@ -1524,19 +1527,20 @@ class ConversationalAssistantManager(NoteManagerMixin):
     def _camera_selection_prompt(
         cameras: list[CameraTarget], invalid: bool = False
     ) -> str:
-        """Build a numbered camera confirmation prompt for Zalo."""
+        """Build a numbered multi-camera confirmation prompt for Zalo."""
         lines = []
         for index, camera in enumerate(cameras, start=1):
             status = " — không khả dụng" if not camera.available else ""
             lines.append(f"{index} - {camera.display_name}{status}")
         prefix = (
-            "Lựa chọn chưa hợp lệ. Hãy chọn đúng một camera.\n"
+            "Lựa chọn chưa hợp lệ. Hãy chọn ít nhất một camera.\n"
             if invalid
             else "Các camera đang có trên Home Assistant:\n"
         )
         return (
             f"{prefix}{chr(10).join(lines)}\n"
-            "Trả lời một số hoặc tên camera để xác nhận, ví dụ: 1. "
+            "Trả lời một hoặc nhiều số/tên camera để xác nhận, ví dụ: "
+            "1 3 10. Có thể gửi 'tất cả' để chụp mọi camera khả dụng. "
             "Gửi 'không chụp' để hủy."
         )
 
@@ -1577,43 +1581,83 @@ class ConversationalAssistantManager(NoteManagerMixin):
             "/media/" + relative_path.replace(os.sep, "/"),
         )
 
-    async def _async_capture_camera_to_zalo(
+    async def _async_send_zalo_typing_to_target(
+        self,
+        thread_id: str,
+        account_selection: str,
+        service_context: Context | None = None,
+    ) -> bool:
+        """Show Zalo typing status without delaying or failing a feature."""
+        if not thread_id or not account_selection:
+            return False
+        if not self.hass.services.has_service(
+            ZALO_DOMAIN, ZALO_SERVICE_SEND_TYPING_EVENT
+        ):
+            return False
+
+        try:
+            await self.hass.services.async_call(
+                ZALO_DOMAIN,
+                ZALO_SERVICE_SEND_TYPING_EVENT,
+                {
+                    "thread_id": thread_id,
+                    "account_selection": account_selection,
+                },
+                blocking=False,
+                context=service_context,
+            )
+        except Exception:  # noqa: BLE001 - typing is best effort only
+            _LOGGER.debug(
+                "Failed sending Zalo typing event to thread %s",
+                thread_id,
+                exc_info=True,
+            )
+            return False
+        return True
+
+    async def _async_send_zalo_typing_event(
+        self,
+        context: ZaloWebhookContext,
+        service_context: Context | None = None,
+    ) -> bool:
+        """Show typing in the Zalo conversation that sent the request."""
+        return await self._async_send_zalo_typing_to_target(
+            context.thread_id,
+            self._zalo_webhook_account_selection(),
+            service_context,
+        )
+
+    async def _async_keep_zalo_typing_active(
+        self,
+        context: ZaloWebhookContext,
+        service_context: Context | None,
+        stop_event: asyncio.Event,
+    ) -> None:
+        """Refresh typing until every part of a Zalo request is complete."""
+        while not stop_event.is_set():
+            try:
+                await asyncio.wait_for(
+                    stop_event.wait(), timeout=ZALO_TYPING_REFRESH_SECONDS
+                )
+            except TimeoutError:
+                await self._async_send_zalo_typing_event(
+                    context, service_context
+                )
+
+    async def _async_capture_camera_snapshot(
         self,
         context: ZaloWebhookContext,
         camera: CameraTarget,
         service_context: Context | None,
-    ) -> ZaloDirectResponse | str:
-        """Capture one camera snapshot and send it to the originating Zalo chat."""
+    ) -> tuple[str | None, str | None]:
+        """Capture one camera and return its /media path or an error message."""
         camera_state = self.hass.states.get(camera.entity_id)
         if (
             camera_state is None
             or camera_state.state in {STATE_UNAVAILABLE, STATE_UNKNOWN}
         ):
-            return (
-                f"Camera {camera.display_name} hiện không khả dụng. "
-                "Hãy kiểm tra kết nối camera rồi thử lại."
-            )
-        if not self.hass.services.has_service("camera", "snapshot"):
-            return "Action camera.snapshot chưa sẵn sàng trên Home Assistant."
-        if not self.hass.services.has_service(
-            ZALO_DOMAIN, ZALO_SERVICE_SEND_IMAGE
-        ):
-            return (
-                f"Action {ZALO_DOMAIN}.{ZALO_SERVICE_SEND_IMAGE} chưa sẵn sàng. "
-                "Hãy kiểm tra tích hợp zalo_bot."
-            )
+            return None, f"{camera.display_name}: camera không khả dụng"
 
-        account_selection = self._zalo_webhook_account_selection()
-        if not account_selection:
-            return (
-                "Chưa có tài khoản Zalo gửi ảnh. Hãy cấu hình tài khoản "
-                "phản hồi webhook trong Conversational Assistant."
-            )
-
-        # Home Assistant's shared media directory is exposed as /media on
-        # Home Assistant OS/Container. hass.config.path("media") would point to
-        # /config/media, which is a different directory and is not the path used
-        # by media-source or zalo_bot.send_image.
         media_root = self.hass.config.media_dirs.get("local", "/media")
         filename, image_path = self._camera_snapshot_paths(
             media_root, context.owner_key, camera.entity_id
@@ -1633,49 +1677,154 @@ class ConversationalAssistantManager(NoteManagerMixin):
                 blocking=True,
                 context=service_context,
             )
-        except Exception:  # noqa: BLE001 - return a useful Zalo error
+        except Exception:  # noqa: BLE001 - continue with other cameras
             _LOGGER.exception(
                 "Failed to capture snapshot from %s", camera.entity_id
             )
-            return (
-                f"Không chụp được ảnh từ {camera.display_name}. "
-                "Hãy kiểm tra camera và quyền ghi thư mục /media."
-            )
+            return None, f"{camera.display_name}: không chụp được ảnh"
 
         snapshot_exists = await self.hass.async_add_executor_job(
             os.path.isfile, filename
         )
         if not snapshot_exists:
-            return (
-                f"Camera {camera.display_name} không tạo được file ảnh. "
-                "Hãy kiểm tra hỗ trợ snapshot và quyền ghi thư mục /media."
+            return None, f"{camera.display_name}: không tạo được file ảnh"
+        return image_path, None
+
+    async def _async_send_camera_images_to_zalo(
+        self,
+        context: ZaloWebhookContext,
+        image_paths: list[str],
+        camera_names: list[str],
+        service_context: Context | None,
+    ) -> tuple[bool, str | None]:
+        """Send captured camera images to the originating Zalo conversation."""
+        account_selection = self._zalo_webhook_account_selection()
+        if not account_selection:
+            return False, (
+                "Chưa có tài khoản Zalo gửi ảnh. Hãy cấu hình tài khoản "
+                "phản hồi webhook trong Conversational Assistant."
             )
 
-        try:
-            await self.hass.services.async_call(
-                ZALO_DOMAIN,
-                ZALO_SERVICE_SEND_IMAGE,
-                {
-                    "type": context.thread_type,
-                    "ttl": 0,
-                    "image_path": image_path,
-                    "message": f"Đã chụp ảnh {camera.display_name}",
-                    "thread_id": context.thread_id,
-                    "account_selection": account_selection,
-                },
-                blocking=True,
-                context=service_context,
+        # Zalo Bot exposes a native bulk action for groups. Prefer it whenever
+        # two or more images were selected, then fall back to send_image if the
+        # installed Zalo Bot version does not provide that action.
+        if (
+            context.thread_type == ZALO_TYPE_GROUP
+            and len(image_paths) > 1
+            and self.hass.services.has_service(
+                ZALO_DOMAIN, ZALO_SERVICE_SEND_IMAGES_TO_GROUP
             )
-        except Exception:  # noqa: BLE001 - return a useful Zalo error
-            _LOGGER.exception(
-                "Failed sending camera snapshot to Zalo thread %s",
-                context.thread_id,
+        ):
+            try:
+                await self.hass.services.async_call(
+                    ZALO_DOMAIN,
+                    ZALO_SERVICE_SEND_IMAGES_TO_GROUP,
+                    {
+                        "thread_id": context.thread_id,
+                        "account_selection": account_selection,
+                        "image_paths": ",".join(image_paths),
+                    },
+                    blocking=True,
+                    context=service_context,
+                )
+            except Exception:  # noqa: BLE001 - return a useful Zalo error
+                _LOGGER.exception(
+                    "Failed sending grouped camera snapshots to Zalo thread %s",
+                    context.thread_id,
+                )
+                return False, (
+                    "Đã chụp ảnh nhưng không gửi được nhóm ảnh lên Zalo. "
+                    "Hãy kiểm tra action zalo_bot.send_images_to_group."
+                )
+            return True, None
+
+        if not self.hass.services.has_service(
+            ZALO_DOMAIN, ZALO_SERVICE_SEND_IMAGE
+        ):
+            return False, (
+                f"Action {ZALO_DOMAIN}.{ZALO_SERVICE_SEND_IMAGE} chưa sẵn sàng. "
+                "Hãy kiểm tra tích hợp zalo_bot."
             )
+
+        for image_path, camera_name in zip(
+            image_paths, camera_names, strict=True
+        ):
+            try:
+                await self.hass.services.async_call(
+                    ZALO_DOMAIN,
+                    ZALO_SERVICE_SEND_IMAGE,
+                    {
+                        "type": context.thread_type,
+                        "ttl": 0,
+                        "image_path": image_path,
+                        "message": f"Đã chụp ảnh {camera_name}",
+                        "thread_id": context.thread_id,
+                        "account_selection": account_selection,
+                    },
+                    blocking=True,
+                    context=service_context,
+                )
+            except Exception:  # noqa: BLE001 - stop on delivery failure
+                _LOGGER.exception(
+                    "Failed sending camera snapshot to Zalo thread %s",
+                    context.thread_id,
+                )
+                return False, (
+                    f"Đã chụp ảnh {camera_name} nhưng không gửi được lên Zalo. "
+                    "Hãy kiểm tra action zalo_bot.send_image."
+                )
+        return True, None
+
+    async def _async_capture_cameras_to_zalo(
+        self,
+        context: ZaloWebhookContext,
+        cameras: list[CameraTarget],
+        service_context: Context | None,
+    ) -> ZaloDirectResponse | str:
+        """Capture selected cameras, then send all successful images to Zalo."""
+        if not self.hass.services.has_service("camera", "snapshot"):
+            return "Action camera.snapshot chưa sẵn sàng trên Home Assistant."
+
+        image_paths: list[str] = []
+        camera_names: list[str] = []
+        failures: list[str] = []
+        for camera in cameras:
+            image_path, error = await self._async_capture_camera_snapshot(
+                context, camera, service_context
+            )
+            if image_path is not None:
+                image_paths.append(image_path)
+                camera_names.append(camera.display_name)
+            elif error:
+                failures.append(error)
+
+        if not image_paths:
+            details = "; ".join(failures)
             return (
-                f"Đã chụp ảnh {camera.display_name} nhưng không gửi được "
-                "lên Zalo. Hãy kiểm tra action zalo_bot.send_image."
+                "Không chụp được ảnh từ các camera đã chọn. "
+                + (details or "Hãy kiểm tra camera và thư mục /media.")
             )
-        return ZaloDirectResponse(sent=True, response_type="image")
+
+        sent, send_error = await self._async_send_camera_images_to_zalo(
+            context,
+            image_paths,
+            camera_names,
+            service_context,
+        )
+        if not sent:
+            return send_error or "Không gửi được ảnh camera lên Zalo."
+
+        if failures:
+            await self._async_send_zalo_webhook_reply(
+                context,
+                f"Đã gửi {len(image_paths)} ảnh. Không chụp được: "
+                + "; ".join(failures)
+                + ".",
+            )
+        return ZaloDirectResponse(
+            sent=True,
+            response_type="images" if len(image_paths) > 1 else "image",
+        )
 
     async def _async_zalo_pending_camera_reply(
         self,
@@ -1683,7 +1832,7 @@ class ConversationalAssistantManager(NoteManagerMixin):
         pending: PendingZaloCamera,
         service_context: Context | None,
     ) -> ZaloDirectResponse | str:
-        """Handle one camera selection reply from Zalo."""
+        """Handle one or more camera selections from Zalo."""
         normalized = normalize_text(context.text)
         cancel_phrases = {
             "khong",
@@ -1700,7 +1849,7 @@ class ConversationalAssistantManager(NoteManagerMixin):
         selected = parse_target_selection(
             context.text, [camera.display_name for camera in pending.cameras]
         )
-        if len(selected) != 1:
+        if not selected:
             pending.expires_at = dt_util.now() + timedelta(
                 minutes=PENDING_SELECTION_TIMEOUT_MINUTES
             )
@@ -1708,21 +1857,34 @@ class ConversationalAssistantManager(NoteManagerMixin):
                 pending.cameras, invalid=True
             )
 
-        camera = pending.cameras[selected[0]]
-        if not camera.available:
+        cameras = [pending.cameras[index] for index in selected]
+        unavailable = [
+            camera.display_name for camera in cameras if not camera.available
+        ]
+        available = [camera for camera in cameras if camera.available]
+        if not available:
             pending.expires_at = dt_util.now() + timedelta(
                 minutes=PENDING_SELECTION_TIMEOUT_MINUTES
             )
             return (
-                f"Camera {camera.display_name} hiện không khả dụng. "
-                "Hãy chọn camera khác.\n"
+                "Các camera đã chọn hiện không khả dụng: "
+                + ", ".join(unavailable)
+                + ". Hãy chọn camera khác.\n"
                 + self._camera_selection_prompt(pending.cameras)
             )
 
         self._zalo_pending_cameras.pop(context.owner_key, None)
-        return await self._async_capture_camera_to_zalo(
-            context, camera, service_context
+        result = await self._async_capture_cameras_to_zalo(
+            context, available, service_context
         )
+        if unavailable and isinstance(result, ZaloDirectResponse):
+            await self._async_send_zalo_webhook_reply(
+                context,
+                "Đã bỏ qua camera không khả dụng: "
+                + ", ".join(unavailable)
+                + ".",
+            )
+        return result
 
     def _clear_zalo_pending_for_owner(self, owner_key: str) -> None:
         """Cancel unfinished Zalo flows when a new explicit command arrives."""
@@ -2021,29 +2183,44 @@ class ConversationalAssistantManager(NoteManagerMixin):
         if self._is_duplicate_zalo_message(context.message_id):
             return {"ok": True, "handled": False, "reason": "duplicate"}
 
-        reply = await self._async_process_zalo_message(
-            context, service_context
+        # Start typing immediately and keep refreshing it for every Zalo
+        # feature until its final text/image response has actually been sent.
+        await self._async_send_zalo_typing_event(context, service_context)
+        typing_stop = asyncio.Event()
+        typing_task = self.hass.async_create_task(
+            self._async_keep_zalo_typing_active(
+                context, service_context, typing_stop
+            )
         )
-        if isinstance(reply, ZaloDirectResponse):
+        try:
+            reply = await self._async_process_zalo_message(
+                context, service_context
+            )
+            if isinstance(reply, ZaloDirectResponse):
+                return {
+                    "ok": True,
+                    "handled": True,
+                    "reply_sent": reply.sent,
+                    "response_type": reply.response_type,
+                }
+            if reply is None:
+                return {
+                    "ok": True,
+                    "handled": False,
+                    "reason": "not_a_command",
+                }
+
+            reply_sent = await self._async_send_zalo_webhook_reply(
+                context, reply
+            )
             return {
                 "ok": True,
                 "handled": True,
-                "reply_sent": reply.sent,
-                "response_type": reply.response_type,
+                "reply_sent": reply_sent,
             }
-        if reply is None:
-            return {
-                "ok": True,
-                "handled": False,
-                "reason": "not_a_command",
-            }
-
-        reply_sent = await self._async_send_zalo_webhook_reply(context, reply)
-        return {
-            "ok": True,
-            "handled": True,
-            "reply_sent": reply_sent,
-        }
+        finally:
+            typing_stop.set()
+            await typing_task
 
     def _discovered_mobile_targets(self) -> list[NotificationTarget]:
         """Auto-discover Mobile App devices lazily with a short cache."""
@@ -2361,6 +2538,11 @@ class ConversationalAssistantManager(NoteManagerMixin):
                 _LOGGER.error("Skipping invalid stored Zalo target: %s", target)
                 continue
             try:
+                # Scheduled reminders are also Zalo features, so briefly show
+                # typing before delivering the reminder to each destination.
+                await self._async_send_zalo_typing_to_target(
+                    thread_id, account_selection
+                )
                 await self.hass.services.async_call(
                     ZALO_DOMAIN,
                     ZALO_SERVICE_SEND_MESSAGE,

@@ -84,9 +84,12 @@ def parse_target_selection(selection: str, target_names: list[str]) -> list[int]
     ):
         return list(range(len(target_names)))
 
-    # Match explicit destination names first. Remove matched aliases before
-    # parsing digits so a device name such as "Khai Turbo 4 Pro" does not
-    # accidentally select global option 4 as well.
+    # Match explicit destination names first. Evaluate aliases globally from
+    # longest to shortest so overlapping names such as "Camera 1" and
+    # "Camera 10" resolve to the intended destination. Remove matched aliases
+    # before parsing digits so numbers inside device names are not interpreted
+    # again as global option numbers.
+    aliases_by_length: list[tuple[str, int]] = []
     for index, name in enumerate(target_names):
         normalized_name = normalize_text(name)
         aliases = {normalized_name}
@@ -98,11 +101,20 @@ def parse_target_selection(selection: str, target_names: list[str]) -> list[int]
         ):
             if normalized_name.startswith(prefix):
                 aliases.add(normalized_name[len(prefix) :])
-        for alias in sorted(aliases, key=len, reverse=True):
-            if alias and alias in remaining:
-                selected.add(index)
-                remaining = remaining.replace(alias, " ")
-                break
+        aliases_by_length.extend(
+            (alias, index) for alias in aliases if alias
+        )
+
+    padded_remaining = f" {remaining} "
+    for alias, index in sorted(
+        aliases_by_length, key=lambda item: len(item[0]), reverse=True
+    ):
+        padded_alias = f" {alias} "
+        if padded_alias not in padded_remaining:
+            continue
+        selected.add(index)
+        padded_remaining = padded_remaining.replace(padded_alias, " ")
+    remaining = padded_remaining.strip()
 
     remaining = re.sub(r"\s+", " ", remaining).strip()
     for match in re.finditer(r"(?<!\d)\d+(?!\d)", remaining):
