@@ -50,6 +50,7 @@ ATTR_CONFIG_ENTRY_ID = "config_entry_id"
 
 ZALO_DOMAIN = "zalo_bot"
 ZALO_SERVICE_SEND_MESSAGE = "send_message"
+ZALO_SERVICE_SEND_IMAGE = "send_image"
 ZALO_TYPE_USER = "0"
 ZALO_TYPE_GROUP = "1"
 

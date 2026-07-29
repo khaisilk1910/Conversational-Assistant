@@ -39,6 +39,9 @@ def explicit_home_assistant_request_kind(text: str) -> str | None:
     if not normalized:
         return None
 
+    if _is_camera_image_request(normalized):
+        return "camera"
+
     if _is_calendar_query(normalized):
         return "calendar"
 
@@ -243,6 +246,51 @@ def format_calendar_events(
     if remaining > 0:
         lines.append(f"Còn {remaining} sự kiện khác.")
     return "\n".join(lines)
+
+
+def _is_camera_image_request(normalized: str) -> bool:
+    """Return whether a Zalo message requests a still image from a camera."""
+    if not normalized:
+        return False
+
+    direct_image_prefixes = (
+        "chup anh",
+        "chup hinh",
+        "lay anh",
+        "lay hinh",
+        "gui anh",
+        "gui hinh",
+    )
+    if normalized.startswith(direct_image_prefixes):
+        return True
+
+    mentions_camera = (
+        normalized == "camera"
+        or "camera" in normalized
+        or "may quay" in normalized
+        or normalized.startswith("cam ")
+    )
+    if not mentions_camera:
+        return False
+
+    image_phrases = (
+        "chup anh",
+        "chup hinh",
+        "lay anh",
+        "lay hinh",
+        "xem anh",
+        "xem hinh",
+        "gui anh",
+        "gui hinh",
+        "anh camera",
+        "hinh camera",
+        "kiem tra camera",
+        "xem camera",
+        "mo camera",
+    )
+    return normalized == "camera" or any(
+        phrase in normalized for phrase in image_phrases
+    )
 
 
 def _is_calendar_query(normalized: str) -> bool:

@@ -9,6 +9,7 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 import logging
+import os
 import re
 from typing import Any
 import unicodedata
@@ -86,6 +87,7 @@ from .const import (
     TTS_DOMAIN,
     TTS_SERVICE_SPEAK,
     ZALO_DOMAIN,
+    ZALO_SERVICE_SEND_IMAGE,
     ZALO_SERVICE_SEND_MESSAGE,
     ZALO_TYPE_GROUP,
     ZALO_TYPE_USER,
@@ -167,6 +169,31 @@ class PendingZaloReminder:
     expires_at: datetime
 
 
+@dataclass(slots=True, frozen=True)
+class CameraTarget:
+    """One camera entity selectable from a Zalo conversation."""
+
+    entity_id: str
+    display_name: str
+    available: bool
+
+
+@dataclass(slots=True)
+class PendingZaloCamera:
+    """Camera list waiting for a selection in one Zalo chat."""
+
+    cameras: list[CameraTarget]
+    expires_at: datetime
+
+
+@dataclass(slots=True, frozen=True)
+class ZaloDirectResponse:
+    """A response already delivered directly without a text reply."""
+
+    sent: bool
+    response_type: str
+
+
 @dataclass(slots=True)
 class ZaloWebhookContext:
     """Normalized data needed to process one incoming Zalo message."""
@@ -234,6 +261,15 @@ def _next_recurrence(reminder: Reminder, previous: datetime) -> datetime | None:
     return None
 
 
+def _prepare_camera_snapshot_path(filename: str) -> None:
+    """Create the snapshot directory and remove any previous image."""
+    os.makedirs(os.path.dirname(filename), mode=0o755, exist_ok=True)
+    try:
+        os.remove(filename)
+    except FileNotFoundError:
+        pass
+
+
 def _sanitize_spoken_text(value: str) -> str:
     """Return TTS-friendly text without markup, emoji, or punctuation."""
     normalized = unicodedata.normalize("NFC", value.strip())
@@ -262,6 +298,7 @@ class ConversationalAssistantManager(NoteManagerMixin):
         self._pending_deletions: dict[str, PendingDeletion] = {}
         self._zalo_pending_creations: dict[str, PendingZaloReminder] = {}
         self._zalo_pending_deletions: dict[str, PendingZaloDeletion] = {}
+        self._zalo_pending_cameras: dict[str, PendingZaloCamera] = {}
         self._zalo_seen_message_ids: deque[str] = deque()
         self._zalo_seen_message_id_set: set[str] = set()
         self._zalo_ha_conversation_ids: dict[str, str] = {}
@@ -475,6 +512,7 @@ class ConversationalAssistantManager(NoteManagerMixin):
         self._pending_deletions.clear()
         self._zalo_pending_creations.clear()
         self._zalo_pending_deletions.clear()
+        self._zalo_pending_cameras.clear()
         self._clear_all_note_pending()
         await self._store.async_save(self._serialize())
 
@@ -969,6 +1007,9 @@ class ConversationalAssistantManager(NoteManagerMixin):
             "• Bật đèn phòng khách; tắt quạt tầng 2\n"
             "• Kiểm tra trạng thái phòng ngủ hoặc thiết bị đang bật\n"
             "• Thời tiết hôm nay; lịch ngày mai\n"
+            "Camera:\n"
+            "• Chụp ảnh camera; kiểm tra camera; lấy ảnh camera\n"
+            "• Chọn đúng số camera để nhận ảnh ngay trong Zalo\n"
             "Nhắc hẹn:\n"
             "• Nhắc tôi 30 phút nữa uống thuốc\n"
             "• Tạo nhắc hẹn 18h30 ngày mai đi tập thể dục\n"
@@ -1045,6 +1086,18 @@ class ConversationalAssistantManager(NoteManagerMixin):
             return None
         if pending.expires_at <= dt_util.now():
             self._zalo_pending_deletions.pop(owner_key, None)
+            return None
+        return pending
+
+    def _zalo_pending_camera(
+        self, owner_key: str
+    ) -> PendingZaloCamera | None:
+        """Return a non-expired camera selection for a Zalo chat."""
+        pending = self._zalo_pending_cameras.get(owner_key)
+        if pending is None:
+            return None
+        if pending.expires_at <= dt_util.now():
+            self._zalo_pending_cameras.pop(owner_key, None)
             return None
         return pending
 
@@ -1370,11 +1423,238 @@ class ConversationalAssistantManager(NoteManagerMixin):
             + "."
         )
 
+    def _discovered_camera_targets(self) -> list[CameraTarget]:
+        """Return every currently registered camera entity in Home Assistant."""
+        states = sorted(
+            self.hass.states.async_all("camera"),
+            key=lambda state: (
+                str(state.name or state.entity_id).casefold(),
+                state.entity_id,
+            ),
+        )
+        name_counts: dict[str, int] = {}
+        for state in states:
+            name = str(state.name or state.entity_id).strip()
+            key = normalize_text(name)
+            name_counts[key] = name_counts.get(key, 0) + 1
+
+        cameras: list[CameraTarget] = []
+        for state in states:
+            name = str(state.name or state.entity_id).strip()
+            if name_counts.get(normalize_text(name), 0) > 1:
+                name = f"{name} ({state.entity_id})"
+            available = state.state not in {STATE_UNAVAILABLE, STATE_UNKNOWN}
+            cameras.append(
+                CameraTarget(
+                    entity_id=state.entity_id,
+                    display_name=name,
+                    available=available,
+                )
+            )
+        return cameras
+
+    @staticmethod
+    def _camera_selection_prompt(
+        cameras: list[CameraTarget], invalid: bool = False
+    ) -> str:
+        """Build a numbered camera confirmation prompt for Zalo."""
+        lines = []
+        for index, camera in enumerate(cameras, start=1):
+            status = " — không khả dụng" if not camera.available else ""
+            lines.append(f"{index} - {camera.display_name}{status}")
+        prefix = (
+            "Lựa chọn chưa hợp lệ. Hãy chọn đúng một camera.\n"
+            if invalid
+            else "Các camera đang có trên Home Assistant:\n"
+        )
+        return (
+            f"{prefix}{chr(10).join(lines)}\n"
+            "Trả lời một số hoặc tên camera để xác nhận, ví dụ: 1. "
+            "Gửi 'không chụp' để hủy."
+        )
+
+    async def _async_camera_from_zalo(
+        self, context: ZaloWebhookContext
+    ) -> str:
+        """Start camera selection for an image request from Zalo."""
+        self._clear_zalo_pending_for_owner(context.owner_key)
+        cameras = self._discovered_camera_targets()
+        if not cameras:
+            return (
+                "Chưa tìm thấy entity camera nào trên Home Assistant. "
+                "Hãy kiểm tra tích hợp camera đã được tải và entity camera "
+                "đang tồn tại."
+            )
+
+        self._zalo_pending_cameras[context.owner_key] = PendingZaloCamera(
+            cameras=cameras,
+            expires_at=dt_util.now()
+            + timedelta(minutes=PENDING_SELECTION_TIMEOUT_MINUTES),
+        )
+        return self._camera_selection_prompt(cameras)
+
+    @staticmethod
+    def _camera_snapshot_paths(
+        media_root: str, owner_key: str, entity_id: str
+    ) -> tuple[str, str]:
+        """Return filesystem and /media paths for a stable camera snapshot."""
+        snapshot_id = uuid.uuid5(
+            uuid.NAMESPACE_URL,
+            f"conversational-assistant-camera:{owner_key}:{entity_id}",
+        ).hex
+        relative_path = os.path.join(
+            "conversational_assistant", f"camera_{snapshot_id}.jpg"
+        )
+        return (
+            os.path.join(media_root, relative_path),
+            "/media/" + relative_path.replace(os.sep, "/"),
+        )
+
+    async def _async_capture_camera_to_zalo(
+        self,
+        context: ZaloWebhookContext,
+        camera: CameraTarget,
+        service_context: Context | None,
+    ) -> ZaloDirectResponse | str:
+        """Capture one camera snapshot and send it to the originating Zalo chat."""
+        if not camera.available:
+            return (
+                f"Camera {camera.display_name} hiện không khả dụng. "
+                "Hãy kiểm tra kết nối camera rồi thử lại."
+            )
+        if not self.hass.services.has_service("camera", "snapshot"):
+            return "Action camera.snapshot chưa sẵn sàng trên Home Assistant."
+        if not self.hass.services.has_service(
+            ZALO_DOMAIN, ZALO_SERVICE_SEND_IMAGE
+        ):
+            return (
+                f"Action {ZALO_DOMAIN}.{ZALO_SERVICE_SEND_IMAGE} chưa sẵn sàng. "
+                "Hãy kiểm tra tích hợp zalo_bot."
+            )
+
+        account_selection = self._zalo_webhook_account_selection()
+        if not account_selection:
+            return (
+                "Chưa có tài khoản Zalo gửi ảnh. Hãy cấu hình tài khoản "
+                "phản hồi webhook trong Conversational Assistant."
+            )
+
+        media_root = self.hass.config.path("media")
+        filename, image_path = self._camera_snapshot_paths(
+            media_root, context.owner_key, camera.entity_id
+        )
+        await self.hass.async_add_executor_job(
+            _prepare_camera_snapshot_path, filename
+        )
+
+        try:
+            await self.hass.services.async_call(
+                "camera",
+                "snapshot",
+                {
+                    "entity_id": camera.entity_id,
+                    "filename": filename,
+                },
+                blocking=True,
+                context=service_context,
+            )
+        except Exception:  # noqa: BLE001 - return a useful Zalo error
+            _LOGGER.exception(
+                "Failed to capture snapshot from %s", camera.entity_id
+            )
+            return (
+                f"Không chụp được ảnh từ {camera.display_name}. "
+                "Hãy kiểm tra camera và quyền ghi thư mục /media."
+            )
+
+        snapshot_exists = await self.hass.async_add_executor_job(
+            os.path.isfile, filename
+        )
+        if not snapshot_exists:
+            return (
+                f"Camera {camera.display_name} không tạo được file ảnh. "
+                "Hãy kiểm tra hỗ trợ snapshot và quyền ghi thư mục /media."
+            )
+
+        try:
+            await self.hass.services.async_call(
+                ZALO_DOMAIN,
+                ZALO_SERVICE_SEND_IMAGE,
+                {
+                    "type": context.thread_type,
+                    "ttl": 0,
+                    "image_path": image_path,
+                    "message": f"Đã chụp ảnh {camera.display_name}",
+                    "thread_id": context.thread_id,
+                    "account_selection": account_selection,
+                },
+                blocking=True,
+                context=service_context,
+            )
+        except Exception:  # noqa: BLE001 - return a useful Zalo error
+            _LOGGER.exception(
+                "Failed sending camera snapshot to Zalo thread %s",
+                context.thread_id,
+            )
+            return (
+                f"Đã chụp ảnh {camera.display_name} nhưng không gửi được "
+                "lên Zalo. Hãy kiểm tra action zalo_bot.send_image."
+            )
+        return ZaloDirectResponse(sent=True, response_type="image")
+
+    async def _async_zalo_pending_camera_reply(
+        self,
+        context: ZaloWebhookContext,
+        pending: PendingZaloCamera,
+        service_context: Context | None,
+    ) -> ZaloDirectResponse | str:
+        """Handle one camera selection reply from Zalo."""
+        normalized = normalize_text(context.text)
+        cancel_phrases = {
+            "khong",
+            "huy",
+            "bo qua",
+            "khong chup",
+            "khong chup anh",
+            "khong lay anh",
+        }
+        if normalized in cancel_phrases:
+            self._zalo_pending_cameras.pop(context.owner_key, None)
+            return "Đã hủy yêu cầu chụp ảnh camera."
+
+        selected = parse_target_selection(
+            context.text, [camera.display_name for camera in pending.cameras]
+        )
+        if len(selected) != 1:
+            pending.expires_at = dt_util.now() + timedelta(
+                minutes=PENDING_SELECTION_TIMEOUT_MINUTES
+            )
+            return self._camera_selection_prompt(
+                pending.cameras, invalid=True
+            )
+
+        camera = pending.cameras[selected[0]]
+        if not camera.available:
+            pending.expires_at = dt_util.now() + timedelta(
+                minutes=PENDING_SELECTION_TIMEOUT_MINUTES
+            )
+            return (
+                f"Camera {camera.display_name} hiện không khả dụng. "
+                "Hãy chọn camera khác.\n"
+                + self._camera_selection_prompt(pending.cameras)
+            )
+
+        self._zalo_pending_cameras.pop(context.owner_key, None)
+        return await self._async_capture_camera_to_zalo(
+            context, camera, service_context
+        )
+
     def _clear_zalo_pending_for_owner(self, owner_key: str) -> None:
         """Cancel unfinished Zalo flows when a new explicit command arrives."""
         self._zalo_pending_notes.pop(owner_key, None)
         self._zalo_pending_creations.pop(owner_key, None)
         self._zalo_pending_deletions.pop(owner_key, None)
+        self._zalo_pending_cameras.pop(owner_key, None)
 
     @staticmethod
     def _conversation_reply_text(result: Any) -> str:
@@ -1538,6 +1818,8 @@ class ConversationalAssistantManager(NoteManagerMixin):
     ) -> str:
         """Process one calendar or Conversation command from Zalo."""
         self._clear_zalo_pending_for_owner(context.owner_key)
+        if request_kind == "camera":
+            return await self._async_camera_from_zalo(context)
         if request_kind == "calendar":
             return await self._async_calendar_from_zalo(
                 context, service_context
@@ -1550,7 +1832,7 @@ class ConversationalAssistantManager(NoteManagerMixin):
         self,
         context: ZaloWebhookContext,
         service_context: Context | None = None,
-    ) -> str | None:
+    ) -> str | ZaloDirectResponse | None:
         """Route one inbound Zalo text message to reminder actions."""
         command = self._zalo_command_kind(context.text)
         explicit_ha_kind = (
@@ -1561,6 +1843,15 @@ class ConversationalAssistantManager(NoteManagerMixin):
         pending_note = self._zalo_pending_note(context.owner_key)
         pending_creation = self._zalo_pending_creation(context.owner_key)
         pending_deletion = self._zalo_pending_deletion(context.owner_key)
+        pending_camera = self._zalo_pending_camera(context.owner_key)
+        if (
+            pending_camera is not None
+            and command is None
+            and explicit_ha_kind in {None, "camera"}
+        ):
+            return await self._async_zalo_pending_camera_reply(
+                context, pending_camera, service_context
+            )
         if (
             pending_note is not None
             and command is None
@@ -1589,6 +1880,7 @@ class ConversationalAssistantManager(NoteManagerMixin):
         if command and command.startswith("note_"):
             self._zalo_pending_creations.pop(context.owner_key, None)
             self._zalo_pending_deletions.pop(context.owner_key, None)
+            self._zalo_pending_cameras.pop(context.owner_key, None)
             return await self._async_process_note_zalo_command(
                 context, command
             )
@@ -1596,16 +1888,20 @@ class ConversationalAssistantManager(NoteManagerMixin):
             self._zalo_pending_notes.pop(context.owner_key, None)
             self._zalo_pending_creations.pop(context.owner_key, None)
             self._zalo_pending_deletions.pop(context.owner_key, None)
+            self._zalo_pending_cameras.pop(context.owner_key, None)
             return await self._async_create_from_zalo(context)
         if command == "list":
             self._zalo_pending_notes.pop(context.owner_key, None)
+            self._zalo_pending_cameras.pop(context.owner_key, None)
             return await self._async_list_from_zalo(context)
         if command == "delete":
             self._zalo_pending_notes.pop(context.owner_key, None)
             self._zalo_pending_creations.pop(context.owner_key, None)
+            self._zalo_pending_cameras.pop(context.owner_key, None)
             return await self._async_delete_from_zalo(context)
         if command == "help":
             self._zalo_pending_notes.pop(context.owner_key, None)
+            self._zalo_pending_cameras.pop(context.owner_key, None)
             return self._zalo_help_text()
 
         if explicit_ha_kind is not None:
@@ -1653,6 +1949,13 @@ class ConversationalAssistantManager(NoteManagerMixin):
         reply = await self._async_process_zalo_message(
             context, service_context
         )
+        if isinstance(reply, ZaloDirectResponse):
+            return {
+                "ok": True,
+                "handled": True,
+                "reply_sent": reply.sent,
+                "response_type": reply.response_type,
+            }
         if reply is None:
             return {
                 "ok": True,
