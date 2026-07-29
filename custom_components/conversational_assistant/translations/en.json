@@ -21,7 +21,7 @@
           "speaker_enabled": "Compatible media_player entities are scanned automatically whenever a reminder is created.",
           "tts_entity_id": "Optional. If left unset, Conversational Assistant automatically uses the first available TTS entity.",
           "zalo_webhook_enabled": "Does not create a new endpoint. Your existing webhook or automation calls conversational_assistant.process_zalo_webhook and passes its JSON body in the payload field.",
-          "zalo_webhook_bot_account_id": "Used with isSelf and uidFrom to ignore messages sent by the bot itself.",
+          "zalo_webhook_bot_account_id": "Required when Zalo webhook processing is enabled. Enter the bot account ID from your own Zalo webhook payload; it is used with isSelf and uidFrom to ignore messages sent by the bot itself.",
           "zalo_webhook_account_selection": "The account selector expected by zalo_bot.send_message, usually the bot phone number. If empty, the first configured Zalo destination account is used.",
           "zalo_home_assistant_enabled": "Routes device control, state, room, area, floor, weather, and calendar requests from Zalo into Home Assistant. Only entities exposed to Assist can be used.",
           "zalo_conversation_agent_id": "Choose the Home Assistant or custom Conversation agent that should interpret Zalo commands. Home Assistant Assist exposure settings are still enforced for calendars and built-in controls."
@@ -64,7 +64,7 @@
           "speaker_enabled": "Conversational Assistant automatically scans media players that support play_media and excludes unavailable TVs and projectors.",
           "tts_entity_id": "If no engine is selected, the first available TTS entity is used automatically.",
           "zalo_webhook_enabled": "Does not create a new endpoint. Your existing webhook or automation calls conversational_assistant.process_zalo_webhook and passes its JSON body in the payload field.",
-          "zalo_webhook_bot_account_id": "Used with isSelf and uidFrom to ignore messages sent by the bot itself.",
+          "zalo_webhook_bot_account_id": "Required when Zalo webhook processing is enabled. Enter the bot account ID from your own Zalo webhook payload; it is used with isSelf and uidFrom to ignore messages sent by the bot itself.",
           "zalo_webhook_account_selection": "The account selector expected by zalo_bot.send_message, usually the bot phone number. If empty, the first configured Zalo destination account is used.",
           "zalo_home_assistant_enabled": "Routes device control, state, room, area, floor, weather, and calendar requests from Zalo into Home Assistant. Only entities exposed to Assist can be used.",
           "zalo_conversation_agent_id": "Choose the Home Assistant or custom Conversation agent that should interpret Zalo commands. Home Assistant Assist exposure settings are still enforced for calendars and built-in controls."

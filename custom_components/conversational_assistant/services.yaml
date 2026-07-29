@@ -5,12 +5,12 @@ process_zalo_webhook:
       example:
         type: 1
         data:
-          msgId: "8092589555886"
-          uidFrom: "2036121378794772276"
+          msgId: "message_id"
+          uidFrom: "sender_zalo_id"
           content: "Bật đèn phòng khách"
-        threadId: "8606394172334558469"
+        threadId: "group_or_user_thread_id"
         isSelf: false
-        _accountId: "781454039143291053"
+        _accountId: "bot_zalo_account_id"
       selector:
         object:
     config_entry_id:

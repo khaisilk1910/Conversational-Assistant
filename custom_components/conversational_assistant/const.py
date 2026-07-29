@@ -37,7 +37,9 @@ DEFAULT_ZALO_ENABLED = False
 DEFAULT_ZALO_TYPE = "1"
 DEFAULT_SPEAKER_ENABLED = True
 DEFAULT_ZALO_WEBHOOK_ENABLED = True
-DEFAULT_ZALO_WEBHOOK_BOT_ACCOUNT_ID = "781454039143291053"
+# Deliberately blank. Each installation must provide its own Zalo bot
+# account ID instead of inheriting a developer-specific value.
+DEFAULT_ZALO_WEBHOOK_BOT_ACCOUNT_ID = ""
 DEFAULT_ZALO_HOME_ASSISTANT_ENABLED = True
 DEFAULT_ZALO_CONVERSATION_AGENT_ID = "conversation.home_assistant"
 

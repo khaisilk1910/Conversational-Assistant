@@ -21,7 +21,7 @@
           "speaker_enabled": "Các media_player tương thích được quét tự động mỗi khi tạo nhắc nhở.",
           "tts_entity_id": "Không bắt buộc. Nếu để trống, Conversational Assistant tự dùng TTS entity đầu tiên đang có.",
           "zalo_webhook_enabled": "Không tạo endpoint mới. Webhook hoặc automation hiện có gọi action conversational_assistant.process_zalo_webhook và truyền payload JSON vào trường payload.",
-          "zalo_webhook_bot_account_id": "Kết hợp với isSelf và uidFrom để bỏ qua tin nhắn do chính bot gửi.",
+          "zalo_webhook_bot_account_id": "Bắt buộc khi bật xử lý webhook Zalo. Hãy nhập ID tài khoản bot từ payload webhook Zalo của chính bạn; giá trị này được kết hợp với isSelf và uidFrom để bỏ qua tin nhắn do bot gửi.",
           "zalo_webhook_account_selection": "Giá trị account_selection của dịch vụ zalo_bot.send_message, thường là số điện thoại bot. Nếu để trống, integration dùng tài khoản của nơi nhận Zalo đầu tiên đã cấu hình.",
           "zalo_home_assistant_enabled": "Chuyển các yêu cầu điều khiển thiết bị, trạng thái, phòng, khu vực, sàn, thời tiết và lịch từ Zalo vào Home Assistant. Chỉ các entity đã expose cho Assist mới có thể sử dụng.",
           "zalo_conversation_agent_id": "Chọn Home Assistant hoặc Conversation agent tùy chỉnh để hiểu lệnh Zalo. Cấu hình expose của Assist vẫn được áp dụng cho lịch và các điều khiển tích hợp sẵn."
@@ -64,7 +64,7 @@
           "speaker_enabled": "Conversational Assistant tự quét media_player hỗ trợ play_media và bỏ qua TV, máy chiếu hoặc thiết bị đang unavailable.",
           "tts_entity_id": "Nếu không chọn, integration tự dùng TTS entity đầu tiên đang có.",
           "zalo_webhook_enabled": "Không tạo endpoint mới. Webhook hoặc automation hiện có gọi action conversational_assistant.process_zalo_webhook và truyền payload JSON vào trường payload.",
-          "zalo_webhook_bot_account_id": "Kết hợp với isSelf và uidFrom để bỏ qua tin nhắn do chính bot gửi.",
+          "zalo_webhook_bot_account_id": "Bắt buộc khi bật xử lý webhook Zalo. Hãy nhập ID tài khoản bot từ payload webhook Zalo của chính bạn; giá trị này được kết hợp với isSelf và uidFrom để bỏ qua tin nhắn do bot gửi.",
           "zalo_webhook_account_selection": "Giá trị account_selection của dịch vụ zalo_bot.send_message, thường là số điện thoại bot. Nếu để trống, integration dùng tài khoản của nơi nhận Zalo đầu tiên đã cấu hình.",
           "zalo_home_assistant_enabled": "Chuyển các yêu cầu điều khiển thiết bị, trạng thái, phòng, khu vực, sàn, thời tiết và lịch từ Zalo vào Home Assistant. Chỉ các entity đã expose cho Assist mới có thể sử dụng.",
           "zalo_conversation_agent_id": "Chọn Home Assistant hoặc Conversation agent tùy chỉnh để hiểu lệnh Zalo. Cấu hình expose của Assist vẫn được áp dụng cho lịch và các điều khiển tích hợp sẵn."

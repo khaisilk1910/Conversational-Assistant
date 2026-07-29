@@ -116,6 +116,33 @@ def _general_schema(
     return vol.Schema(fields)
 
 
+def _validate_general(user_input: dict[str, Any]) -> dict[str, str]:
+    """Validate general configuration values."""
+    errors: dict[str, str] = {}
+    if bool(
+        user_input.get(
+            CONF_ZALO_WEBHOOK_ENABLED,
+            DEFAULT_ZALO_WEBHOOK_ENABLED,
+        )
+    ) and not str(
+        user_input.get(CONF_ZALO_WEBHOOK_BOT_ACCOUNT_ID, "") or ""
+    ).strip():
+        errors[CONF_ZALO_WEBHOOK_BOT_ACCOUNT_ID] = "required"
+    return errors
+
+
+def _normalize_general(user_input: dict[str, Any]) -> dict[str, Any]:
+    """Normalize text values before storing general configuration."""
+    normalized = dict(user_input)
+    normalized[CONF_ZALO_WEBHOOK_BOT_ACCOUNT_ID] = str(
+        normalized.get(CONF_ZALO_WEBHOOK_BOT_ACCOUNT_ID, "") or ""
+    ).strip()
+    normalized[CONF_ZALO_WEBHOOK_ACCOUNT_SELECTION] = str(
+        normalized.get(CONF_ZALO_WEBHOOK_ACCOUNT_SELECTION, "") or ""
+    ).strip()
+    return normalized
+
+
 def _first_tts_entity_id(hass) -> str | None:
     """Return the first currently registered TTS entity, if any."""
     entity_ids = sorted(state.entity_id for state in hass.states.async_all("tts"))
@@ -206,25 +233,73 @@ class ConversationalAssistantConfigFlow(config_entries.ConfigFlow, domain=DOMAIN
         if self._async_current_entries():
             return self.async_abort(reason="single_instance_allowed")
 
+        errors: dict[str, str] = {}
         if user_input is not None:
-            return self.async_create_entry(
-                title=INTEGRATION_NAME,
-                data=user_input,
-            )
+            user_input = _normalize_general(user_input)
+            errors = _validate_general(user_input)
+            if not errors:
+                return self.async_create_entry(
+                    title=INTEGRATION_NAME,
+                    data=user_input,
+                )
+
+        values = user_input or {}
 
         return self.async_show_form(
             step_id="user",
             data_schema=_general_schema(
-                DEFAULT_DISMISS_ON_CLEAR,
-                DEFAULT_CONFIRM_TARGETS,
-                DEFAULT_SPEAKER_ENABLED,
-                _first_tts_entity_id(self.hass),
-                DEFAULT_ZALO_WEBHOOK_ENABLED,
-                DEFAULT_ZALO_WEBHOOK_BOT_ACCOUNT_ID,
-                "",
-                DEFAULT_ZALO_HOME_ASSISTANT_ENABLED,
-                DEFAULT_ZALO_CONVERSATION_AGENT_ID,
+                bool(
+                    values.get(
+                        CONF_DISMISS_ON_CLEAR,
+                        DEFAULT_DISMISS_ON_CLEAR,
+                    )
+                ),
+                bool(
+                    values.get(
+                        CONF_CONFIRM_TARGETS,
+                        DEFAULT_CONFIRM_TARGETS,
+                    )
+                ),
+                bool(
+                    values.get(
+                        CONF_SPEAKER_ENABLED,
+                        DEFAULT_SPEAKER_ENABLED,
+                    )
+                ),
+                str(values.get(CONF_TTS_ENTITY_ID) or "").strip()
+                or _first_tts_entity_id(self.hass),
+                bool(
+                    values.get(
+                        CONF_ZALO_WEBHOOK_ENABLED,
+                        DEFAULT_ZALO_WEBHOOK_ENABLED,
+                    )
+                ),
+                str(
+                    values.get(
+                        CONF_ZALO_WEBHOOK_BOT_ACCOUNT_ID,
+                        DEFAULT_ZALO_WEBHOOK_BOT_ACCOUNT_ID,
+                    )
+                    or ""
+                ).strip(),
+                str(
+                    values.get(CONF_ZALO_WEBHOOK_ACCOUNT_SELECTION, "")
+                    or ""
+                ).strip(),
+                bool(
+                    values.get(
+                        CONF_ZALO_HOME_ASSISTANT_ENABLED,
+                        DEFAULT_ZALO_HOME_ASSISTANT_ENABLED,
+                    )
+                ),
+                str(
+                    values.get(
+                        CONF_ZALO_CONVERSATION_AGENT_ID,
+                        DEFAULT_ZALO_CONVERSATION_AGENT_ID,
+                    )
+                    or DEFAULT_ZALO_CONVERSATION_AGENT_ID
+                ).strip(),
             ),
+            errors=errors,
         )
 
     @staticmethod
@@ -379,61 +454,68 @@ class ConversationalAssistantOptionsFlow(config_entries.OptionsFlow):
     ) -> ConfigFlowResult:
         """Edit general discovery and voice-confirmation settings."""
         options = self._ensure_options()
+        errors: dict[str, str] = {}
         if user_input is not None:
-            options.update(user_input)
-            if CONF_TTS_ENTITY_ID not in user_input:
-                options.pop(CONF_TTS_ENTITY_ID, None)
-            return await self.async_step_init()
+            user_input = _normalize_general(user_input)
+            errors = _validate_general(user_input)
+            if not errors:
+                options.update(user_input)
+                if CONF_TTS_ENTITY_ID not in user_input:
+                    options.pop(CONF_TTS_ENTITY_ID, None)
+                return await self.async_step_init()
+
+        values = user_input or options
 
         return self.async_show_form(
             step_id="general",
             data_schema=_general_schema(
                 bool(
-                    options.get(
+                    values.get(
                         CONF_DISMISS_ON_CLEAR, DEFAULT_DISMISS_ON_CLEAR
                     )
                 ),
                 bool(
-                    options.get(CONF_CONFIRM_TARGETS, DEFAULT_CONFIRM_TARGETS)
+                    values.get(CONF_CONFIRM_TARGETS, DEFAULT_CONFIRM_TARGETS)
                 ),
                 bool(
-                    options.get(
+                    values.get(
                         CONF_SPEAKER_ENABLED, DEFAULT_SPEAKER_ENABLED
                     )
                 ),
-                str(options.get(CONF_TTS_ENTITY_ID) or "").strip()
+                str(values.get(CONF_TTS_ENTITY_ID) or "").strip()
                 or _first_tts_entity_id(self.hass),
                 bool(
-                    options.get(
+                    values.get(
                         CONF_ZALO_WEBHOOK_ENABLED,
                         DEFAULT_ZALO_WEBHOOK_ENABLED,
                     )
                 ),
                 str(
-                    options.get(
+                    values.get(
                         CONF_ZALO_WEBHOOK_BOT_ACCOUNT_ID,
                         DEFAULT_ZALO_WEBHOOK_BOT_ACCOUNT_ID,
                     )
                     or ""
                 ).strip(),
                 str(
-                    options.get(CONF_ZALO_WEBHOOK_ACCOUNT_SELECTION, "")
+                    values.get(CONF_ZALO_WEBHOOK_ACCOUNT_SELECTION, "")
                     or ""
                 ).strip(),
                 bool(
-                    options.get(
+                    values.get(
                         CONF_ZALO_HOME_ASSISTANT_ENABLED,
                         DEFAULT_ZALO_HOME_ASSISTANT_ENABLED,
                     )
                 ),
                 str(
-                    options.get(
+                    values.get(
                         CONF_ZALO_CONVERSATION_AGENT_ID,
                         DEFAULT_ZALO_CONVERSATION_AGENT_ID,
                     )
                     or DEFAULT_ZALO_CONVERSATION_AGENT_ID
                 ).strip(),
             ),
+            errors=errors,
         )
 
     async def async_step_add_zalo(
