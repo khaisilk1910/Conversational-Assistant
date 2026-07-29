@@ -1539,7 +1539,11 @@ class ConversationalAssistantManager(NoteManagerMixin):
                 "phản hồi webhook trong Conversational Assistant."
             )
 
-        media_root = self.hass.config.path("media")
+        # Home Assistant's shared media directory is exposed as /media on
+        # Home Assistant OS/Container. hass.config.path("media") would point to
+        # /config/media, which is a different directory and is not the path used
+        # by media-source or zalo_bot.send_image.
+        media_root = self.hass.config.media_dirs.get("local", "/media")
         filename, image_path = self._camera_snapshot_paths(
             media_root, context.owner_key, camera.entity_id
         )
