@@ -4,7 +4,7 @@
     "step": {
       "user": {
         "title": "Thiết lập Conversational Assistant",
-        "description": "Các thiết bị nhận thông báo Mobile App và loa được tự động quét. Sau khi thiết lập, mở Cấu hình để thêm một hoặc nhiều nơi nhận Zalo có tên riêng.",
+        "description": "Mobile App và loa chỉ được quét khi cần tạo danh sách nơi nhận, không quét trong lúc Home Assistant khởi động. Sau khi thiết lập, mở Cấu hình để thêm một hoặc nhiều nơi nhận Zalo có tên riêng.",
         "data": {
           "dismiss_on_clear": "Vuốt bỏ thông báo cũng được xem là Bỏ qua (chỉ Android)",
           "confirm_targets": "Hỏi nơi nhận và loa phát trước khi lưu từng nhắc nhở",
@@ -17,8 +17,8 @@
           "zalo_conversation_agent_id": "Conversation agent dùng cho Zalo"
         },
         "data_description": {
-          "confirm_targets": "Cả Voice Assist và lệnh Zalo sẽ liệt kê điện thoại, nơi nhận Zalo và loa đã tự quét, rồi chờ câu trả lời như: chọn 1 và 3.",
-          "speaker_enabled": "Các media_player tương thích được quét tự động mỗi khi tạo nhắc nhở.",
+          "confirm_targets": "Cả Voice Assist và lệnh Zalo sẽ quét theo yêu cầu rồi liệt kê điện thoại, nơi nhận Zalo và loa, sau đó chờ câu trả lời như: chọn 1 và 3.",
+          "speaker_enabled": "Các media_player tương thích chỉ được quét khi cần tạo danh sách nơi nhận và kết quả được cache ngắn.",
           "tts_entity_id": "Không bắt buộc. Nếu để trống, Conversational Assistant tự dùng TTS entity đầu tiên đang có.",
           "zalo_webhook_enabled": "Không tạo endpoint mới. Webhook hoặc automation hiện có gọi action conversational_assistant.process_zalo_webhook và truyền payload JSON vào trường payload.",
           "zalo_webhook_bot_account_id": "Bắt buộc khi bật xử lý webhook Zalo. Hãy nhập ID tài khoản bot từ payload webhook Zalo của chính bạn; giá trị này được kết hợp với isSelf và uidFrom để bỏ qua tin nhắn do bot gửi.",
@@ -36,9 +36,9 @@
     "step": {
       "init": {
         "title": "Tùy chọn Conversational Assistant",
-        "description": "Quản lý việc tự động quét điện thoại/loa và các nơi nhận Zalo. Hiện có {zalo_count} nơi nhận Zalo.",
+        "description": "Quản lý việc quét điện thoại/loa theo yêu cầu và các nơi nhận Zalo. Hiện có {zalo_count} nơi nhận Zalo.",
         "menu_options": {
-          "general": "Cài đặt chung và tự động quét thiết bị",
+          "general": "Cài đặt chung và quét thiết bị theo yêu cầu",
           "add_zalo": "Thêm nơi nhận Zalo",
           "edit_zalo_select": "Sửa nơi nhận Zalo",
           "delete_zalo": "Xóa nơi nhận Zalo",
@@ -47,7 +47,7 @@
       },
       "general": {
         "title": "Cài đặt chung",
-        "description": "Các thiết bị nhận thông báo Mobile App và loa tương thích được tự động quét, sau đó xuất hiện trong cùng danh sách lựa chọn với Zalo.",
+        "description": "Mobile App và loa tương thích được quét theo yêu cầu, có cache ngắn, rồi xuất hiện trong cùng danh sách lựa chọn với Zalo.",
         "data": {
           "dismiss_on_clear": "Vuốt bỏ thông báo cũng được xem là Bỏ qua (chỉ Android)",
           "confirm_targets": "Hỏi nơi nhận và loa phát trước khi lưu từng nhắc nhở",
@@ -61,7 +61,7 @@
         },
         "data_description": {
           "confirm_targets": "Khi bật, cả nhắc hẹn từ Voice Assist và Zalo chỉ được lưu sau khi bạn trả lời bằng số thứ tự hoặc tên nơi nhận.",
-          "speaker_enabled": "Conversational Assistant tự quét media_player hỗ trợ play_media và bỏ qua TV, máy chiếu hoặc thiết bị đang unavailable.",
+          "speaker_enabled": "Khi cần tạo danh sách nơi nhận, Conversational Assistant quét media_player hỗ trợ play_media, bỏ qua TV, máy chiếu hoặc thiết bị đang unavailable, rồi cache kết quả trong thời gian ngắn.",
           "tts_entity_id": "Nếu không chọn, integration tự dùng TTS entity đầu tiên đang có.",
           "zalo_webhook_enabled": "Không tạo endpoint mới. Webhook hoặc automation hiện có gọi action conversational_assistant.process_zalo_webhook và truyền payload JSON vào trường payload.",
           "zalo_webhook_bot_account_id": "Bắt buộc khi bật xử lý webhook Zalo. Hãy nhập ID tài khoản bot từ payload webhook Zalo của chính bạn; giá trị này được kết hợp với isSelf và uidFrom để bỏ qua tin nhắn do bot gửi.",
