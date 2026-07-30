@@ -4,7 +4,7 @@
 [![HACS](https://img.shields.io/badge/HACS-Custom-41BDF5.svg)](https://hacs.xyz/)
 [![Languages](https://img.shields.io/badge/ngôn%20ngữ-Tiếng%20Việt%20%7C%20English-red.svg)](#ngôn-ngữ)
 
-[**Tiếng Việt**](README.md) | [English](README_EN.md)
+[**Tiếng Việt**](README.md) | [English](Readme/README_EN.md)
 
 **Conversational Assistant** là custom integration cho Home Assistant, tập trung vào trải nghiệm điều khiển bằng ngôn ngữ tự nhiên qua **Home Assistant Assist** và **Zalo**.
 
