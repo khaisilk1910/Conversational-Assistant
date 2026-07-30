@@ -15,6 +15,7 @@ from homeassistant.helpers import selector
 
 from .const import (
     AI_TASK_DOMAIN,
+    CONF_AI_AGENT_FAILOVER_ENABLED,
     CONF_AI_IMAGE_TASK_ENTITY_ID,
     CONF_AI_SEARCH_AGENT_ID,
     CONF_CONFIRM_TARGETS,
@@ -34,6 +35,7 @@ from .const import (
     CONF_ZALO_WEBHOOK_ACCOUNT_SELECTION,
     CONF_ZALO_WEBHOOK_BOT_ACCOUNT_ID,
     CONF_ZALO_WEBHOOK_ENABLED,
+    DEFAULT_AI_AGENT_FAILOVER_ENABLED,
     DEFAULT_AI_IMAGE_TASK_ENTITY_ID,
     DEFAULT_AI_SEARCH_AGENT_ID,
     DEFAULT_CONFIRM_TARGETS,
@@ -114,9 +116,15 @@ def _ai_settings_schema(
     zalo_conversation_agent_id: str,
     ai_search_agent_id: str,
     ai_image_task_entity_id: str,
+    ai_agent_failover_enabled: bool,
 ) -> vol.Schema:
     """Build AI agent selectors."""
-    fields: dict[Any, Any] = {}
+    fields: dict[Any, Any] = {
+        vol.Optional(
+            CONF_AI_AGENT_FAILOVER_ENABLED,
+            default=ai_agent_failover_enabled,
+        ): selector.BooleanSelector(),
+    }
     conversation_selector = selector.ConversationAgentSelector(
         selector.ConversationAgentSelectorConfig(language="vi")
     )
@@ -201,6 +209,7 @@ def _initial_schema(
     zalo_conversation_agent_id: str,
     ai_search_agent_id: str,
     ai_image_task_entity_id: str,
+    ai_agent_failover_enabled: bool,
 ) -> vol.Schema:
     """Build the initial installation form with all setting groups."""
     return _merge_schemas(
@@ -215,6 +224,7 @@ def _initial_schema(
             zalo_conversation_agent_id,
             ai_search_agent_id,
             ai_image_task_entity_id,
+            ai_agent_failover_enabled,
         ),
         _tts_settings_schema(speaker_enabled, tts_entity_id),
     )
@@ -263,6 +273,12 @@ def _normalize_ai_settings(user_input: dict[str, Any]) -> dict[str, Any]:
     normalized[CONF_AI_IMAGE_TASK_ENTITY_ID] = str(
         normalized.get(CONF_AI_IMAGE_TASK_ENTITY_ID, "") or ""
     ).strip()
+    normalized[CONF_AI_AGENT_FAILOVER_ENABLED] = bool(
+        normalized.get(
+            CONF_AI_AGENT_FAILOVER_ENABLED,
+            DEFAULT_AI_AGENT_FAILOVER_ENABLED,
+        )
+    )
     return normalized
 
 
@@ -440,6 +456,12 @@ class ConversationalAssistantConfigFlow(config_entries.ConfigFlow, domain=DOMAIN
                     )
                     or ""
                 ).strip(),
+                bool(
+                    values.get(
+                        CONF_AI_AGENT_FAILOVER_ENABLED,
+                        DEFAULT_AI_AGENT_FAILOVER_ENABLED,
+                    )
+                ),
             ),
             errors=errors,
         )
@@ -566,6 +588,13 @@ class ConversationalAssistantOptionsFlow(config_entries.OptionsFlow):
             self.config_entry.data.get(
                 CONF_AI_IMAGE_TASK_ENTITY_ID,
                 DEFAULT_AI_IMAGE_TASK_ENTITY_ID,
+            ),
+        )
+        options.setdefault(
+            CONF_AI_AGENT_FAILOVER_ENABLED,
+            self.config_entry.data.get(
+                CONF_AI_AGENT_FAILOVER_ENABLED,
+                DEFAULT_AI_AGENT_FAILOVER_ENABLED,
             ),
         )
         if CONF_ZALO_TARGETS not in options:
@@ -724,6 +753,12 @@ class ConversationalAssistantOptionsFlow(config_entries.OptionsFlow):
                     )
                     or ""
                 ).strip(),
+                bool(
+                    values.get(
+                        CONF_AI_AGENT_FAILOVER_ENABLED,
+                        DEFAULT_AI_AGENT_FAILOVER_ENABLED,
+                    )
+                ),
             ),
         )
 

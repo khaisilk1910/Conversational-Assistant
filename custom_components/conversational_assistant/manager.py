@@ -55,6 +55,7 @@ from .const import (
     ASSIST_SATELLITE_DOMAIN,
     ASSIST_SATELLITE_SERVICE_ANNOUNCE,
     CAMERA_SENTENCES,
+    CONF_AI_AGENT_FAILOVER_ENABLED,
     CONF_AI_IMAGE_TASK_ENTITY_ID,
     CONF_AI_SEARCH_AGENT_ID,
     CANCEL_SENTENCES,
@@ -79,8 +80,9 @@ from .const import (
     CONF_ZALO_WEBHOOK_BOT_ACCOUNT_ID,
     CONF_ZALO_WEBHOOK_ENABLED,
     CREATE_SENTENCES,
-    DEFAULT_AI_SEARCH_AGENT_ID,
+    DEFAULT_AI_AGENT_FAILOVER_ENABLED,
     DEFAULT_AI_IMAGE_TASK_ENTITY_ID,
+    DEFAULT_AI_SEARCH_AGENT_ID,
     DEFAULT_CONFIRM_TARGETS,
     DEFAULT_DISMISS_ON_CLEAR,
     DEFAULT_SPEAKER_ENABLED,
@@ -112,6 +114,8 @@ from .const import (
     ZALO_SERVICE_SEND_IMAGES_TO_GROUP,
     ZALO_SERVICE_SEND_MESSAGE,
     ZALO_SERVICE_SEND_TYPING_EVENT,
+    ZALO_IMAGE_TIMEOUT_SECONDS,
+    ZALO_SEARCH_TIMEOUT_SECONDS,
     ZALO_TYPING_REFRESH_SECONDS,
     ZALO_TYPE_GROUP,
     ZALO_TYPE_USER,
@@ -566,6 +570,7 @@ class ConversationalAssistantManager(NoteManagerMixin):
         self._zalo_seen_message_id_set: set[str] = set()
         self._zalo_ha_conversation_ids: dict[str, str] = {}
         self._zalo_search_conversation_ids: dict[str, str] = {}
+        self._zalo_background_tasks: set[asyncio.Task[Any]] = set()
         self._store: Store[dict[str, Any]] = Store(
             hass,
             STORAGE_VERSION,
@@ -658,6 +663,232 @@ class ConversationalAssistantManager(NoteManagerMixin):
             )
             or ""
         ).strip()
+
+    @property
+    def ai_agent_failover_enabled(self) -> bool:
+        """Return whether failed AI requests rotate through available agents."""
+        return bool(
+            self._option(
+                CONF_AI_AGENT_FAILOVER_ENABLED,
+                DEFAULT_AI_AGENT_FAILOVER_ENABLED,
+            )
+        )
+
+    def _conversation_agent_display_name(self, agent_id: str) -> str:
+        """Return a stable, user-facing name for a Conversation agent."""
+        state = self.hass.states.get(agent_id)
+        if state is not None:
+            friendly_name = str(
+                state.attributes.get("friendly_name", "") or ""
+            ).strip()
+            if friendly_name:
+                return friendly_name
+
+        entry = self.hass.config_entries.async_get_entry(agent_id)
+        if entry is not None:
+            return str(entry.title or entry.domain or agent_id)
+
+        if agent_id == HOME_ASSISTANT_AGENT:
+            return "Home Assistant"
+        return agent_id
+
+    def _conversation_agent_candidates(
+        self, primary_agent_id: str
+    ) -> list[tuple[str, str]]:
+        """Return the configured agent first, then every available HA agent."""
+        agent_ids: list[str] = []
+
+        def add(agent_id: str | None) -> None:
+            normalized = str(agent_id or "").strip()
+            if normalized and normalized not in agent_ids:
+                agent_ids.append(normalized)
+
+        add(primary_agent_id)
+        if self.ai_agent_failover_enabled:
+            try:
+                agent_manager = get_agent_manager(self.hass)
+                infos = sorted(
+                    agent_manager.async_get_agent_info(),
+                    key=lambda item: (str(item.name).casefold(), str(item.id)),
+                )
+            except Exception:  # noqa: BLE001 - discovery must not break requests
+                _LOGGER.exception(
+                    "Failed listing Conversation agents for AI failover"
+                )
+                infos = []
+            for info in infos:
+                if str(info.id) != HOME_ASSISTANT_AGENT:
+                    add(str(info.id))
+
+            try:
+                states = sorted(
+                    self.hass.states.async_all("conversation"),
+                    key=lambda item: (
+                        str(
+                            item.attributes.get("friendly_name", "")
+                        ).casefold(),
+                        item.entity_id,
+                    ),
+                )
+            except Exception:  # noqa: BLE001 - keep the selected agent usable
+                _LOGGER.exception(
+                    "Failed listing Conversation entities for AI failover"
+                )
+                states = []
+            for state in states:
+                if (
+                    state.entity_id != HOME_ASSISTANT_AGENT
+                    and state.state != STATE_UNAVAILABLE
+                ):
+                    add(state.entity_id)
+            add(HOME_ASSISTANT_AGENT)
+
+        return [
+            (agent_id, self._conversation_agent_display_name(agent_id))
+            for agent_id in agent_ids
+        ]
+
+    def _ai_task_agent_display_name(self, entity_id: str) -> str:
+        """Return a stable, user-facing name for an AI Task entity."""
+        state = self.hass.states.get(entity_id)
+        if state is not None:
+            friendly_name = str(
+                state.attributes.get("friendly_name", "") or ""
+            ).strip()
+            if friendly_name:
+                return friendly_name
+        return entity_id
+
+    def _ai_image_agent_candidates(
+        self, primary_entity_id: str
+    ) -> list[tuple[str, str]]:
+        """Return the configured image agent first, then compatible AI Tasks."""
+        entity_ids: list[str] = []
+
+        def add(entity_id: str | None) -> None:
+            normalized = str(entity_id or "").strip()
+            if normalized and normalized not in entity_ids:
+                entity_ids.append(normalized)
+
+        add(primary_entity_id)
+        if self.ai_agent_failover_enabled:
+            states = sorted(
+                self.hass.states.async_all(AI_TASK_DOMAIN),
+                key=lambda item: (
+                    str(item.attributes.get("friendly_name", "")).casefold(),
+                    item.entity_id,
+                ),
+            )
+            for state in states:
+                if state.state == STATE_UNAVAILABLE:
+                    continue
+                raw_features = state.attributes.get(ATTR_SUPPORTED_FEATURES)
+                if raw_features is not None:
+                    try:
+                        if not (int(raw_features) & 4):
+                            continue
+                    except (TypeError, ValueError):
+                        _LOGGER.debug(
+                            "AI Task entity %s has invalid supported_features %r",
+                            state.entity_id,
+                            raw_features,
+                        )
+                add(state.entity_id)
+
+        return [
+            (entity_id, self._ai_task_agent_display_name(entity_id))
+            for entity_id in entity_ids
+        ]
+
+    @staticmethod
+    def _conversation_result_error_code(result: Any) -> str:
+        """Return a normalized error code from a Conversation result."""
+        response = getattr(result, "response", None)
+        raw_error_code = getattr(response, "error_code", "") or ""
+        return str(getattr(raw_error_code, "value", raw_error_code) or "").strip()
+
+    @staticmethod
+    def _ai_attempt_summary(
+        attempted_agents: list[str], *, language: str, zalo: bool
+    ) -> str:
+        """Describe a failover sequence without exposing provider errors."""
+        if len(attempted_agents) <= 1:
+            return ""
+        names = " → ".join(attempted_agents)
+        if language == "en":
+            summary = f"Tried {len(attempted_agents)} AI agents: {names}."
+            return f"🔄 **AI failover:** {summary}" if zalo else summary
+        summary = f"Đã thử {len(attempted_agents)} AI agent: {names}."
+        return f"🔄 **AI dự phòng:** {summary}" if zalo else summary
+
+    @classmethod
+    def _append_ai_attempt_summary(
+        cls,
+        text: str,
+        attempted_agents: list[str],
+        *,
+        language: str,
+        zalo: bool,
+    ) -> str:
+        """Append the failover summary only when more than one agent ran."""
+        summary = cls._ai_attempt_summary(
+            attempted_agents, language=language, zalo=zalo
+        )
+        if not summary:
+            return text
+        separator = "\n\n" if zalo else " "
+        return f"{text.rstrip()}{separator}{summary}"
+
+    async def _async_send_ai_failover_notice(
+        self,
+        context: ZaloWebhookContext | None,
+        _service_context: Context | None,
+        *,
+        feature: str,
+        failed_agent: str,
+        next_agent: str,
+        next_attempt: int,
+        total_attempts: int,
+        language: str,
+    ) -> None:
+        """Tell Zalo that the next agent receives a fresh timeout window."""
+        if context is None:
+            return
+        if language == "en":
+            feature_name = {
+                "image": "image generation",
+                "conversation": "conversation",
+            }.get(feature, "search")
+            message = (
+                f"🔄 **Switching AI for {feature_name}**\n\n"
+                f"Agent **{failed_agent}** did not complete the request. "
+                f"Trying agent **{next_attempt}/{total_attempts}: {next_agent}**. "
+                "**The waiting timer has restarted for this agent.**"
+            )
+        else:
+            feature_name = {
+                "image": "tạo ảnh",
+                "conversation": "hội thoại",
+            }.get(feature, "tìm kiếm")
+            message = (
+                f"🔄 **Đang chuyển AI dự phòng cho {feature_name}**\n\n"
+                f"Agent **{failed_agent}** chưa hoàn thành yêu cầu. "
+                f"Đang thử agent **{next_attempt}/{total_attempts}: {next_agent}**. "
+                "**Thời gian chờ đã được tính lại từ đầu cho agent này.**"
+            )
+        await self._async_send_zalo_webhook_reply(context, message)
+
+    def _ai_long_running_candidate_count(self, action: str) -> int:
+        """Return the current number of candidates for the safety timeout."""
+        if action == ACTION_IMAGE_GENERATION:
+            candidates = self._ai_image_agent_candidates(
+                self.ai_image_task_entity_id
+            )
+        else:
+            candidates = self._conversation_agent_candidates(
+                self.ai_search_agent_id
+            )
+        return max(1, len(candidates))
 
     def _raw_next_due(self) -> datetime | None:
         """Return the earliest stored due time, including overdue items."""
@@ -852,6 +1083,12 @@ class ConversationalAssistantManager(NoteManagerMixin):
         self._zalo_pending_cameras.clear()
         self._clear_discovery_caches()
         self._clear_all_note_pending()
+        background_tasks = tuple(self._zalo_background_tasks)
+        for task in background_tasks:
+            task.cancel()
+        if background_tasks:
+            await asyncio.gather(*background_tasks, return_exceptions=True)
+        self._zalo_background_tasks.clear()
         await self._store.async_save(self._serialize())
 
     @callback
@@ -2973,11 +3210,10 @@ class ConversationalAssistantManager(NoteManagerMixin):
         service_context: Context | None,
         zalo: bool,
         language_hint: str | None = None,
+        zalo_context: ZaloWebhookContext | None = None,
     ) -> tuple[str, str | None]:
-        """Run one Internet query through the selected Conversation agent."""
+        """Run one Internet query with per-agent timeout and automatic failover."""
         language = language_hint or _request_language(query)
-        if not self.ai_search_agent_id:
-            return self._search_unavailable_text(language, zalo=zalo), None
         if not query.strip():
             prompt = (
                 "Please tell me what you want to search for."
@@ -2993,57 +3229,122 @@ class ConversationalAssistantManager(NoteManagerMixin):
                     "Add your topic after **Search for**."
                 )
             return prompt, None
-        try:
-            result = await async_converse(
-                hass=self.hass,
-                text=self._search_prompt(query, zalo=zalo, language=language),
-                conversation_id=conversation_id,
-                context=service_context or Context(),
-                language=language,
-                agent_id=self.ai_search_agent_id,
-            )
-        except Exception:  # noqa: BLE001 - always return a user-facing reply
-            _LOGGER.exception(
-                "AI Search agent %s failed for query %s",
-                self.ai_search_agent_id,
-                query,
-            )
+
+        candidates = self._conversation_agent_candidates(self.ai_search_agent_id)
+        if not candidates:
+            return self._search_unavailable_text(language, zalo=zalo), None
+
+        attempted_agents: list[str] = []
+        had_empty_response = False
+        primary_agent_id = self.ai_search_agent_id
+        total_attempts = len(candidates)
+        prompt_text = self._search_prompt(
+            query, zalo=zalo, language=language
+        )
+
+        for index, (agent_id, agent_name) in enumerate(candidates):
+            attempted_agents.append(agent_name)
+            try:
+                async with asyncio.timeout(ZALO_SEARCH_TIMEOUT_SECONDS):
+                    result = await async_converse(
+                        hass=self.hass,
+                        text=prompt_text,
+                        conversation_id=(
+                            conversation_id if index == 0 else None
+                        ),
+                        context=service_context or Context(),
+                        language=language,
+                        agent_id=agent_id,
+                    )
+            except TimeoutError:
+                _LOGGER.warning(
+                    "AI Search agent %s timed out after %s seconds for query %s",
+                    agent_id,
+                    ZALO_SEARCH_TIMEOUT_SECONDS,
+                    query,
+                )
+            except Exception:  # noqa: BLE001 - rotate instead of failing silently
+                _LOGGER.exception(
+                    "AI Search agent %s failed for query %s", agent_id, query
+                )
+            else:
+                error_code = self._conversation_result_error_code(result)
+                reply = self._clean_search_reply(
+                    self._conversation_reply_text(result)
+                )
+                if not error_code and reply:
+                    next_conversation_id = str(
+                        getattr(result, "conversation_id", "") or ""
+                    ).strip() or None
+                    if zalo:
+                        heading = (
+                            "🔎 **Search results**"
+                            if language == "en"
+                            else "🔎 **Kết quả tìm kiếm**"
+                        )
+                        if (
+                            "**" not in reply
+                            or not reply.startswith(
+                                ("🔎", "🌐", "📰", "📌", "💡", "🧭")
+                            )
+                        ):
+                            reply = f"{heading}\n\n{reply}"
+                    reply = self._append_ai_attempt_summary(
+                        reply,
+                        attempted_agents,
+                        language=language,
+                        zalo=zalo,
+                    )
+                    # Conversation IDs are provider-specific. Do not replace the
+                    # primary agent's stored ID with one produced by a fallback.
+                    if primary_agent_id and agent_id != primary_agent_id:
+                        next_conversation_id = None
+                    return reply, next_conversation_id
+
+                had_empty_response = had_empty_response or not error_code
+                _LOGGER.warning(
+                    "AI Search agent %s returned no usable answer (error=%s)",
+                    agent_id,
+                    error_code or "empty_reply",
+                )
+
+            if index + 1 < total_attempts:
+                await self._async_send_ai_failover_notice(
+                    zalo_context,
+                    service_context,
+                    feature="search",
+                    failed_agent=agent_name,
+                    next_agent=candidates[index + 1][1],
+                    next_attempt=index + 2,
+                    total_attempts=total_attempts,
+                    language=language,
+                )
+
+        if had_empty_response:
+            message = self._search_empty_text(language, zalo=zalo)
+        else:
             message = (
-                "The search agent stumbled over its shoelaces. Check the selected AI "
-                "Agent Search and try again."
+                "All available search agents failed or timed out. Check the AI "
+                "agents configured in Home Assistant and try again."
                 if language == "en"
-                else "AI Search vừa vấp dây giày. Hãy kiểm tra AI Agent Search đã chọn "
-                "rồi thử lại nhé."
+                else "Tất cả AI agent tìm kiếm khả dụng đều lỗi hoặc hết thời gian "
+                "chờ. Hãy kiểm tra các AI agent trong Home Assistant rồi thử lại."
             )
             if zalo:
                 message = (
-                    f"⚠️ **Search hiccup**\n\n{message}"
+                    f"⚠️ **Search agents unavailable**\n\n{message}"
                     if language == "en"
-                    else f"⚠️ **Tìm kiếm bị khựng**\n\n{message}"
+                    else f"⚠️ **Các AI tìm kiếm đều chưa phản hồi**\n\n{message}"
                 )
-            return message, None
-
-        next_conversation_id = str(
-            getattr(result, "conversation_id", "") or ""
-        ).strip() or None
-        reply = self._clean_search_reply(self._conversation_reply_text(result))
-        if not reply:
-            return (
-                self._search_empty_text(language, zalo=zalo),
-                next_conversation_id,
-            )
-        if zalo:
-            heading = (
-                "🔎 **Search results**"
-                if language == "en"
-                else "🔎 **Kết quả tìm kiếm**"
-            )
-            if (
-                "**" not in reply
-                or not reply.startswith(("🔎", "🌐", "📰", "📌", "💡", "🧭"))
-            ):
-                reply = f"{heading}\n\n{reply}"
-        return reply, next_conversation_id
+        return (
+            self._append_ai_attempt_summary(
+                message,
+                attempted_agents,
+                language=language,
+                zalo=zalo,
+            ),
+            None,
+        )
 
     async def _async_search_from_zalo(
         self,
@@ -3060,6 +3361,7 @@ class ConversationalAssistantManager(NoteManagerMixin):
             service_context=service_context,
             zalo=True,
             language_hint=_request_language(context.text),
+            zalo_context=context,
         )
         if conversation_id:
             self._zalo_search_conversation_ids[context.owner_key] = conversation_id
@@ -3080,46 +3382,58 @@ class ConversationalAssistantManager(NoteManagerMixin):
             "**AI Task Agent tạo ảnh**."
         )
 
-    async def _async_ai_image_local_path(
+    async def _async_ai_image_delivery_path(
         self, media_source_id: str
     ) -> str | None:
-        """Resolve an AI Task media-source ID through Home Assistant."""
+        """Return the best path accepted by zalo_bot.send_image.
+
+        New Home Assistant releases expose a real local Path on PlayMedia.
+        Older releases and some custom media-source implementations may only
+        provide the media-source URI. The /media fallback matches the working
+        Zalo automation format and avoids rejecting a successfully generated
+        image only because no filesystem Path was exposed.
+        """
         if not media_source_id.startswith("media-source://"):
             return None
+
+        fallback_path = media_source_id.replace(
+            "media-source://", "/media/", 1
+        )
         try:
             resolved = await media_source.async_resolve_media(
                 self.hass, media_source_id, None
             )
-        except Exception:  # noqa: BLE001 - return a friendly Zalo reply
-            _LOGGER.exception(
-                "Failed resolving AI generated media source %s",
+        except Exception:  # noqa: BLE001 - keep the proven /media fallback
+            _LOGGER.warning(
+                "Could not resolve AI generated media source %s; using %s",
                 media_source_id,
+                fallback_path,
+                exc_info=True,
             )
-            return None
-        image_path = str(getattr(resolved, "path", "") or "").strip()
-        return image_path or None
+            return fallback_path
+
+        local_path = str(getattr(resolved, "path", "") or "").strip()
+        if local_path and await self.hass.async_add_executor_job(
+            os.path.isfile, local_path
+        ):
+            return local_path
+
+        _LOGGER.warning(
+            "AI media source %s did not expose an existing local path; using %s",
+            media_source_id,
+            fallback_path,
+        )
+        return fallback_path
 
     async def _async_generate_image_from_zalo(
         self,
         context: ZaloWebhookContext,
         service_context: Context | None,
     ) -> str | ZaloDirectResponse:
-        """Generate one AI image and deliver it to the originating Zalo chat."""
+        """Generate an image with per-agent timeout and automatic failover."""
         language = _request_language(context.text)
         instructions = _image_generation_request(context.text)
-        if instructions is None:
-            if language == "en":
-                return (
-                    "🖌️ **What should I draw?**\n\n"
-                    "Add a description after **Generate an image**, for example: "
-                    "**Generate an image of an astronaut cat**."
-                )
-            return (
-                "🖌️ **Bạn muốn vẽ gì?**\n\n"
-                "Hãy thêm mô tả sau lệnh **Tạo ảnh**, ví dụ: "
-                "**Tạo ảnh một chú mèo phi hành gia**."
-            )
-        if not instructions.strip():
+        if instructions is None or not instructions.strip():
             if language == "en":
                 return (
                     "🖌️ **What should I draw?**\n\n"
@@ -3132,8 +3446,10 @@ class ConversationalAssistantManager(NoteManagerMixin):
                 "**Tạo ảnh một chú mèo phi hành gia**."
             )
 
-        entity_id = self.ai_image_task_entity_id
-        if not entity_id:
+        candidates = self._ai_image_agent_candidates(
+            self.ai_image_task_entity_id
+        )
+        if not candidates:
             return self._image_generation_unavailable_text(language)
         if not self.hass.services.has_service(
             AI_TASK_DOMAIN, AI_TASK_SERVICE_GENERATE_IMAGE
@@ -3177,64 +3493,92 @@ class ConversationalAssistantManager(NoteManagerMixin):
                 f"Action **{ZALO_DOMAIN}.{ZALO_SERVICE_SEND_IMAGE}** chưa sẵn sàng."
             )
 
-        try:
-            response = await self.hass.services.async_call(
-                AI_TASK_DOMAIN,
-                AI_TASK_SERVICE_GENERATE_IMAGE,
-                {
-                    "task_name": "Conversational Assistant Zalo Image",
-                    "entity_id": entity_id,
-                    "instructions": instructions,
-                },
-                blocking=True,
-                context=service_context,
-                return_response=True,
-            )
-        except Exception:  # noqa: BLE001 - keep webhook responses user-friendly
-            _LOGGER.exception(
-                "AI Task entity %s failed to generate an image for Zalo thread %s",
-                entity_id,
-                context.thread_id,
-            )
-            if language == "en":
-                return (
-                    "🤖💥 **The AI artist lost the plot for a moment**\n\n"
-                    "Check the selected **AI Task agent** and try again."
-                )
-            return (
-                "🤖💥 **AI vừa hụt cảm hứng, chưa tạo được ảnh**\n\n"
-                "Hãy kiểm tra **AI Task Agent** đã chọn rồi thử lại nhé."
-            )
+        attempted_agents: list[str] = []
+        image_path: str | None = None
+        total_attempts = len(candidates)
+        for index, (entity_id, agent_name) in enumerate(candidates):
+            attempted_agents.append(agent_name)
+            try:
+                async with asyncio.timeout(ZALO_IMAGE_TIMEOUT_SECONDS):
+                    response = await self.hass.services.async_call(
+                        AI_TASK_DOMAIN,
+                        AI_TASK_SERVICE_GENERATE_IMAGE,
+                        {
+                            "task_name": "Conversational Assistant Zalo Image",
+                            "entity_id": entity_id,
+                            "instructions": instructions,
+                        },
+                        blocking=True,
+                        context=service_context,
+                        return_response=True,
+                    )
 
-        result = response if isinstance(response, dict) else {}
-        media_source_id = str(result.get("media_source_id", "") or "").strip()
-        image_path = await self._async_ai_image_local_path(media_source_id)
+                    result = response if isinstance(response, dict) else {}
+                    nested_result = result.get("response")
+                    if (
+                        not result.get("media_source_id")
+                        and isinstance(nested_result, dict)
+                    ):
+                        result = nested_result
+                    media_source_id = str(
+                        result.get("media_source_id", "") or ""
+                    ).strip()
+                    image_path = await self._async_ai_image_delivery_path(
+                        media_source_id
+                    )
+                    if image_path is None:
+                        raise RuntimeError(
+                            "AI Task returned no usable media_source_id"
+                        )
+            except TimeoutError:
+                image_path = None
+                _LOGGER.warning(
+                    "AI Task entity %s timed out after %s seconds for Zalo thread %s",
+                    entity_id,
+                    ZALO_IMAGE_TIMEOUT_SECONDS,
+                    context.thread_id,
+                )
+            except Exception:  # noqa: BLE001 - rotate instead of failing silently
+                image_path = None
+                _LOGGER.exception(
+                    "AI Task entity %s failed to generate an image for Zalo thread %s",
+                    entity_id,
+                    context.thread_id,
+                )
+
+            if image_path is not None:
+                break
+
+            if index + 1 < total_attempts:
+                await self._async_send_ai_failover_notice(
+                    context,
+                    service_context,
+                    feature="image",
+                    failed_agent=agent_name,
+                    next_agent=candidates[index + 1][1],
+                    next_attempt=index + 2,
+                    total_attempts=total_attempts,
+                    language=language,
+                )
+
         if image_path is None:
-            _LOGGER.error(
-                "AI Task returned an unsupported media source ID: %s",
-                media_source_id,
-            )
             if language == "en":
-                return (
-                    "🧩 **The image was generated, but its local media file "
-                    "could not be resolved**\n\n"
-                    "Check Home Assistant Media settings and try again."
+                message = (
+                    "🤖💥 **All AI artists failed or timed out**\n\n"
+                    "Check the image-capable AI Task agents in Home Assistant "
+                    "and try again."
                 )
-            return (
-                "🧩 **Ảnh đã tạo nhưng chưa tìm thấy đường dẫn gửi Zalo**\n\n"
-                "Hãy kiểm tra thư mục Media của Home Assistant và thử lại."
-            )
-        if not await self.hass.async_add_executor_job(os.path.isfile, image_path):
-            _LOGGER.error("AI generated image file does not exist: %s", image_path)
-            if language == "en":
-                return (
-                    "🗂️ **The generated image has not appeared in the Media "
-                    "directory**\n\n"
-                    "Check Home Assistant Media settings and try again."
+            else:
+                message = (
+                    "🤖💥 **Tất cả họa sĩ AI đều lỗi hoặc hết thời gian chờ**\n\n"
+                    "Hãy kiểm tra các AI Task Agent có hỗ trợ tạo ảnh trong "
+                    "Home Assistant rồi thử lại."
                 )
-            return (
-                "🗂️ **Ảnh vừa tạo chưa xuất hiện trong thư mục Media**\n\n"
-                "Hãy kiểm tra cấu hình Media của Home Assistant rồi thử lại."
+            return self._append_ai_attempt_summary(
+                message,
+                attempted_agents,
+                language=language,
+                zalo=True,
             )
 
         summary = " ".join(instructions.split())
@@ -3244,6 +3588,12 @@ class ConversationalAssistantManager(NoteManagerMixin):
             f"🎨 Generated image: **{summary}**"
             if language == "en"
             else f"🎨 Đã tạo ảnh: **{summary}**"
+        )
+        message = self._append_ai_attempt_summary(
+            message,
+            attempted_agents,
+            language=language,
+            zalo=True,
         )
         try:
             await self.hass.services.async_call(
@@ -3266,13 +3616,20 @@ class ConversationalAssistantManager(NoteManagerMixin):
                 context.thread_id,
             )
             if language == "en":
-                return (
+                delivery_error = (
                     "📦 **The image is ready, but Zalo did not receive it**\n\n"
                     "Check **zalo_bot.send_image** and the sending account."
                 )
-            return (
-                "📦 **Ảnh đã tạo xong nhưng Zalo chưa nhận được**\n\n"
-                "Hãy kiểm tra action **zalo_bot.send_image** và tài khoản gửi."
+            else:
+                delivery_error = (
+                    "📦 **Ảnh đã tạo xong nhưng Zalo chưa nhận được**\n\n"
+                    "Hãy kiểm tra action **zalo_bot.send_image** và tài khoản gửi."
+                )
+            return self._append_ai_attempt_summary(
+                delivery_error,
+                attempted_agents,
+                language=language,
+                zalo=True,
             )
         return ZaloDirectResponse(sent=True, response_type="generated_image")
 
@@ -3281,50 +3638,108 @@ class ConversationalAssistantManager(NoteManagerMixin):
         context: ZaloWebhookContext,
         service_context: Context | None,
     ) -> str:
-        """Send a Zalo command through the configured HA Conversation agent."""
-        try:
-            result = await async_converse(
-                hass=self.hass,
-                text=context.text,
-                conversation_id=self._zalo_ha_conversation_ids.get(
-                    context.owner_key
-                ),
-                context=service_context or Context(),
-                language=_request_language(context.text),
-                agent_id=self.zalo_conversation_agent_id,
-            )
-        except Exception:  # noqa: BLE001 - always return a Zalo response
-            _LOGGER.exception(
-                "Conversation agent %s failed for Zalo thread %s",
-                self.zalo_conversation_agent_id,
-                context.thread_id,
-            )
-            return (
-                "Home Assistant chưa xử lý được yêu cầu này. Hãy kiểm tra "
-                "Conversation agent đã chọn và quyền expose thiết bị cho Assist."
-            )
+        """Send a Zalo command through HA Conversation with AI failover."""
+        language = _request_language(context.text)
+        primary_agent_id = self.zalo_conversation_agent_id
+        candidates = self._conversation_agent_candidates(primary_agent_id)
+        attempted_agents: list[str] = []
+        total_attempts = len(candidates)
 
-        conversation_id = str(
-            getattr(result, "conversation_id", "") or ""
-        ).strip()
-        if conversation_id:
-            self._zalo_ha_conversation_ids[context.owner_key] = conversation_id
+        for index, (agent_id, agent_name) in enumerate(candidates):
+            attempted_agents.append(agent_name)
+            try:
+                async with asyncio.timeout(ZALO_SEARCH_TIMEOUT_SECONDS):
+                    result = await async_converse(
+                        hass=self.hass,
+                        text=context.text,
+                        conversation_id=(
+                            self._zalo_ha_conversation_ids.get(context.owner_key)
+                            if index == 0
+                            else None
+                        ),
+                        context=service_context or Context(),
+                        language=language,
+                        agent_id=agent_id,
+                    )
+            except TimeoutError:
+                _LOGGER.warning(
+                    "Conversation agent %s timed out after %s seconds for Zalo "
+                    "thread %s",
+                    agent_id,
+                    ZALO_SEARCH_TIMEOUT_SECONDS,
+                    context.thread_id,
+                )
+            except Exception:  # noqa: BLE001 - rotate instead of failing silently
+                _LOGGER.exception(
+                    "Conversation agent %s failed for Zalo thread %s",
+                    agent_id,
+                    context.thread_id,
+                )
+            else:
+                error_code = self._conversation_result_error_code(result)
+                reply = self._conversation_reply_text(result)
 
-        reply = self._conversation_reply_text(result)
-        if reply:
-            return reply
+                if error_code == "no_valid_targets":
+                    message = (
+                        "No matching device was found. Check the device, room, "
+                        "area, or floor name and enable its Assist exposure."
+                        if language == "en"
+                        else "Không tìm thấy thiết bị phù hợp. Hãy kiểm tra tên "
+                        "thiết bị, phòng/khu vực/sàn và bật expose cho Assist."
+                    )
+                    return self._append_ai_attempt_summary(
+                        message,
+                        attempted_agents,
+                        language=language,
+                        zalo=True,
+                    )
 
-        response = getattr(result, "response", None)
-        raw_error_code = getattr(response, "error_code", "") or ""
-        error_code = str(getattr(raw_error_code, "value", raw_error_code))
-        if error_code == "no_valid_targets":
-            return (
-                "Không tìm thấy thiết bị phù hợp. Hãy kiểm tra tên thiết bị, "
-                "phòng/khu vực/sàn và bật expose cho Assist."
-            )
-        return (
-            "Tôi chưa hiểu yêu cầu. Ví dụ: bật đèn phòng khách, kiểm tra "
-            "trạng thái tầng 2, hoặc thời tiết hôm nay."
+                if not error_code and reply:
+                    conversation_id = str(
+                        getattr(result, "conversation_id", "") or ""
+                    ).strip()
+                    if agent_id == primary_agent_id and conversation_id:
+                        self._zalo_ha_conversation_ids[
+                            context.owner_key
+                        ] = conversation_id
+                    return self._append_ai_attempt_summary(
+                        reply,
+                        attempted_agents,
+                        language=language,
+                        zalo=True,
+                    )
+
+                _LOGGER.warning(
+                    "Conversation agent %s returned no usable answer (error=%s)",
+                    agent_id,
+                    error_code or "empty_reply",
+                )
+
+            if index + 1 < total_attempts:
+                await self._async_send_ai_failover_notice(
+                    context,
+                    service_context,
+                    feature="conversation",
+                    failed_agent=agent_name,
+                    next_agent=candidates[index + 1][1],
+                    next_attempt=index + 2,
+                    total_attempts=total_attempts,
+                    language=language,
+                )
+
+        message = (
+            "All available Conversation agents failed or timed out. Check the "
+            "configured agents and device exposure for Assist."
+            if language == "en"
+            else "Tất cả Conversation agent khả dụng đều lỗi hoặc hết thời gian "
+            "chờ. Hãy kiểm tra agent đã cấu hình và quyền expose thiết bị cho "
+            "Assist."
+        )
+        return self._append_ai_attempt_summary(
+            message,
+            attempted_agents,
+            language=language,
+            zalo=True,
         )
 
     async def _async_home_assistant_conversation_from_voice(
@@ -3332,33 +3747,96 @@ class ConversationalAssistantManager(NoteManagerMixin):
         user_input: ConversationInput,
         text: str,
     ) -> str:
-        """Run a learned Home Assistant macro from an Assist request."""
-        try:
-            result = await async_converse(
-                hass=self.hass,
-                text=text,
-                conversation_id=user_input.conversation_id,
-                context=user_input.context,
-                language=str(getattr(user_input, "language", "vi") or "vi"),
-                agent_id=self.zalo_conversation_agent_id,
-            )
-        except Exception:  # noqa: BLE001 - always return a voice response
-            _LOGGER.exception(
-                "Home Assistant conversation failed for learned command %s",
-                text,
-            )
-            return await self._async_voice_response(
-                user_input,
-                "Home Assistant chưa xử lý được câu lệnh đã học. Hãy kiểm tra "
-                "quyền expose thiết bị cho Assist.",
-            )
+        """Run a learned HA macro with per-agent timeout and AI failover."""
+        conversation_language = str(
+            getattr(user_input, "language", "vi") or "vi"
+        )
+        language = (
+            "en"
+            if conversation_language.casefold().startswith("en")
+            else _request_language(text)
+        )
+        primary_agent_id = self.zalo_conversation_agent_id
+        candidates = self._conversation_agent_candidates(primary_agent_id)
+        attempted_agents: list[str] = []
 
-        reply = self._conversation_reply_text(result)
-        if not reply:
-            reply = (
-                "Tôi đã chuyển câu lệnh đã học cho Home Assistant nhưng chưa "
-                "nhận được nội dung trả lời."
-            )
+        for index, (agent_id, agent_name) in enumerate(candidates):
+            attempted_agents.append(agent_name)
+            try:
+                async with asyncio.timeout(ZALO_SEARCH_TIMEOUT_SECONDS):
+                    result = await async_converse(
+                        hass=self.hass,
+                        text=text,
+                        conversation_id=(
+                            user_input.conversation_id if index == 0 else None
+                        ),
+                        context=user_input.context,
+                        language=conversation_language,
+                        agent_id=agent_id,
+                    )
+            except TimeoutError:
+                _LOGGER.warning(
+                    "Conversation agent %s timed out after %s seconds for learned "
+                    "command %s",
+                    agent_id,
+                    ZALO_SEARCH_TIMEOUT_SECONDS,
+                    text,
+                )
+            except Exception:  # noqa: BLE001 - rotate instead of failing silently
+                _LOGGER.exception(
+                    "Conversation agent %s failed for learned command %s",
+                    agent_id,
+                    text,
+                )
+            else:
+                error_code = self._conversation_result_error_code(result)
+                reply = self._conversation_reply_text(result)
+                if error_code == "no_valid_targets":
+                    reply = (
+                        "No matching device was found. Check the device name and "
+                        "its Assist exposure."
+                        if language == "en"
+                        else "Không tìm thấy thiết bị phù hợp. Hãy kiểm tra tên "
+                        "thiết bị và quyền expose cho Assist."
+                    )
+                    reply = self._append_ai_attempt_summary(
+                        reply,
+                        attempted_agents,
+                        language=language,
+                        zalo=False,
+                    )
+                    return await self._async_voice_response(user_input, reply)
+
+                if not error_code and reply:
+                    reply = self._append_ai_attempt_summary(
+                        reply,
+                        attempted_agents,
+                        language=language,
+                        zalo=False,
+                    )
+                    return await self._async_voice_response(user_input, reply)
+
+                _LOGGER.warning(
+                    "Conversation agent %s returned no usable answer for learned "
+                    "command (error=%s)",
+                    agent_id,
+                    error_code or "empty_reply",
+                )
+
+        reply = (
+            "All available Conversation agents failed or timed out. Check the "
+            "configured agents and Assist device exposure."
+            if language == "en"
+            else "Tất cả Conversation agent khả dụng đều lỗi hoặc hết thời gian "
+            "chờ. Hãy kiểm tra agent đã cấu hình và quyền expose thiết bị cho "
+            "Assist."
+        )
+        reply = self._append_ai_attempt_summary(
+            reply,
+            attempted_agents,
+            language=language,
+            zalo=False,
+        )
         return await self._async_voice_response(user_input, reply)
 
     def _zalo_exposed_calendar_states(self, text: str) -> list[Any]:
@@ -3595,6 +4073,161 @@ class ConversationalAssistantManager(NoteManagerMixin):
             )
         return None
 
+    def _zalo_long_running_action(self, text: str) -> str | None:
+        """Return a slow action only when the request has usable content."""
+        command = self._zalo_command_kind(text)
+        effective_text = text
+        if command is None:
+            learned_match = match_learned_command(
+                text, list(self.learned_commands.values())
+            )
+            if learned_match is not None:
+                command = learned_match.command.action
+                effective_text = canonical_text(
+                    command,
+                    learned_match.request,
+                    learned_match.command.target_text,
+                )
+
+        if command == ACTION_SEARCH:
+            query = _search_request(effective_text)
+            return ACTION_SEARCH if query and query.strip() else None
+        if command == ACTION_IMAGE_GENERATION:
+            instructions = _image_generation_request(effective_text)
+            return (
+                ACTION_IMAGE_GENERATION
+                if instructions and instructions.strip()
+                else None
+            )
+        return None
+
+    @staticmethod
+    def _zalo_processing_text(language: str) -> str:
+        """Return the immediate acknowledgement for a slow request."""
+        if language == "en":
+            return "⏳ Processing your request. Please wait for the response."
+        return "⏳ Đang xử lý thông tin yêu cầu. Hãy chờ phản hồi."
+
+    @staticmethod
+    def _zalo_timeout_text(action: str, language: str) -> str:
+        """Return a final timeout message for a stalled slow request."""
+        if language == "en":
+            feature = (
+                "image generation"
+                if action == ACTION_IMAGE_GENERATION
+                else "search"
+            )
+            return (
+                f"⌛ **The {feature} request took too long**\n\n"
+                "The AI service did not respond in time. Please try again."
+            )
+        feature = "tạo ảnh" if action == ACTION_IMAGE_GENERATION else "tìm kiếm"
+        return (
+            f"⌛ **Yêu cầu {feature} đã chờ quá lâu**\n\n"
+            "Dịch vụ AI chưa phản hồi kịp. Hãy thử lại nhé."
+        )
+
+    @staticmethod
+    def _zalo_background_error_text(language: str) -> str:
+        """Return a final error when an unexpected background failure occurs."""
+        if language == "en":
+            return (
+                "⚠️ **The request could not be completed**\n\n"
+                "An unexpected error occurred. Check the Home Assistant log "
+                "and try again."
+            )
+        return (
+            "⚠️ **Chưa thể hoàn thành yêu cầu**\n\n"
+            "Đã xảy ra lỗi ngoài dự kiến. Hãy kiểm tra nhật ký Home Assistant "
+            "và thử lại."
+        )
+
+    async def _async_process_zalo_long_running_message(
+        self,
+        context: ZaloWebhookContext,
+        service_context: Context | None,
+        action: str,
+    ) -> None:
+        """Finish a slow Zalo request after the webhook action has returned."""
+        language = _request_language(context.text)
+        per_agent_timeout_seconds = (
+            ZALO_IMAGE_TIMEOUT_SECONDS
+            if action == ACTION_IMAGE_GENERATION
+            else ZALO_SEARCH_TIMEOUT_SECONDS
+        )
+        candidate_count = self._ai_long_running_candidate_count(action)
+        # Each candidate receives its own complete timeout window. The outer
+        # timeout is only a final safety net for delivery/cleanup overhead.
+        timeout_seconds = per_agent_timeout_seconds * candidate_count + 120
+        await self._async_send_zalo_typing_event(context, service_context)
+        typing_stop = asyncio.Event()
+        typing_task = self.hass.async_create_task(
+            self._async_keep_zalo_typing_active(
+                context, service_context, typing_stop
+            )
+        )
+        try:
+            async with asyncio.timeout(timeout_seconds):
+                reply = await self._async_process_zalo_message(
+                    context, service_context
+                )
+                if isinstance(reply, ZaloDirectResponse):
+                    if not reply.sent:
+                        await self._async_send_zalo_webhook_reply(
+                            context, self._zalo_background_error_text(language)
+                        )
+                    return
+                if reply is None:
+                    await self._async_send_zalo_webhook_reply(
+                        context, self._zalo_background_error_text(language)
+                    )
+                    return
+                await self._async_send_zalo_webhook_reply(context, reply)
+        except TimeoutError:
+            _LOGGER.error(
+                "Safety timeout processing Zalo %s request for thread %s after %s "
+                "seconds across %s AI candidate(s)",
+                action,
+                context.thread_id,
+                timeout_seconds,
+                candidate_count,
+            )
+            await self._async_send_zalo_webhook_reply(
+                context, self._zalo_timeout_text(action, language)
+            )
+        except asyncio.CancelledError:
+            raise
+        except Exception:  # noqa: BLE001 - never fail silently in background
+            _LOGGER.exception(
+                "Unexpected failure processing background Zalo request for thread %s",
+                context.thread_id,
+            )
+            await self._async_send_zalo_webhook_reply(
+                context, self._zalo_background_error_text(language)
+            )
+        finally:
+            typing_stop.set()
+            try:
+                await typing_task
+            except asyncio.CancelledError:
+                typing_task.cancel()
+                raise
+
+    def _start_zalo_background_task(
+        self,
+        context: ZaloWebhookContext,
+        service_context: Context | None,
+        action: str,
+    ) -> None:
+        """Start and retain a slow Zalo task until it completes."""
+        task = self.hass.async_create_task(
+            self._async_process_zalo_long_running_message(
+                context, service_context, action
+            )
+        )
+        self._zalo_background_tasks.add(task)
+        task.add_done_callback(self._zalo_background_tasks.discard)
+
     async def async_process_zalo_webhook_payload(
         self,
         payload: Any,
@@ -3616,8 +4249,25 @@ class ConversationalAssistantManager(NoteManagerMixin):
         if self._is_duplicate_zalo_message(context.message_id):
             return {"ok": True, "handled": False, "reason": "duplicate"}
 
-        # Start typing immediately and keep refreshing it for every Zalo
-        # feature until its final text/image response has actually been sent.
+        long_action = self._zalo_long_running_action(context.text)
+        if long_action is not None:
+            processing_message_sent = await self._async_send_zalo_webhook_reply(
+                context,
+                self._zalo_processing_text(_request_language(context.text)),
+            )
+            self._start_zalo_background_task(
+                context, service_context, long_action
+            )
+            return {
+                "ok": True,
+                "handled": True,
+                "accepted": True,
+                "background": True,
+                "processing_message_sent": processing_message_sent,
+            }
+
+        # Start typing immediately and keep refreshing it for normal Zalo
+        # features until the final text/image response has actually been sent.
         await self._async_send_zalo_typing_event(context, service_context)
         typing_stop = asyncio.Event()
         typing_task = self.hass.async_create_task(

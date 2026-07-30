@@ -21,6 +21,7 @@ CONF_ZALO_HOME_ASSISTANT_ENABLED = "zalo_home_assistant_enabled"
 CONF_ZALO_CONVERSATION_AGENT_ID = "zalo_conversation_agent_id"
 CONF_AI_SEARCH_AGENT_ID = "ai_search_agent_id"
 CONF_AI_IMAGE_TASK_ENTITY_ID = "ai_image_task_entity_id"
+CONF_AI_AGENT_FAILOVER_ENABLED = "ai_agent_failover_enabled"
 
 # Legacy single-Zalo options, retained for automatic migration.
 CONF_ZALO_ENABLED = "zalo_enabled"
@@ -46,6 +47,7 @@ DEFAULT_ZALO_HOME_ASSISTANT_ENABLED = True
 DEFAULT_ZALO_CONVERSATION_AGENT_ID = "conversation.home_assistant"
 DEFAULT_AI_SEARCH_AGENT_ID = ""
 DEFAULT_AI_IMAGE_TASK_ENTITY_ID = ""
+DEFAULT_AI_AGENT_FAILOVER_ENABLED = True
 
 AI_TASK_DOMAIN = "ai_task"
 AI_TASK_SERVICE_GENERATE_IMAGE = "generate_image"
@@ -69,6 +71,12 @@ ZALO_WEBHOOK_SEEN_MESSAGE_LIMIT = 512
 # processed. The task is created only for an active webhook request and is
 # stopped immediately after the final text/image response is delivered.
 ZALO_TYPING_REFRESH_SECONDS = 4
+
+# Long-running Zalo jobs are detached from the webhook action so the original
+# automation can finish promptly. These limits guarantee a final error message
+# instead of leaving the user waiting forever when an AI provider stalls.
+ZALO_SEARCH_TIMEOUT_SECONDS = 180
+ZALO_IMAGE_TIMEOUT_SECONDS = 360
 
 # Device/entity discovery is intentionally lazy.  A short cache keeps repeated
 # reminder/camera requests fast without scanning Home Assistant registries while
