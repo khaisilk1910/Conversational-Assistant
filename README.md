@@ -177,6 +177,7 @@ Các sensor cung cấp thêm thuộc tính để dùng trong dashboard, template
 | Mobile App | Không bắt buộc; cần khi gửi thông báo tới điện thoại |
 | TTS và media player | Không bắt buộc; cần khi phát nhắc hẹn qua loa |
 | [Zalo Bot](https://github.com/smarthomeblack/zalo_bot) | Không bắt buộc; cần khi dùng thông báo hoặc lệnh Zalo |
+| [AI](https://github.com/luuquangvu/hass_local_openai_llm) | Dùng để tìm kiếm thông tin trên internet, phản hồi chuẩn hơn. |
 | Calendar/Weather | Không bắt buộc; cần có entity tương ứng khi truy vấn |
 
 ### Thành phần phụ thuộc của Home Assistant
