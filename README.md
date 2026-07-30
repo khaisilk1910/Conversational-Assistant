@@ -10,7 +10,7 @@
 Tích hợp kết hợp quản lý nhắc hẹn, ghi chú bảo mật, thông báo đa kênh và điều khiển nhà thông minh trong cùng một cấu hình. Người dùng có thể tạo nhắc hẹn bằng giọng nói, nhận thông báo trên điện thoại, Zalo hoặc loa, đồng thời hỏi trạng thái thiết bị, thời tiết và lịch sự kiện trực tiếp từ Zalo.
 
 > [!IMPORTANT]
-> Cài tích hợp rồi thêm Automation dưới.
+> Cài tích hợp rồi thêm Automation dưới nếu muốn dùng Zalo để tương tác.
 > 
 > Lưu ý lấy `uid_cua_bot_de_tranh_tu_tra_loi_tin_cua_chinh_bot` cho vào điều kiện để tránh bot tự trả lời tin nhắn của chính bot.
 > 
