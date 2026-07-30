@@ -89,6 +89,7 @@ from .const import (
     DOMAIN,
     EVENT_NOTIFICATION_ACTION,
     EVENT_NOTIFICATION_CLEARED,
+    HELP_SENTENCES,
     LIST_SENTENCES,
     MEDIA_PLAYER_DOMAIN,
     PENDING_FOLLOWUP_SENTENCES,
@@ -156,6 +157,79 @@ from .zalo_home_assistant import (
 )
 
 _LOGGER = logging.getLogger(__name__)
+
+
+_HELP_EXACT_PHRASES = frozenset(
+    {
+        "help",
+        "tro giup",
+        "huong dan",
+        "huong dan su dung",
+        "huong dan su dung tich hop",
+        "su dung tich hop",
+        "dung tich hop",
+        "cach su dung tich hop",
+        "huong dan tich hop",
+        "gioi thieu tich hop",
+        "hoc cach su dung tich hop",
+        "hoc su dung tich hop",
+        "huong dan conversational assistant",
+        "huong dan su dung conversational assistant",
+        "cach su dung conversational assistant",
+        "hoc cach su dung conversational assistant",
+        "lenh",
+        "cac lenh",
+        "cac tinh nang",
+        "cac lenh ho tro",
+        "huong dan cac tinh nang",
+        "huong dan tinh nang",
+        "gioi thieu cac tinh nang",
+        "cach su dung cac tinh nang",
+        "tich hop co tinh nang gi",
+        "tich hop ho tro tinh nang gi",
+        "conversational assistant co tinh nang gi",
+        "conversational assistant ho tro tinh nang gi",
+        "toi co the dung tich hop nhu the nao",
+        "toi co the su dung tich hop nhu the nao",
+    }
+)
+
+
+def _is_integration_help_request(text: str) -> bool:
+    """Return whether text asks how to use this integration."""
+    normalized = normalize_text(text)
+    if normalized.startswith("hay "):
+        normalized = normalized[4:].strip()
+    if not normalized:
+        return False
+    if normalized in _HELP_EXACT_PHRASES:
+        return True
+
+    mentions_subject = any(
+        term in normalized
+        for term in (
+            "tich hop",
+            "conversational assistant",
+            "cac tinh nang",
+            "tinh nang cua",
+            "cac lenh ho tro",
+        )
+    )
+    asks_for_guidance = any(
+        term in normalized
+        for term in (
+            "huong dan",
+            "cach su dung",
+            "cach dung",
+            "hoc cach",
+            "gioi thieu",
+            "lam duoc gi",
+            "tinh nang gi",
+            "su dung nhu the nao",
+            "dung nhu the nao",
+        )
+    )
+    return mentions_subject and asks_for_guidance
 
 
 @dataclass(slots=True)
@@ -588,6 +662,9 @@ class ConversationalAssistantManager(NoteManagerMixin):
                 ),
                 agent_manager.register_trigger(
                     CAMERA_SENTENCES, self._async_camera_from_voice
+                ),
+                agent_manager.register_trigger(
+                    HELP_SENTENCES, self._async_help_from_voice
                 ),
                 *self._register_note_triggers(agent_manager),
                 self.hass.bus.async_listen(
@@ -1304,15 +1381,7 @@ class ConversationalAssistantManager(NoteManagerMixin):
         if not normalized:
             return None
 
-        help_phrases = {
-            "help",
-            "tro giup",
-            "huong dan",
-            "huong dan su dung",
-            "lenh",
-            "cac lenh",
-        }
-        if normalized in help_phrases:
+        if _is_integration_help_request(text):
             return "help"
 
         list_phrases = {
@@ -1418,31 +1487,42 @@ class ConversationalAssistantManager(NoteManagerMixin):
         return normalized
 
     @staticmethod
-    def _zalo_help_text() -> str:
-        """Return a compact command guide for Zalo users."""
+    def _integration_help_text() -> str:
+        """Return a compact, structured guide for Voice Assist and Zalo."""
         return (
-            "Tôi có thể quản lý Home Assistant từ Zalo.\n"
-            "Nhà thông minh:\n"
-            "• Bật đèn phòng khách; tắt quạt tầng 2\n"
-            "• Kiểm tra trạng thái phòng ngủ hoặc thiết bị đang bật\n"
-            "• Thời tiết hôm nay; lịch ngày mai\n"
-            "Camera:\n"
-            "• Chụp ảnh camera; kiểm tra camera; lấy ảnh camera\n"
-            "• Chọn đúng số camera để nhận ảnh ngay trong Zalo\n"
-            "Nhắc hẹn:\n"
-            "• Nhắc tôi 30 phút nữa uống thuốc\n"
-            "• Tạo nhắc hẹn 18h30 ngày mai đi tập thể dục\n"
-            "• Danh sách nhắc hẹn hoặc Xóa nhắc hẹn\n"
-            "Ghi chú:\n"
-            "• Ghi nhớ mã tủ đồ là 2468\n"
-            "• Danh sách ghi chú\n"
-            "• Sửa ghi chú hoặc Xóa ghi chú\n"
-            "Mỗi ghi chú được chọn Mức 1 Bảo mật hoặc Mức 2 Công khai.\n"
-            "Bộ nhớ câu lệnh:\n"
-            "• Học câu lệnh xem cổng để chụp ảnh camera\n"
-            "• Học câu lệnh việc mới để tạo nhắc hẹn\n"
-            "• Danh sách câu lệnh đã học\n"
-            "• Xóa câu lệnh xem cổng"
+            "HƯỚNG DẪN CONVERSATIONAL ASSISTANT\n"
+            "Các câu lệnh dưới đây dùng được trên Voice Assistant và Zalo.\n\n"
+            "1. NHÀ THÔNG MINH\n"
+            "Điều khiển hoặc kiểm tra thiết bị, phòng, khu vực và tầng.\n"
+            "Ví dụ:\n"
+            "• Bật đèn phòng khách.\n"
+            "• Kiểm tra thiết bị nào đang bật ở tầng 2.\n\n"
+            "2. THỜI TIẾT VÀ LỊCH\n"
+            "Xem thời tiết, nhiệt độ và sự kiện từ Home Assistant.\n"
+            "Ví dụ:\n"
+            "• Thời tiết hôm nay thế nào?\n"
+            "• Ngày mai tôi có lịch gì?\n\n"
+            "3. CAMERA\n"
+            "Chọn một hoặc nhiều camera, xác nhận rồi gửi ảnh đến Zalo; nếu chưa có destination, tích hợp sẽ yêu cầu cấu hình.\n"
+            "Ví dụ:\n"
+            "• Chụp camera.\n"
+            "• Lấy ảnh camera sân trước.\n\n"
+            "4. NHẮC HẸN\n"
+            "Tạo, xem hoặc xóa nhắc hẹn; có thể chọn điện thoại, loa và Zalo nhận thông báo.\n"
+            "Ví dụ:\n"
+            "• Nhắc tôi 30 phút nữa uống thuốc.\n"
+            "• Danh sách nhắc hẹn.\n\n"
+            "5. GHI CHÚ\n"
+            "Thêm, xem, sửa hoặc xóa ghi chú; hỗ trợ mức Bảo mật và Công khai.\n"
+            "Ví dụ:\n"
+            "• Ghi nhớ mã tủ đồ là 2468.\n"
+            "• Danh sách ghi chú.\n\n"
+            "6. BỘ NHỚ CÂU LỆNH\n"
+            "Dạy cách nói mới cho chức năng có sẵn, xem lại hoặc xóa câu đã học.\n"
+            "Ví dụ:\n"
+            "• Học câu lệnh xem cổng để chụp ảnh camera.\n"
+            "• Xóa câu lệnh xem cổng.\n\n"
+            "Nói “hướng dẫn sử dụng tích hợp” bất cứ lúc nào để xem lại."
         )
 
     def _zalo_upcoming_reminders(
@@ -2869,9 +2949,8 @@ class ConversationalAssistantManager(NoteManagerMixin):
             self._zalo_pending_cameras.pop(context.owner_key, None)
             return await self._async_delete_from_zalo(context)
         if command == "help":
-            self._zalo_pending_notes.pop(context.owner_key, None)
-            self._zalo_pending_cameras.pop(context.owner_key, None)
-            return self._zalo_help_text()
+            self._clear_zalo_pending_for_owner(context.owner_key)
+            return self._integration_help_text()
         if command == ACTION_CAMERA:
             self._clear_zalo_pending_for_owner(context.owner_key)
             return await self._async_camera_from_zalo(context)
@@ -2886,7 +2965,7 @@ class ConversationalAssistantManager(NoteManagerMixin):
             context.thread_type == ZALO_TYPE_USER
             and normalized in {"chao", "xin chao", "hi", "hello"}
         ):
-            return self._zalo_help_text()
+            return self._integration_help_text()
 
         if (
             self.zalo_home_assistant_enabled
@@ -3976,6 +4055,17 @@ class ConversationalAssistantManager(NoteManagerMixin):
         response = f"{parsed.confirmation} Sẽ thông báo đến {target_names}."
         return await self._async_voice_response(user_input, response)
 
+    async def _async_help_from_voice(
+        self, user_input: ConversationInput, _result: RecognizeResult
+    ) -> str:
+        """Return the integration usage guide through Assist."""
+        source_keys = self._source_keys(user_input)
+        self._clear_pending_for_source(source_keys)
+        self._sync_pending_followup_trigger()
+        return await self._async_voice_response(
+            user_input, self._integration_help_text()
+        )
+
     async def _async_learn_command_from_voice(
         self, user_input: ConversationInput, _result: RecognizeResult
     ) -> str:
@@ -4067,7 +4157,7 @@ class ConversationalAssistantManager(NoteManagerMixin):
                 transformed_input, result
             )
         if command.action == ACTION_HELP:
-            response = self._zalo_help_text()
+            response = self._integration_help_text()
             return await self._async_voice_response(user_input, response)
         if command.action in {ACTION_HOME_ASSISTANT, ACTION_CALENDAR}:
             if not transformed_text:
@@ -4082,6 +4172,8 @@ class ConversationalAssistantManager(NoteManagerMixin):
 
     def _is_primary_voice_command(self, text: str) -> bool:
         """Return whether another Conversational Assistant trigger handles text."""
+        if _is_integration_help_request(text):
+            return True
         if management_command_kind(text) is not None:
             return True
         if match_learned_command(

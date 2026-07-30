@@ -100,6 +100,13 @@ _TARGET_LABELS = {
     "tro giup": ACTION_HELP,
     "huong dan": ACTION_HELP,
     "xem huong dan": ACTION_HELP,
+    "huong dan su dung": ACTION_HELP,
+    "huong dan su dung tich hop": ACTION_HELP,
+    "su dung tich hop": ACTION_HELP,
+    "cach su dung tich hop": ACTION_HELP,
+    "huong dan tich hop": ACTION_HELP,
+    "hoc cach su dung tich hop": ACTION_HELP,
+    "cac tinh nang": ACTION_HELP,
 }
 
 _RESERVED_PHRASES = {

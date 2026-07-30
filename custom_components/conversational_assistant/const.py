@@ -121,6 +121,25 @@ COMMAND_DELETE_SENTENCES = [
     "[hãy ](xóa|xoá|quên) toàn bộ câu lệnh đã học",
 ]
 
+# A dedicated help trigger keeps usage-guide requests inside this integration,
+# including while another workflow is waiting for a follow-up answer.
+HELP_SENTENCES = [
+    "[hãy ](trợ giúp|hướng dẫn|hướng dẫn sử dụng|lệnh|các lệnh|các tính năng)",
+    "[hãy ](hướng dẫn|chỉ) [tôi ]sử dụng (tích hợp|conversational assistant)",
+    "[hãy ](hướng dẫn|chỉ) [tôi ]cách sử dụng (tích hợp|conversational assistant)",
+    "[hãy ](hướng dẫn|giới thiệu) [các ]tính năng [của ](tích hợp|conversational assistant)",
+    "[hãy ](hướng dẫn|chỉ) [tôi ]sử dụng [các ]tính năng [của ](tích hợp|tích hợp này|conversational assistant)",
+    "[hãy ](hướng dẫn|giới thiệu) (tích hợp|conversational assistant)",
+    "[hãy ](sử dụng|dùng) tích hợp",
+    "[hãy ]học cách sử dụng (tích hợp|tích hợp này|conversational assistant)",
+    "[tôi muốn ]học cách sử dụng [các ]tính năng [của ](tích hợp|tích hợp này|conversational assistant)",
+    "[hãy ]chỉ [cho ]tôi cách dùng [các ]tính năng [của ](tích hợp|tích hợp này|conversational assistant)",
+    "[hãy ](tích hợp|conversational assistant) (có|hỗ trợ) [những ]tính năng gì",
+    "[hãy ]cho tôi biết (tích hợp|conversational assistant) (có|làm được) gì",
+    "[hãy ](tích hợp|conversational assistant) làm được gì",
+    "[hãy ]tôi có thể (dùng|sử dụng) tích hợp như thế nào",
+]
+
 CREATE_SENTENCES = [
     # Explicit forms first so their wildcard contains only the actual request.
     "[hãy ]nhắc tôi {request}",
