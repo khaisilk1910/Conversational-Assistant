@@ -122,6 +122,14 @@ CANCEL_SENTENCES = [
 ]
 
 
+CAMERA_SENTENCES = [
+    "[hãy ](chụp|lấy) (ảnh|hình) [từ ](camera|máy quay)",
+    "[hãy ](chụp|lấy) (ảnh|hình) [từ ](camera|máy quay) {request}",
+    "[hãy ]chụp (camera|máy quay)",
+    "[hãy ]chụp (camera|máy quay) {request}",
+]
+
+
 TARGET_SELECTION_SENTENCES = [
     "(chọn|xác nhận|gửi đến|thông báo đến) {selection}",
     "tôi chọn {selection}",

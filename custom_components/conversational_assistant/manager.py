@@ -47,6 +47,7 @@ from .const import (
     ACTION_SNOOZE,
     ASSIST_SATELLITE_DOMAIN,
     ASSIST_SATELLITE_SERVICE_ANNOUNCE,
+    CAMERA_SENTENCES,
     CANCEL_SENTENCES,
     CONF_CONFIRM_TARGETS,
     CONF_DISMISS_ON_CLEAR,
@@ -192,6 +193,20 @@ class PendingZaloCamera:
     expires_at: datetime
 
 
+@dataclass(slots=True)
+class PendingVoiceCamera:
+    """Voice camera request waiting for selection or final confirmation."""
+
+    pending_id: str
+    cameras: list[CameraTarget]
+    zalo_targets: list[dict[str, Any]]
+    source_keys: set[str]
+    selected_cameras: list[CameraTarget]
+    phase: str
+    created_at: datetime
+    expires_at: datetime
+
+
 @dataclass(slots=True, frozen=True)
 class ZaloDirectResponse:
     """A response already delivered directly without a text reply."""
@@ -302,6 +317,7 @@ class ConversationalAssistantManager(NoteManagerMixin):
         self._initialize_note_state()
         self._pending: dict[str, PendingReminder] = {}
         self._pending_deletions: dict[str, PendingDeletion] = {}
+        self._pending_voice_cameras: dict[str, PendingVoiceCamera] = {}
         self._zalo_pending_creations: dict[str, PendingZaloReminder] = {}
         self._zalo_pending_deletions: dict[str, PendingZaloDeletion] = {}
         self._zalo_pending_cameras: dict[str, PendingZaloCamera] = {}
@@ -499,6 +515,9 @@ class ConversationalAssistantManager(NoteManagerMixin):
                 agent_manager.register_trigger(
                     CANCEL_SENTENCES, self._async_cancel_from_voice
                 ),
+                agent_manager.register_trigger(
+                    CAMERA_SENTENCES, self._async_camera_from_voice
+                ),
                 *self._register_note_triggers(agent_manager),
                 self.hass.bus.async_listen(
                     EVENT_NOTIFICATION_ACTION, self._async_notification_action
@@ -538,6 +557,7 @@ class ConversationalAssistantManager(NoteManagerMixin):
         self._unsubs.clear()
         self._pending.clear()
         self._pending_deletions.clear()
+        self._pending_voice_cameras.clear()
         self._zalo_pending_creations.clear()
         self._zalo_pending_deletions.clear()
         self._zalo_pending_cameras.clear()
@@ -1544,6 +1564,50 @@ class ConversationalAssistantManager(NoteManagerMixin):
             "Gửi 'không chụp' để hủy."
         )
 
+    @staticmethod
+    def _voice_camera_selection_prompt(
+        cameras: list[CameraTarget], invalid: bool = False
+    ) -> str:
+        """Build a numbered camera selection prompt for Assist."""
+        lines = []
+        for index, camera in enumerate(cameras, start=1):
+            status = " - không khả dụng" if not camera.available else ""
+            lines.append(f"{index} - {camera.display_name}{status}")
+        prefix = (
+            "Lựa chọn chưa hợp lệ. Hãy chọn ít nhất một camera khả dụng.\n"
+            if invalid
+            else "Các camera đang có trên Home Assistant:\n"
+        )
+        return (
+            f"{prefix}{chr(10).join(lines)}\n"
+            "Hãy nói một hoặc nhiều số hoặc tên camera, ví dụ 1 và 3. "
+            "Bạn cũng có thể nói tất cả, hoặc nói không chụp để hủy."
+        )
+
+    @staticmethod
+    def _voice_camera_confirmation_prompt(
+        cameras: list[CameraTarget],
+        zalo_targets: list[dict[str, Any]],
+        invalid: bool = False,
+    ) -> str:
+        """Ask for final consent before capturing and sending images."""
+        camera_names = ", ".join(camera.display_name for camera in cameras)
+        destination_names = ", ".join(
+            str(target.get(CONF_ZALO_TARGET_NAME, "")).strip()
+            or str(target.get(CONF_ZALO_THREAD_ID, "")).strip()
+            for target in zalo_targets
+        )
+        prefix = (
+            "Tôi chưa nhận được xác nhận rõ ràng. "
+            if invalid
+            else ""
+        )
+        return (
+            f"{prefix}Bạn đã chọn {camera_names}. "
+            f"Ảnh sẽ được gửi lên Zalo đến {destination_names}. "
+            "Hãy nói đồng ý để chụp và gửi, hoặc nói không chụp để hủy."
+        )
+
     async def _async_camera_from_zalo(
         self, context: ZaloWebhookContext
     ) -> str:
@@ -1563,6 +1627,32 @@ class ConversationalAssistantManager(NoteManagerMixin):
             + timedelta(minutes=PENDING_SELECTION_TIMEOUT_MINUTES),
         )
         return self._camera_selection_prompt(cameras)
+
+    async def _async_camera_from_voice(
+        self, user_input: ConversationInput, _result: RecognizeResult
+    ) -> str:
+        """Start camera selection from an Assist voice command."""
+        zalo_targets = self._configured_zalo_targets()
+        if not zalo_targets:
+            return await self._async_voice_response(
+                user_input,
+                "Chưa có Zalo destination nào được cấu hình. Hãy mở cấu hình "
+                "Conversational Assistant, thêm ít nhất một Zalo destination, "
+                "sau đó quay lại yêu cầu chụp ảnh camera.",
+            )
+
+        cameras = self._discovered_camera_targets()
+        if not cameras:
+            return await self._async_voice_response(
+                user_input,
+                "Chưa tìm thấy camera nào trên Home Assistant. Hãy kiểm tra "
+                "tích hợp camera và trạng thái các entity camera.",
+            )
+
+        self._set_pending_voice_camera(user_input, cameras, zalo_targets)
+        return await self._async_voice_response(
+            user_input, self._voice_camera_selection_prompt(cameras)
+        )
 
     @staticmethod
     def _camera_snapshot_paths(
@@ -1646,7 +1736,7 @@ class ConversationalAssistantManager(NoteManagerMixin):
 
     async def _async_capture_camera_snapshot(
         self,
-        context: ZaloWebhookContext,
+        owner_key: str,
         camera: CameraTarget,
         service_context: Context | None,
     ) -> tuple[str | None, str | None]:
@@ -1660,7 +1750,7 @@ class ConversationalAssistantManager(NoteManagerMixin):
 
         media_root = self.hass.config.media_dirs.get("local", "/media")
         filename, image_path = self._camera_snapshot_paths(
-            media_root, context.owner_key, camera.entity_id
+            media_root, owner_key, camera.entity_id
         )
         await self.hass.async_add_executor_job(
             _prepare_camera_snapshot_path, filename
@@ -1775,6 +1865,233 @@ class ConversationalAssistantManager(NoteManagerMixin):
                 )
         return True, None
 
+    async def _async_send_camera_images_to_configured_zalo(
+        self,
+        image_paths: list[str],
+        camera_names: list[str],
+        zalo_targets: list[dict[str, Any]],
+        service_context: Context | None,
+    ) -> tuple[list[str], list[str]]:
+        """Send camera images to every configured Zalo destination."""
+        sent_targets: list[str] = []
+        failures: list[str] = []
+
+        for target in zalo_targets:
+            target_name = (
+                str(target.get(CONF_ZALO_TARGET_NAME, "")).strip()
+                or str(target.get(CONF_ZALO_THREAD_ID, "")).strip()
+                or "Zalo"
+            )
+            thread_id = str(target.get(CONF_ZALO_THREAD_ID, "")).strip()
+            account_selection = str(
+                target.get(CONF_ZALO_ACCOUNT_SELECTION, "")
+            ).strip()
+            thread_type = str(
+                target.get(CONF_ZALO_TYPE, DEFAULT_ZALO_TYPE)
+            ).strip()
+            if not thread_id or not account_selection:
+                failures.append(f"{target_name}: thiếu cấu hình")
+                continue
+
+            await self._async_send_zalo_typing_to_target(
+                thread_id, account_selection, service_context
+            )
+
+            if (
+                thread_type == ZALO_TYPE_GROUP
+                and len(image_paths) > 1
+                and self.hass.services.has_service(
+                    ZALO_DOMAIN, ZALO_SERVICE_SEND_IMAGES_TO_GROUP
+                )
+            ):
+                try:
+                    await self.hass.services.async_call(
+                        ZALO_DOMAIN,
+                        ZALO_SERVICE_SEND_IMAGES_TO_GROUP,
+                        {
+                            "thread_id": thread_id,
+                            "account_selection": account_selection,
+                            "image_paths": ",".join(image_paths),
+                        },
+                        blocking=True,
+                        context=service_context,
+                    )
+                except Exception:  # noqa: BLE001 - continue other targets
+                    _LOGGER.exception(
+                        "Failed sending grouped voice camera snapshots to %s",
+                        thread_id,
+                    )
+                    failures.append(f"{target_name}: gửi nhóm ảnh thất bại")
+                    continue
+                sent_targets.append(target_name)
+                continue
+
+            if not self.hass.services.has_service(
+                ZALO_DOMAIN, ZALO_SERVICE_SEND_IMAGE
+            ):
+                failures.append(
+                    f"{target_name}: action {ZALO_DOMAIN}."
+                    f"{ZALO_SERVICE_SEND_IMAGE} chưa sẵn sàng"
+                )
+                continue
+
+            target_failed = False
+            for image_path, camera_name in zip(
+                image_paths, camera_names, strict=True
+            ):
+                try:
+                    await self.hass.services.async_call(
+                        ZALO_DOMAIN,
+                        ZALO_SERVICE_SEND_IMAGE,
+                        {
+                            "type": thread_type,
+                            "ttl": 0,
+                            "image_path": image_path,
+                            "message": f"Đã chụp ảnh {camera_name}",
+                            "thread_id": thread_id,
+                            "account_selection": account_selection,
+                        },
+                        blocking=True,
+                        context=service_context,
+                    )
+                except Exception:  # noqa: BLE001 - continue other targets
+                    _LOGGER.exception(
+                        "Failed sending voice camera snapshot to %s",
+                        thread_id,
+                    )
+                    failures.append(f"{target_name}: gửi ảnh thất bại")
+                    target_failed = True
+                    break
+            if not target_failed:
+                sent_targets.append(target_name)
+
+        return sent_targets, failures
+
+    @staticmethod
+    def _is_voice_camera_confirmation(text: str) -> bool:
+        """Return True when a follow-up clearly approves capture and send."""
+        normalized = normalize_text(text)
+        return normalized in {
+            "dong y",
+            "dong y chup",
+            "dong y chup va gui",
+            "toi dong y",
+            "xac nhan",
+            "xac nhan chup",
+            "toi xac nhan",
+            "co",
+            "duoc",
+            "duoc roi",
+            "vang",
+            "vang dong y",
+            "ok",
+            "oke",
+            "chup di",
+            "chup anh di",
+            "hay chup",
+            "chup va gui",
+            "gui di",
+            "tien hanh",
+        }
+
+    @staticmethod
+    def _is_voice_camera_cancellation(text: str) -> bool:
+        """Return True for a clear camera cancellation response."""
+        normalized = normalize_text(text)
+        return normalized in {
+            "khong",
+            "khong dong y",
+            "khong chup",
+            "khong chup anh",
+            "huy",
+            "huy chup",
+            "thoi",
+            "thoi khong chup",
+        }
+
+    def _current_voice_camera_zalo_targets(
+        self, pending: PendingVoiceCamera
+    ) -> list[dict[str, Any]]:
+        """Return still-configured destinations from the original confirmation."""
+        current_targets = self._configured_zalo_targets()
+        current_by_id = {
+            str(target.get(CONF_ZALO_TARGET_ID, "")): target
+            for target in current_targets
+        }
+        selected: list[dict[str, Any]] = []
+        for original in pending.zalo_targets:
+            target_id = str(original.get(CONF_ZALO_TARGET_ID, ""))
+            current = current_by_id.get(target_id)
+            if current is not None:
+                selected.append(current)
+        return selected
+
+    async def _async_capture_voice_cameras(
+        self,
+        user_input: ConversationInput,
+        pending: PendingVoiceCamera,
+        zalo_targets: list[dict[str, Any]],
+    ) -> str:
+        """Capture selected cameras and send them to configured Zalo targets."""
+        if not self.hass.services.has_service("camera", "snapshot"):
+            return "Action camera.snapshot chưa sẵn sàng trên Home Assistant."
+
+        for target in zalo_targets:
+            await self._async_send_zalo_typing_to_target(
+                str(target.get(CONF_ZALO_THREAD_ID, "")).strip(),
+                str(target.get(CONF_ZALO_ACCOUNT_SELECTION, "")).strip(),
+                user_input.context,
+            )
+
+        owner_key = "voice:" + uuid.uuid5(
+            uuid.NAMESPACE_URL,
+            "|".join(sorted(pending.source_keys)),
+        ).hex
+        image_paths: list[str] = []
+        camera_names: list[str] = []
+        capture_failures: list[str] = []
+        for camera in pending.selected_cameras:
+            image_path, error = await self._async_capture_camera_snapshot(
+                owner_key, camera, user_input.context
+            )
+            if image_path is not None:
+                image_paths.append(image_path)
+                camera_names.append(camera.display_name)
+            elif error:
+                capture_failures.append(error)
+
+        if not image_paths:
+            details = "; ".join(capture_failures)
+            return (
+                "Không chụp được ảnh từ các camera đã chọn. "
+                + (details or "Hãy kiểm tra camera và thư mục media.")
+            )
+
+        sent_targets, send_failures = (
+            await self._async_send_camera_images_to_configured_zalo(
+                image_paths,
+                camera_names,
+                zalo_targets,
+                user_input.context,
+            )
+        )
+        if not sent_targets:
+            details = "; ".join(send_failures)
+            return (
+                f"Đã chụp {len(image_paths)} ảnh nhưng chưa gửi được lên Zalo. "
+                + (details or "Hãy kiểm tra tích hợp zalo_bot.")
+            )
+
+        response = (
+            f"Đã chụp {len(image_paths)} ảnh và gửi lên Zalo đến "
+            + ", ".join(sent_targets)
+            + "."
+        )
+        problems = [*capture_failures, *send_failures]
+        if problems:
+            response += " Một số mục không hoàn tất: " + "; ".join(problems) + "."
+        return response
+
     async def _async_capture_cameras_to_zalo(
         self,
         context: ZaloWebhookContext,
@@ -1790,7 +2107,7 @@ class ConversationalAssistantManager(NoteManagerMixin):
         failures: list[str] = []
         for camera in cameras:
             image_path, error = await self._async_capture_camera_snapshot(
-                context, camera, service_context
+                context.owner_key, camera, service_context
             )
             if image_path is not None:
                 image_paths.append(image_path)
@@ -2791,6 +3108,7 @@ class ConversationalAssistantManager(NoteManagerMixin):
         pending_items = [
             *self._pending.values(),
             *self._pending_deletions.values(),
+            *self._pending_voice_cameras.values(),
             *self._note_pending_items(),
         ]
         if not pending_items:
@@ -2809,6 +3127,7 @@ class ConversationalAssistantManager(NoteManagerMixin):
         has_pending = bool(
             self._pending
             or self._pending_deletions
+            or self._pending_voice_cameras
             or self._has_pending_notes()
         )
         if has_pending and self._unsub_pending_trigger is None:
@@ -2831,7 +3150,7 @@ class ConversationalAssistantManager(NoteManagerMixin):
         self._purge_expired_pending()
 
     def _purge_expired_pending(self) -> None:
-        """Remove expired creation, deletion, and note requests."""
+        """Remove expired creation, deletion, camera, and note requests."""
         self._purge_expired_note_pending()
         now = dt_util.now()
         for pending_id, pending in list(self._pending.items()):
@@ -2840,6 +3159,9 @@ class ConversationalAssistantManager(NoteManagerMixin):
         for pending_id, pending in list(self._pending_deletions.items()):
             if pending.expires_at <= now:
                 del self._pending_deletions[pending_id]
+        for pending_id, pending in list(self._pending_voice_cameras.items()):
+            if pending.expires_at <= now:
+                del self._pending_voice_cameras[pending_id]
         self._sync_pending_followup_trigger()
 
     def _clear_pending_for_source(self, source_keys: set[str]) -> None:
@@ -2851,6 +3173,9 @@ class ConversationalAssistantManager(NoteManagerMixin):
         for pending_id, pending in list(self._pending_deletions.items()):
             if source_keys & pending.source_keys:
                 del self._pending_deletions[pending_id]
+        for pending_id, pending in list(self._pending_voice_cameras.items()):
+            if source_keys & pending.source_keys:
+                del self._pending_voice_cameras[pending_id]
 
     def _set_pending(
         self,
@@ -2899,6 +3224,32 @@ class ConversationalAssistantManager(NoteManagerMixin):
         self._sync_pending_followup_trigger()
         return pending
 
+    def _set_pending_voice_camera(
+        self,
+        user_input: ConversationInput,
+        cameras: list[CameraTarget],
+        zalo_targets: list[dict[str, Any]],
+    ) -> PendingVoiceCamera:
+        """Store a voice camera request waiting for selection."""
+        self._purge_expired_pending()
+        source_keys = self._source_keys(user_input)
+        self._clear_pending_for_source(source_keys)
+        now = dt_util.now()
+        pending = PendingVoiceCamera(
+            pending_id=uuid.uuid4().hex,
+            cameras=cameras,
+            zalo_targets=[dict(target) for target in zalo_targets],
+            source_keys=source_keys,
+            selected_cameras=[],
+            phase="selection",
+            created_at=now,
+            expires_at=now
+            + timedelta(minutes=PENDING_SELECTION_TIMEOUT_MINUTES),
+        )
+        self._pending_voice_cameras[pending.pending_id] = pending
+        self._sync_pending_followup_trigger()
+        return pending
+
     def _find_pending(
         self, user_input: ConversationInput
     ) -> PendingReminder | None:
@@ -2915,6 +3266,7 @@ class ConversationalAssistantManager(NoteManagerMixin):
         if (
             len(self._pending) == 1
             and not self._pending_deletions
+            and not self._pending_voice_cameras
             and not self._has_pending_notes()
         ):
             return next(iter(self._pending.values()))
@@ -2936,9 +3288,32 @@ class ConversationalAssistantManager(NoteManagerMixin):
         if (
             len(self._pending_deletions) == 1
             and not self._pending
+            and not self._pending_voice_cameras
             and not self._has_pending_notes()
         ):
             return next(iter(self._pending_deletions.values()))
+        return None
+
+    def _find_pending_voice_camera(
+        self, user_input: ConversationInput
+    ) -> PendingVoiceCamera | None:
+        """Find a pending voice camera request for this source."""
+        self._purge_expired_pending()
+        source_keys = self._source_keys(user_input)
+        matching = [
+            pending
+            for pending in self._pending_voice_cameras.values()
+            if source_keys & pending.source_keys
+        ]
+        if matching:
+            return max(matching, key=lambda item: item.created_at)
+        if (
+            len(self._pending_voice_cameras) == 1
+            and not self._pending
+            and not self._pending_deletions
+            and not self._has_pending_notes()
+        ):
+            return next(iter(self._pending_voice_cameras.values()))
         return None
 
     @staticmethod
@@ -3189,6 +3564,18 @@ class ConversationalAssistantManager(NoteManagerMixin):
         if is_primary_note_voice_command(text):
             return True
         normalized = normalize_text(text)
+        if normalized.startswith(
+            (
+                "chup anh camera",
+                "chup hinh camera",
+                "lay anh camera",
+                "lay hinh camera",
+                "chup camera",
+                "chup anh may quay",
+                "lay anh may quay",
+            )
+        ):
+            return True
         prefixes = (
             "nhac ",
             "hen ",
@@ -3245,6 +3632,10 @@ class ConversationalAssistantManager(NoteManagerMixin):
             "khong xoa",
             "huy xoa",
             "thoi khong xoa",
+            "khong chup",
+            "khong chup anh",
+            "huy chup",
+            "thoi khong chup",
         }
 
     async def _async_pending_followup_from_voice(
@@ -3256,18 +3647,27 @@ class ConversationalAssistantManager(NoteManagerMixin):
             return None
 
         note_pending = self._find_pending_note(user_input)
+        camera_pending = self._find_pending_voice_camera(user_input)
         creation = self._find_pending(user_input)
         deletion = self._find_pending_deletion(user_input)
         if note_pending is not None:
             return await self._async_pending_note_followup_from_voice(
                 user_input, result, note_pending
             )
-        if creation is None and deletion is None:
+        if camera_pending is None and creation is None and deletion is None:
             self._sync_pending_followup_trigger()
             return None
 
-        if self._is_cancel_pending_text(user_input.text):
-            if creation is not None:
+        if (
+            camera_pending is not None
+            and self._is_voice_camera_cancellation(user_input.text)
+        ) or self._is_cancel_pending_text(user_input.text):
+            if camera_pending is not None:
+                self._pending_voice_cameras.pop(
+                    camera_pending.pending_id, None
+                )
+                response = "Đã hủy yêu cầu chụp ảnh camera."
+            elif creation is not None:
                 self._pending.pop(creation.pending_id, None)
                 response = "Đã hủy nhắc nhở đang tạo."
             else:
@@ -3277,11 +3677,93 @@ class ConversationalAssistantManager(NoteManagerMixin):
             self._sync_pending_followup_trigger()
             return await self._async_voice_response(user_input, response)
 
+        if camera_pending is not None:
+            return await self._async_confirm_camera_from_voice(
+                user_input, result, camera_pending
+            )
         if deletion is not None:
             return await self._async_confirm_deletion_from_voice(
                 user_input, result
             )
         return await self._async_confirm_targets_from_voice(user_input, result)
+
+    async def _async_confirm_camera_from_voice(
+        self,
+        user_input: ConversationInput,
+        result: RecognizeResult,
+        pending: PendingVoiceCamera,
+    ) -> str:
+        """Handle camera selection and final voice confirmation."""
+        if pending.phase == "selection":
+            selection = self._selection_slot(user_input, result)
+            indexes = parse_target_selection(
+                selection,
+                [camera.display_name for camera in pending.cameras],
+            )
+            selected = [pending.cameras[index] for index in indexes]
+            available = [camera for camera in selected if camera.available]
+            if not available:
+                pending.expires_at = dt_util.now() + timedelta(
+                    minutes=PENDING_SELECTION_TIMEOUT_MINUTES
+                )
+                self._sync_pending_followup_trigger()
+                return await self._async_voice_response(
+                    user_input,
+                    self._voice_camera_selection_prompt(
+                        pending.cameras, invalid=True
+                    ),
+                )
+
+            pending.selected_cameras = available
+            pending.phase = "confirmation"
+            pending.expires_at = dt_util.now() + timedelta(
+                minutes=PENDING_SELECTION_TIMEOUT_MINUTES
+            )
+            self._sync_pending_followup_trigger()
+            response = self._voice_camera_confirmation_prompt(
+                available, pending.zalo_targets
+            )
+            unavailable = [
+                camera.display_name for camera in selected if not camera.available
+            ]
+            if unavailable:
+                response = (
+                    "Đã bỏ qua camera không khả dụng: "
+                    + ", ".join(unavailable)
+                    + ". "
+                    + response
+                )
+            return await self._async_voice_response(user_input, response)
+
+        if not self._is_voice_camera_confirmation(user_input.text):
+            pending.expires_at = dt_util.now() + timedelta(
+                minutes=PENDING_SELECTION_TIMEOUT_MINUTES
+            )
+            self._sync_pending_followup_trigger()
+            return await self._async_voice_response(
+                user_input,
+                self._voice_camera_confirmation_prompt(
+                    pending.selected_cameras,
+                    pending.zalo_targets,
+                    invalid=True,
+                ),
+            )
+
+        zalo_targets = self._current_voice_camera_zalo_targets(pending)
+        self._pending_voice_cameras.pop(pending.pending_id, None)
+        self._sync_pending_followup_trigger()
+        if not zalo_targets:
+            return await self._async_voice_response(
+                user_input,
+                "Zalo destination đã bị xóa hoặc tắt trước khi chụp. Hãy mở "
+                "cấu hình Conversational Assistant, thêm hoặc bật lại Zalo "
+                "destination, sau đó thực hiện lại yêu cầu.",
+            )
+
+        response = await self._async_capture_voice_cameras(
+            user_input, pending, zalo_targets
+        )
+        return await self._async_voice_response(user_input, response)
 
     async def _async_confirm_targets_from_voice(
         self, user_input: ConversationInput, result: RecognizeResult
@@ -3372,14 +3854,18 @@ class ConversationalAssistantManager(NoteManagerMixin):
     async def _async_cancel_pending_from_voice(
         self, user_input: ConversationInput, _result: RecognizeResult
     ) -> str:
-        """Cancel a pending creation or deletion."""
+        """Cancel a pending creation, deletion, or camera request."""
+        camera = self._find_pending_voice_camera(user_input)
         creation = self._find_pending(user_input)
         deletion = self._find_pending_deletion(user_input)
-        if creation is None and deletion is None:
+        if camera is None and creation is None and deletion is None:
             return await self._async_voice_response(
                 user_input, "Không có yêu cầu nào đang chờ xác nhận."
             )
-        if creation is not None:
+        if camera is not None:
+            self._pending_voice_cameras.pop(camera.pending_id, None)
+            response = "Đã hủy yêu cầu chụp ảnh camera."
+        elif creation is not None:
             self._pending.pop(creation.pending_id, None)
             response = "Đã hủy nhắc nhở đang tạo."
         else:
