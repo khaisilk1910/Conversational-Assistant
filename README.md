@@ -10,7 +10,37 @@
 Tích hợp kết hợp quản lý nhắc hẹn, ghi chú bảo mật, thông báo đa kênh và điều khiển nhà thông minh trong cùng một cấu hình. Người dùng có thể tạo nhắc hẹn bằng giọng nói, nhận thông báo trên điện thoại, Zalo hoặc loa, đồng thời hỏi trạng thái thiết bị, thời tiết và lịch sự kiện trực tiếp từ Zalo.
 
 > [!IMPORTANT]
-> Đây là custom integration do cộng đồng phát triển, không phải tích hợp chính thức do Home Assistant cung cấp. Hãy sao lưu cấu hình Home Assistant trước khi cài đặt hoặc nâng cấp.
+> Cài tích hợp rồi thêm Automation dưới.
+> Lưu ý lấy `uid_cua_bot_de_tranh_tu_tra_loi_tin_cua_chinh_bot` cho vào điều kiện để tránh bot tự trả lời tin nhắn của chính bot.
+> `webhook_id` là webhook Zalo_bot bạn đang dùng Automation.
+> Thêm `'@1080' in (trigger.json.data.content | default('') | string)` nếu bạn muốn khi yêu cầu phải nhập `@1080` + nội dung yêu cầu. Ví dụ: **`@1080` hẹn 10h30 hàng ngày uống thuốc**
+> Nếu không muốn hãy bỏ đoạn `and '@1080' in (trigger.json.data.content | default('') | string)`. Khi đó chỉ yêu cầu: **Hẹn 10h30 hàng ngày uống thuốc**
+
+```
+alias: Zalo - Bot Answer Multi Group Voice Reminder
+description: ""
+triggers:
+  - trigger: webhook
+    allowed_methods:
+      - POST
+    local_only: false
+    webhook_id: "webhook_zalo_bot_dang_co"
+conditions:
+  - condition: template
+    value_template: |-
+      {{
+        (trigger.json.data.uidFrom | string) != 'uid_cua_bot_de_tranh_tu_tra_loi_tin_cua_chinh_bot'
+        and
+        '@1080' in (trigger.json.data.content | default('') | string)
+      }}
+    enabled: true
+actions:
+  - action: conversational_assistant.process_zalo_webhook
+    data:
+      payload: "{{ trigger.json | to_json }}"
+mode: parallel
+max: 50
+```
 
 ---
 
