@@ -6,8 +6,9 @@ import asyncio
 import calendar
 from collections import deque
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime, timedelta
+from functools import partial
 import logging
 import os
 import re
@@ -32,7 +33,11 @@ from homeassistant.components.homeassistant.exposed_entities import (
     async_should_expose,
 )
 from homeassistant.config_entries import ConfigEntry
-from homeassistant.const import ATTR_SUPPORTED_FEATURES, STATE_UNAVAILABLE, STATE_UNKNOWN
+from homeassistant.const import (
+    ATTR_SUPPORTED_FEATURES,
+    STATE_UNAVAILABLE,
+    STATE_UNKNOWN,
+)
 from homeassistant.core import Context, CoreState, Event, HomeAssistant, callback
 from homeassistant.helpers import device_registry as dr
 from homeassistant.helpers import entity_registry as er
@@ -49,6 +54,9 @@ from .const import (
     ASSIST_SATELLITE_SERVICE_ANNOUNCE,
     CAMERA_SENTENCES,
     CANCEL_SENTENCES,
+    COMMAND_DELETE_SENTENCES,
+    COMMAND_LEARN_SENTENCES,
+    COMMAND_LIST_SENTENCES,
     CONF_CONFIRM_TARGETS,
     CONF_DISMISS_ON_CLEAR,
     CONF_SPEAKER_ENABLED,
@@ -99,6 +107,32 @@ from .const import (
     ZALO_TYPE_GROUP,
     ZALO_TYPE_USER,
     ZALO_WEBHOOK_SEEN_MESSAGE_LIMIT,
+)
+from .command_memory import (
+    ACTION_CAMERA,
+    ACTION_CALENDAR,
+    ACTION_HELP,
+    ACTION_HOME_ASSISTANT,
+    ACTION_LABELS,
+    ACTION_NOTE_CREATE,
+    ACTION_NOTE_DELETE,
+    ACTION_NOTE_EDIT,
+    ACTION_NOTE_LIST,
+    ACTION_NOTE_VIEW,
+    ACTION_REMINDER_CREATE,
+    ACTION_REMINDER_DELETE,
+    ACTION_REMINDER_LIST,
+    CommandMemoryError,
+    LearnedCommand,
+    MAX_LEARNED_COMMANDS,
+    REQUEST_ACTIONS,
+    canonical_text,
+    explicit_target_action,
+    hassil_sentences,
+    management_command_kind,
+    match_learned_command,
+    parse_delete_request,
+    parse_learn_request,
 )
 from .models import Reminder
 from .note_flow import (
@@ -306,6 +340,22 @@ def _sanitize_spoken_text(value: str) -> str:
     return " ".join("".join(characters).split())
 
 
+class _ConversationInputTextProxy:
+    """Expose one ConversationInput with replacement text.
+
+    Home Assistant's ConversationInput implementation can change between
+    releases. Delegating every other attribute avoids depending on its
+    constructor while letting existing handlers parse a canonical command.
+    """
+
+    def __init__(self, original: ConversationInput, text: str) -> None:
+        self._original = original
+        self.text = text
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self._original, name)
+
+
 class ConversationalAssistantManager(NoteManagerMixin):
     """Store, schedule, send, and manage reminders."""
 
@@ -314,6 +364,7 @@ class ConversationalAssistantManager(NoteManagerMixin):
         self.hass = hass
         self.entry = entry
         self.reminders: dict[str, Reminder] = {}
+        self.learned_commands: dict[str, LearnedCommand] = {}
         self._initialize_note_state()
         self._pending: dict[str, PendingReminder] = {}
         self._pending_deletions: dict[str, PendingDeletion] = {}
@@ -333,6 +384,7 @@ class ConversationalAssistantManager(NoteManagerMixin):
         self._unsub_pending_trigger: Callable[[], None] | None = None
         self._unsub_pending_expiry_timer: Callable[[], None] | None = None
         self._unsubs: list[Callable[[], None]] = []
+        self._learned_trigger_unsubs: list[Callable[[], None]] = []
         # Optional targets are discovered only when a command actually needs
         # them.  Never populate these caches from async_setup(), otherwise a
         # large device/entity registry can delay Home Assistant startup.
@@ -502,10 +554,29 @@ class ConversationalAssistantManager(NoteManagerMixin):
                 continue
             self.reminders[reminder.reminder_id] = reminder
         self._load_notes(stored)
+        for item in stored.get("learned_commands", []):
+            try:
+                command = LearnedCommand.from_dict(item)
+            except (CommandMemoryError, KeyError, TypeError, ValueError):
+                _LOGGER.warning("Skipping invalid learned command: %s", item)
+                continue
+            self.learned_commands[command.command_id] = command
 
         agent_manager = get_agent_manager(self.hass)
         self._unsubs.extend(
             [
+                agent_manager.register_trigger(
+                    COMMAND_LEARN_SENTENCES,
+                    self._async_learn_command_from_voice,
+                ),
+                agent_manager.register_trigger(
+                    COMMAND_LIST_SENTENCES,
+                    self._async_list_learned_commands_from_voice,
+                ),
+                agent_manager.register_trigger(
+                    COMMAND_DELETE_SENTENCES,
+                    self._async_delete_learned_command_from_voice,
+                ),
                 agent_manager.register_trigger(
                     CREATE_SENTENCES, self._async_create_from_voice
                 ),
@@ -527,6 +598,7 @@ class ConversationalAssistantManager(NoteManagerMixin):
                 ),
             ]
         )
+        self._sync_learned_command_triggers(agent_manager)
         self._unsubs.append(
             async_at_started(self.hass, self._async_home_assistant_started)
         )
@@ -551,6 +623,7 @@ class ConversationalAssistantManager(NoteManagerMixin):
         if self._unsub_pending_trigger is not None:
             self._unsub_pending_trigger()
             self._unsub_pending_trigger = None
+        self._clear_learned_command_triggers()
         for unsub in self._unsubs:
             unsub()
         self._zalo_ha_conversation_ids.clear()
@@ -585,12 +658,284 @@ class ConversationalAssistantManager(NoteManagerMixin):
                 reminder.as_dict() for reminder in self.reminders.values()
             ],
             "notes": self._serialize_notes(),
+            "learned_commands": [
+                command.as_dict()
+                for command in sorted(
+                    self.learned_commands.values(),
+                    key=lambda item: item.created_at,
+                )
+            ],
         }
 
     @callback
     def _save_later(self) -> None:
         """Schedule a storage write."""
         self._store.async_delay_save(self._serialize, 1)
+
+    @property
+    def learned_command_count(self) -> int:
+        """Return the number of persistent custom command phrases."""
+        return len(self.learned_commands)
+
+    @property
+    def learned_command_sensor_rows(self) -> list[dict[str, Any]]:
+        """Return learned command metadata safe for sensor attributes."""
+        commands = sorted(
+            self.learned_commands.values(),
+            key=lambda item: (item.phrase, item.command_id),
+        )
+        return [
+            {
+                "stt": index,
+                "command_id": command.command_id,
+                "cau_lenh": command.phrase,
+                "chuc_nang": command.action_label,
+                "lenh_dich": command.target_label,
+                "nhan_noi_dung_theo": command.accepts_request,
+                "cap_nhat_luc": command.updated_at.isoformat(),
+            }
+            for index, command in enumerate(commands, start=1)
+        ]
+
+    @callback
+    def _clear_learned_command_triggers(self) -> None:
+        """Unregister every dynamically learned Assist trigger."""
+        for unsub in self._learned_trigger_unsubs:
+            try:
+                unsub()
+            except Exception:  # noqa: BLE001 - best effort during reload
+                _LOGGER.debug(
+                    "Failed to unregister one learned command trigger",
+                    exc_info=True,
+                )
+        self._learned_trigger_unsubs.clear()
+
+    @callback
+    def _sync_learned_command_triggers(self, agent_manager: Any | None = None) -> None:
+        """Re-register all learned aliases so changes apply immediately."""
+        self._clear_learned_command_triggers()
+        agent_manager = agent_manager or get_agent_manager(self.hass)
+        for command in sorted(
+            self.learned_commands.values(),
+            key=lambda item: (item.phrase, item.command_id),
+        ):
+            try:
+                unsub = agent_manager.register_trigger(
+                    hassil_sentences(command),
+                    partial(
+                        self._async_execute_learned_command_from_voice,
+                        command_id=command.command_id,
+                    ),
+                )
+            except Exception:  # noqa: BLE001 - keep other aliases active
+                _LOGGER.exception(
+                    "Failed to register learned command phrase %s",
+                    command.phrase,
+                )
+                continue
+            self._learned_trigger_unsubs.append(unsub)
+
+    def _supported_action_for_text(self, text: str) -> str | None:
+        """Resolve one existing command phrase to a learnable action."""
+        explicit = explicit_target_action(text)
+        if explicit is not None:
+            return explicit
+
+        note_kind = note_zalo_command_kind(text)
+        if note_kind is not None:
+            return note_kind
+
+        builtin = self._builtin_zalo_command_kind(text)
+        if builtin in {
+            ACTION_REMINDER_CREATE,
+            ACTION_REMINDER_LIST,
+            ACTION_REMINDER_DELETE,
+            ACTION_HELP,
+        }:
+            return builtin
+
+        ha_kind = explicit_home_assistant_request_kind(text)
+        if ha_kind == "camera":
+            return ACTION_CAMERA
+        if ha_kind == "calendar":
+            return ACTION_CALENDAR
+        if ha_kind == "conversation":
+            return ACTION_HOME_ASSISTANT
+        return None
+
+    def _learned_commands_text(self) -> str:
+        """Build a compact numbered list for Voice Assist or Zalo."""
+        commands = sorted(
+            self.learned_commands.values(),
+            key=lambda item: (item.phrase, item.command_id),
+        )
+        if not commands:
+            return (
+                "Bộ nhớ câu lệnh chưa có câu nào. Ví dụ, hãy nói: "
+                "học câu lệnh xem cổng để chụp ảnh camera."
+            )
+        lines = ["Các câu lệnh đã học là:"]
+        for index, command in enumerate(commands, start=1):
+            suffix = " và nội dung phía sau" if command.accepts_request else ""
+            lines.append(
+                f"{index} - {command.phrase}: {command.target_label}{suffix}."
+            )
+        lines.append(
+            "Có thể nói xóa câu lệnh rồi đọc đúng câu cần quên."
+        )
+        return "\n".join(lines)
+
+    def _upsert_learned_command(
+        self, phrase: str, action: str, target_text: str | None = None
+    ) -> tuple[LearnedCommand | None, str]:
+        """Create or update one alias and return a user-facing result."""
+        builtin_action = self._supported_action_for_text(phrase)
+        if builtin_action is not None:
+            if builtin_action == action:
+                return None, (
+                    f"Câu {phrase} đã là câu lệnh có sẵn cho chức năng "
+                    f"{ACTION_LABELS[action]}, nên không cần lưu thêm."
+                )
+            return None, (
+                f"Câu {phrase} đang là câu lệnh có sẵn cho chức năng "
+                f"{ACTION_LABELS.get(builtin_action, builtin_action)}. "
+                "Hãy chọn cách nói khác để tránh nhầm lẫn."
+            )
+
+        normalized = normalize_text(phrase)
+        existing = next(
+            (
+                command
+                for command in self.learned_commands.values()
+                if command.normalized_phrase == normalized
+            ),
+            None,
+        )
+        for other in self.learned_commands.values():
+            if existing is not None and other.command_id == existing.command_id:
+                continue
+            other_phrase = other.normalized_phrase
+            new_accepts_request = action in REQUEST_ACTIONS
+            overlaps = (
+                other.accepts_request
+                and normalized.startswith(f"{other_phrase} ")
+            ) or (
+                new_accepts_request
+                and other_phrase.startswith(f"{normalized} ")
+            )
+            if overlaps:
+                return None, (
+                    f"Câu {phrase} dễ nhầm với câu đã học {other.phrase}. "
+                    "Hãy dùng cách nói khác rõ hơn."
+                )
+        now = dt_util.now()
+        if existing is not None:
+            old_action = existing.action
+            old_target_label = existing.target_label
+            existing.phrase = phrase
+            existing.normalized_phrase = normalized
+            existing.action = action
+            existing.target_text = target_text
+            existing.updated_at = now
+            self._sync_learned_command_triggers()
+            self._save_later()
+            self._notify_update()
+            if old_action == action and old_target_label == existing.target_label:
+                return existing, (
+                    f"Câu {phrase} đã được ghi nhớ cho chức năng "
+                    f"{existing.target_label}."
+                )
+            return existing, (
+                f"Đã đổi câu {phrase} từ {old_target_label} "
+                f"sang {existing.target_label}."
+            )
+
+        if len(self.learned_commands) >= MAX_LEARNED_COMMANDS:
+            return None, (
+                f"Bộ nhớ đã đạt giới hạn {MAX_LEARNED_COMMANDS} câu lệnh. "
+                "Hãy xóa câu không còn dùng trước khi dạy câu mới."
+            )
+
+        command = LearnedCommand(
+            command_id=uuid.uuid4().hex,
+            phrase=phrase,
+            normalized_phrase=normalized,
+            action=action,
+            created_at=now,
+            updated_at=now,
+            target_text=target_text,
+        )
+        self.learned_commands[command.command_id] = command
+        self._sync_learned_command_triggers()
+        self._save_later()
+        self._notify_update()
+        suffix = (
+            " Nội dung nói phía sau câu này cũng sẽ được chuyển tiếp."
+            if command.accepts_request
+            else ""
+        )
+        return command, (
+            f"Đã học câu lệnh {command.phrase} cho chức năng "
+            f"{command.target_label}.{suffix}"
+        )
+
+    def _delete_learned_command_text(self, text: str) -> str:
+        """Delete one or all aliases from a natural management request."""
+        try:
+            clear_all, phrase = parse_delete_request(text)
+        except CommandMemoryError as err:
+            return str(err)
+
+        if clear_all:
+            count = len(self.learned_commands)
+            if not count:
+                return "Bộ nhớ câu lệnh đang trống."
+            self.learned_commands.clear()
+            self._sync_learned_command_triggers()
+            self._save_later()
+            self._notify_update()
+            return f"Đã xóa toàn bộ {count} câu lệnh đã học."
+
+        normalized = normalize_text(phrase)
+        matches = [
+            command
+            for command in self.learned_commands.values()
+            if command.normalized_phrase == normalized
+        ]
+        if not matches:
+            return (
+                f"Không tìm thấy câu lệnh {phrase} trong bộ nhớ. "
+                "Hãy nói danh sách câu lệnh đã học để kiểm tra."
+            )
+        for command in matches:
+            self.learned_commands.pop(command.command_id, None)
+        self._sync_learned_command_triggers()
+        self._save_later()
+        self._notify_update()
+        return f"Đã quên câu lệnh {phrase}."
+
+    def _learn_command_text(self, text: str) -> str:
+        """Parse and persist one natural teach request."""
+        try:
+            phrase, target = parse_learn_request(text)
+        except CommandMemoryError as err:
+            return str(err)
+        action = self._supported_action_for_text(target)
+        if action is None:
+            supported = ", ".join(ACTION_LABELS.values())
+            return (
+                f"Chưa nhận ra chức năng {target}. Các chức năng có thể học gồm: "
+                f"{supported}."
+            )
+        target_text = (
+            target
+            if action in {ACTION_HOME_ASSISTANT, ACTION_CALENDAR}
+            else None
+        )
+        _command, response = self._upsert_learned_command(
+            phrase, action, target_text
+        )
+        return response
 
     @callback
     def _notify_update(self) -> None:
@@ -950,8 +1295,8 @@ class ConversationalAssistantManager(NoteManagerMixin):
         return False
 
     @staticmethod
-    def _zalo_command_kind(text: str) -> str | None:
-        """Classify supported Vietnamese reminder and note commands from Zalo."""
+    def _builtin_zalo_command_kind(text: str) -> str | None:
+        """Classify built-in reminder, note, and help commands from Zalo."""
         note_kind = note_zalo_command_kind(text)
         if note_kind is not None:
             return note_kind
@@ -1044,6 +1389,13 @@ class ConversationalAssistantManager(NoteManagerMixin):
             return "create"
         return None
 
+    def _zalo_command_kind(self, text: str) -> str | None:
+        """Classify management commands before the normal built-in router."""
+        memory_kind = management_command_kind(text)
+        if memory_kind is not None:
+            return memory_kind
+        return self._builtin_zalo_command_kind(text)
+
     @staticmethod
     def _zalo_delete_request(text: str) -> str:
         """Return normalized text following a delete command prefix."""
@@ -1085,7 +1437,12 @@ class ConversationalAssistantManager(NoteManagerMixin):
             "• Ghi nhớ mã tủ đồ là 2468\n"
             "• Danh sách ghi chú\n"
             "• Sửa ghi chú hoặc Xóa ghi chú\n"
-            "Mỗi ghi chú được chọn Mức 1 Bảo mật hoặc Mức 2 Công khai."
+            "Mỗi ghi chú được chọn Mức 1 Bảo mật hoặc Mức 2 Công khai.\n"
+            "Bộ nhớ câu lệnh:\n"
+            "• Học câu lệnh xem cổng để chụp ảnh camera\n"
+            "• Học câu lệnh việc mới để tạo nhắc hẹn\n"
+            "• Danh sách câu lệnh đã học\n"
+            "• Xóa câu lệnh xem cổng"
         )
 
     def _zalo_upcoming_reminders(
@@ -2281,6 +2638,40 @@ class ConversationalAssistantManager(NoteManagerMixin):
             "trạng thái tầng 2, hoặc thời tiết hôm nay."
         )
 
+    async def _async_home_assistant_conversation_from_voice(
+        self,
+        user_input: ConversationInput,
+        text: str,
+    ) -> str:
+        """Run a learned Home Assistant macro from an Assist request."""
+        try:
+            result = await async_converse(
+                hass=self.hass,
+                text=text,
+                conversation_id=user_input.conversation_id,
+                context=user_input.context,
+                language=str(getattr(user_input, "language", "vi") or "vi"),
+                agent_id=self.zalo_conversation_agent_id,
+            )
+        except Exception:  # noqa: BLE001 - always return a voice response
+            _LOGGER.exception(
+                "Home Assistant conversation failed for learned command %s",
+                text,
+            )
+            return await self._async_voice_response(
+                user_input,
+                "Home Assistant chưa xử lý được câu lệnh đã học. Hãy kiểm tra "
+                "quyền expose thiết bị cho Assist.",
+            )
+
+        reply = self._conversation_reply_text(result)
+        if not reply:
+            reply = (
+                "Tôi đã chuyển câu lệnh đã học cho Home Assistant nhưng chưa "
+                "nhận được nội dung trả lời."
+            )
+        return await self._async_voice_response(user_input, reply)
+
     def _zalo_exposed_calendar_states(self, text: str) -> list[Any]:
         """Return calendar entities exposed to Home Assistant Assist."""
         states = []
@@ -2389,6 +2780,20 @@ class ConversationalAssistantManager(NoteManagerMixin):
     ) -> str | ZaloDirectResponse | None:
         """Route one inbound Zalo text message to reminder actions."""
         command = self._zalo_command_kind(context.text)
+        learned_match = None
+        if command is None:
+            learned_match = match_learned_command(
+                context.text, list(self.learned_commands.values())
+            )
+            if learned_match is not None:
+                command = learned_match.command.action
+                replacement_text = canonical_text(
+                    command,
+                    learned_match.request,
+                    learned_match.command.target_text,
+                )
+                if replacement_text:
+                    context = replace(context, text=replacement_text)
         explicit_ha_kind = (
             explicit_home_assistant_request_kind(context.text)
             if self.zalo_home_assistant_enabled
@@ -2431,6 +2836,16 @@ class ConversationalAssistantManager(NoteManagerMixin):
                 context, pending_deletion
             )
 
+        if command == "command_learn":
+            self._clear_zalo_pending_for_owner(context.owner_key)
+            return self._learn_command_text(context.text)
+        if command == "command_list":
+            self._clear_zalo_pending_for_owner(context.owner_key)
+            return self._learned_commands_text()
+        if command == "command_delete":
+            self._clear_zalo_pending_for_owner(context.owner_key)
+            return self._delete_learned_command_text(context.text)
+
         if command and command.startswith("note_"):
             self._zalo_pending_creations.pop(context.owner_key, None)
             self._zalo_pending_deletions.pop(context.owner_key, None)
@@ -2457,6 +2872,9 @@ class ConversationalAssistantManager(NoteManagerMixin):
             self._zalo_pending_notes.pop(context.owner_key, None)
             self._zalo_pending_cameras.pop(context.owner_key, None)
             return self._zalo_help_text()
+        if command == ACTION_CAMERA:
+            self._clear_zalo_pending_for_owner(context.owner_key)
+            return await self._async_camera_from_zalo(context)
 
         if explicit_ha_kind is not None:
             return await self._async_process_home_assistant_from_zalo(
@@ -3558,9 +3976,118 @@ class ConversationalAssistantManager(NoteManagerMixin):
         response = f"{parsed.confirmation} Sẽ thông báo đến {target_names}."
         return await self._async_voice_response(user_input, response)
 
-    @staticmethod
-    def _is_primary_voice_command(text: str) -> bool:
+    async def _async_learn_command_from_voice(
+        self, user_input: ConversationInput, _result: RecognizeResult
+    ) -> str:
+        """Teach one persistent alternative phrase through Assist."""
+        source_keys = self._source_keys(user_input)
+        self._clear_pending_for_source(source_keys)
+        self._sync_pending_followup_trigger()
+        return await self._async_voice_response(
+            user_input, self._learn_command_text(user_input.text)
+        )
+
+    async def _async_list_learned_commands_from_voice(
+        self, user_input: ConversationInput, _result: RecognizeResult
+    ) -> str:
+        """List persistent learned phrases through Assist."""
+        source_keys = self._source_keys(user_input)
+        self._clear_pending_for_source(source_keys)
+        self._sync_pending_followup_trigger()
+        return await self._async_voice_response(
+            user_input, self._learned_commands_text()
+        )
+
+    async def _async_delete_learned_command_from_voice(
+        self, user_input: ConversationInput, _result: RecognizeResult
+    ) -> str:
+        """Delete one or all persistent learned phrases through Assist."""
+        source_keys = self._source_keys(user_input)
+        self._clear_pending_for_source(source_keys)
+        self._sync_pending_followup_trigger()
+        return await self._async_voice_response(
+            user_input, self._delete_learned_command_text(user_input.text)
+        )
+
+    async def _async_execute_learned_command_from_voice(
+        self,
+        user_input: ConversationInput,
+        result: RecognizeResult,
+        *,
+        command_id: str,
+    ) -> str | None:
+        """Run one learned alias through its existing integration workflow."""
+        command = self.learned_commands.get(command_id)
+        if command is None:
+            return None
+
+        self._clear_pending_for_source(self._source_keys(user_input))
+        self._sync_pending_followup_trigger()
+
+        request = ""
+        entity = result.entities.get("request")
+        if entity is not None:
+            value = entity.text or entity.value
+            if value:
+                request = str(value).strip()
+        transformed_text = canonical_text(
+            command.action, request, command.target_text
+        )
+        transformed_input: ConversationInput | _ConversationInputTextProxy
+        transformed_input = (
+            _ConversationInputTextProxy(user_input, transformed_text)
+            if transformed_text
+            else user_input
+        )
+
+        if command.action == ACTION_CAMERA:
+            return await self._async_camera_from_voice(user_input, result)
+        if command.action == ACTION_REMINDER_CREATE:
+            return await self._async_create_from_voice(
+                transformed_input, result
+            )
+        if command.action == ACTION_REMINDER_LIST:
+            return await self._async_list_from_voice(user_input, result)
+        if command.action == ACTION_REMINDER_DELETE:
+            return await self._async_cancel_from_voice(
+                transformed_input, result
+            )
+        if command.action == ACTION_NOTE_CREATE:
+            return await self._async_create_note_from_voice(
+                transformed_input, result
+            )
+        if command.action == ACTION_NOTE_LIST:
+            return await self._async_list_notes_from_voice(user_input, result)
+        if command.action == ACTION_NOTE_EDIT:
+            return await self._async_edit_note_from_voice(user_input, result)
+        if command.action == ACTION_NOTE_DELETE:
+            return await self._async_delete_note_from_voice(user_input, result)
+        if command.action == ACTION_NOTE_VIEW:
+            return await self._async_view_note_from_voice(
+                transformed_input, result
+            )
+        if command.action == ACTION_HELP:
+            response = self._zalo_help_text()
+            return await self._async_voice_response(user_input, response)
+        if command.action in {ACTION_HOME_ASSISTANT, ACTION_CALENDAR}:
+            if not transformed_text:
+                return await self._async_voice_response(
+                    user_input,
+                    "Câu lệnh đã học thiếu nội dung Home Assistant đích.",
+                )
+            return await self._async_home_assistant_conversation_from_voice(
+                user_input, transformed_text
+            )
+        return None
+
+    def _is_primary_voice_command(self, text: str) -> bool:
         """Return whether another Conversational Assistant trigger handles text."""
+        if management_command_kind(text) is not None:
+            return True
+        if match_learned_command(
+            text, list(self.learned_commands.values())
+        ) is not None:
+            return True
         if is_primary_note_voice_command(text):
             return True
         normalized = normalize_text(text)

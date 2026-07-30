@@ -4,13 +4,10 @@
   "codeowners": [],
   "config_flow": true,
   "dependencies": [
-    "conversation",
-    "mobile_app",
-    "media_player",
-    "tts"
+    "conversation"
   ],
   "integration_type": "service",
   "iot_class": "local_push",
   "requirements": [],
-  "version": "2026.07.30.1410"
+  "version": "1.2.0"
 }

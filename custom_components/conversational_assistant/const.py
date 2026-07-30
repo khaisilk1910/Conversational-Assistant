@@ -91,6 +91,36 @@ ASSIST_SATELLITE_SERVICE_ANNOUNCE = "announce"
 # Registered only while a reminder is waiting for destination confirmation.
 PENDING_FOLLOWUP_SENTENCES = ["{selection}"]
 
+# Users can teach persistent alternative phrases for existing workflows.
+# These management commands are static; learned phrases themselves are
+# registered dynamically after loading Home Assistant Store.
+COMMAND_LEARN_SENTENCES = [
+    "[hãy ](học|dạy|thêm) câu lệnh",
+    "[hãy ](học|dạy|thêm) câu lệnh {request}",
+    "[hãy ]thêm câu lệnh tùy chỉnh",
+    "[hãy ]thêm câu lệnh tùy chỉnh {request}",
+    "[hãy ](thêm|dạy) cách nói",
+    "[hãy ](thêm|dạy) cách nói {request}",
+]
+
+COMMAND_LIST_SENTENCES = [
+    "[hãy ]danh sách câu lệnh đã học",
+    "[hãy ]liệt kê câu lệnh đã học",
+    "[hãy ]xem câu lệnh đã học",
+    "[hãy ]các câu lệnh đã học",
+    "[hãy ]tôi đã dạy những câu lệnh nào",
+    "[hãy ]bộ nhớ câu lệnh",
+]
+
+COMMAND_DELETE_SENTENCES = [
+    "[hãy ](xóa|xoá|quên) câu lệnh",
+    "[hãy ](xóa|xoá|quên) câu lệnh {request}",
+    "[hãy ](xóa|xoá) câu lệnh đã học {request}",
+    "[hãy ](xóa|xoá) câu lệnh tùy chỉnh {request}",
+    "[hãy ](xóa|xoá|quên) tất cả câu lệnh đã học",
+    "[hãy ](xóa|xoá|quên) toàn bộ câu lệnh đã học",
+]
+
 CREATE_SENTENCES = [
     # Explicit forms first so their wildcard contains only the actual request.
     "[hãy ]nhắc tôi {request}",

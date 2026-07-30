@@ -27,6 +27,7 @@ async def async_setup_entry(
             ConversationalAssistantCountSensor(manager, entry),
             ConversationalAssistantNextSensor(manager, entry),
             ConversationalAssistantNoteCountSensor(manager, entry),
+            ConversationalAssistantLearnedCommandCountSensor(manager, entry),
         ]
     )
 
@@ -199,4 +200,41 @@ class ConversationalAssistantNoteCountSensor(ConversationalAssistantSensorBase):
             "bao_mat": (
                 "Nội dung Mức 1 được mã hóa và không xuất hiện trong sensor."
             ),
+        }
+
+
+class ConversationalAssistantLearnedCommandCountSensor(
+    ConversationalAssistantSensorBase
+):
+    """Persistent learned command count and safe alias list."""
+
+    _attr_name = "Số câu lệnh đã học"
+    _attr_icon = "mdi:head-cog-outline"
+
+    def __init__(
+        self,
+        manager: ConversationalAssistantManager,
+        entry: ConfigEntry,
+    ) -> None:
+        """Initialize learned command sensor."""
+        super().__init__(manager, entry)
+        self._attr_unique_id = f"{entry.entry_id}_learned_command_count"
+
+    @property
+    def native_value(self) -> int:
+        """Return learned command count."""
+        return self.manager.learned_command_count
+
+    @property
+    def extra_state_attributes(self) -> dict[str, Any]:
+        """Return phrases and mapped functions."""
+        rows = self.manager.learned_command_sensor_rows
+        return {
+            "list_cau_lenh": "\n".join(
+                f"{row['stt']} - {row['cau_lenh']} : {row['lenh_dich']}"
+                for row in rows
+            ),
+            "cau_lenh_da_hoc": rows,
+            "luu_tru": "Home Assistant Store",
+            "ap_dung": "Voice Assist và Zalo",
         }
