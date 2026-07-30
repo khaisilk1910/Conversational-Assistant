@@ -4,10 +4,11 @@ from __future__ import annotations
 
 import asyncio
 import calendar
+import json
 from collections import deque
 from collections.abc import Callable
 from dataclasses import dataclass, replace
-from datetime import datetime, timedelta
+from datetime import datetime, time, timedelta
 from functools import partial
 import logging
 import os
@@ -20,6 +21,7 @@ import uuid
 from hassil.recognize import RecognizeResult
 
 from homeassistant.components import media_source, persistent_notification
+from homeassistant.components.calendar.const import CalendarEntityFeature
 from homeassistant.components.mobile_app.const import ATTR_WEBHOOK_ID
 from homeassistant.components.mobile_app.util import get_notify_service
 from homeassistant.components.media_player.const import MediaPlayerEntityFeature
@@ -162,11 +164,17 @@ from .parser import (
 )
 from .targeting import normalize_text, parse_target_selection
 from .zalo_home_assistant import (
+    CalendarCreateRequest,
+    CalendarWindow,
+    calendar_create_request_from_ai_payload,
+    calendar_has_time_reference,
     calendar_matches_query,
+    calendar_request_action,
     calendar_window_from_text,
     event_from_calendar_state,
     explicit_home_assistant_request_kind,
     extract_calendar_events,
+    format_calendar_create_request,
     format_calendar_events,
 )
 
@@ -293,7 +301,9 @@ def _request_language(text: str) -> str:
         "kitchen", "bedroom", "brightness", "volume", "thermostat", "door",
         "search", "internet", "web", "find", "look", "latest", "news",
         "price", "information", "generate", "create", "make", "draw",
-        "image",
+        "image", "schedule", "book", "meeting", "appointment", "week",
+        "month", "year", "days", "weeks", "months", "years", "morning",
+        "afternoon", "evening", "night", "noon",
     }
     vietnamese_markers = {
         "toi", "hay", "bat", "tat", "mo", "dong", "kiem", "tra",
@@ -419,6 +429,24 @@ class PendingZaloCamera:
 
     cameras: list[CameraTarget]
     expires_at: datetime
+
+
+@dataclass(slots=True, frozen=True)
+class CalendarTarget:
+    """One writable calendar selectable from a Zalo conversation."""
+
+    entity_id: str
+    display_name: str
+
+
+@dataclass(slots=True)
+class PendingZaloCalendarEvent:
+    """Parsed calendar event waiting for a calendar selection."""
+
+    request: CalendarCreateRequest
+    calendars: list[CalendarTarget]
+    expires_at: datetime
+    ai_attempted_agents: list[str]
 
 
 @dataclass(slots=True)
@@ -566,6 +594,9 @@ class ConversationalAssistantManager(NoteManagerMixin):
         self._zalo_pending_creations: dict[str, PendingZaloReminder] = {}
         self._zalo_pending_deletions: dict[str, PendingZaloDeletion] = {}
         self._zalo_pending_cameras: dict[str, PendingZaloCamera] = {}
+        self._zalo_pending_calendar_events: dict[
+            str, PendingZaloCalendarEvent
+        ] = {}
         self._zalo_seen_message_ids: deque[str] = deque()
         self._zalo_seen_message_id_set: set[str] = set()
         self._zalo_ha_conversation_ids: dict[str, str] = {}
@@ -858,6 +889,7 @@ class ConversationalAssistantManager(NoteManagerMixin):
             feature_name = {
                 "image": "image generation",
                 "conversation": "conversation",
+                "calendar": "calendar analysis",
             }.get(feature, "search")
             message = (
                 f"🔄 **Switching AI for {feature_name}**\n\n"
@@ -869,6 +901,7 @@ class ConversationalAssistantManager(NoteManagerMixin):
             feature_name = {
                 "image": "tạo ảnh",
                 "conversation": "hội thoại",
+                "calendar": "phân tích lịch",
             }.get(feature, "tìm kiếm")
             message = (
                 f"🔄 **Đang chuyển AI dự phòng cho {feature_name}**\n\n"
@@ -883,6 +916,10 @@ class ConversationalAssistantManager(NoteManagerMixin):
         if action == ACTION_IMAGE_GENERATION:
             candidates = self._ai_image_agent_candidates(
                 self.ai_image_task_entity_id
+            )
+        elif action == ACTION_CALENDAR:
+            candidates = self._conversation_agent_candidates(
+                self.zalo_conversation_agent_id
             )
         else:
             candidates = self._conversation_agent_candidates(
@@ -1081,6 +1118,7 @@ class ConversationalAssistantManager(NoteManagerMixin):
         self._zalo_pending_creations.clear()
         self._zalo_pending_deletions.clear()
         self._zalo_pending_cameras.clear()
+        self._zalo_pending_calendar_events.clear()
         self._clear_discovery_caches()
         self._clear_all_note_pending()
         background_tasks = tuple(self._zalo_background_tasks)
@@ -1931,7 +1969,8 @@ class ConversationalAssistantManager(NoteManagerMixin):
             "• Kiểm tra tầng 2. / Check which devices are on upstairs.\n\n"
             "2. THỜI TIẾT VÀ LỊCH / WEATHER & CALENDAR\n"
             "• Thời tiết hôm nay thế nào? / What's the weather today?\n"
-            "• Ngày mai tôi có lịch gì? / What is on my calendar tomorrow?\n\n"
+            "• Sự kiện trong 15 ngày nữa. / Events in the next 15 days.\n"
+            "• Tạo sự kiện họp nhóm lúc 18h30 ngày mai; sau đó chọn lịch.\n\n"
             "3. TÌM KIẾM INTERNET / INTERNET SEARCH\n"
             "• Tìm thông tin giá vàng hôm nay. / Search for today's gold price.\n"
             "• Tra cứu tin mới về Home Assistant. / Look up the latest Home Assistant news.\n\n"
@@ -2033,6 +2072,18 @@ class ConversationalAssistantManager(NoteManagerMixin):
             return None
         if pending.expires_at <= dt_util.now():
             self._zalo_pending_cameras.pop(owner_key, None)
+            return None
+        return pending
+
+    def _zalo_pending_calendar_event(
+        self, owner_key: str
+    ) -> PendingZaloCalendarEvent | None:
+        """Return a non-expired calendar creation selection."""
+        pending = self._zalo_pending_calendar_events.get(owner_key)
+        if pending is None:
+            return None
+        if pending.expires_at <= dt_util.now():
+            self._zalo_pending_calendar_events.pop(owner_key, None)
             return None
         return pending
 
@@ -3062,6 +3113,7 @@ class ConversationalAssistantManager(NoteManagerMixin):
         }
         if normalized in cancel_phrases:
             self._zalo_pending_cameras.pop(context.owner_key, None)
+            self._zalo_pending_calendar_events.pop(context.owner_key, None)
             return "Đã hủy yêu cầu chụp ảnh camera."
 
         selected = parse_target_selection(
@@ -3092,6 +3144,7 @@ class ConversationalAssistantManager(NoteManagerMixin):
             )
 
         self._zalo_pending_cameras.pop(context.owner_key, None)
+        self._zalo_pending_calendar_events.pop(context.owner_key, None)
         result = await self._async_capture_cameras_to_zalo(
             context, available, service_context
         )
@@ -3110,6 +3163,7 @@ class ConversationalAssistantManager(NoteManagerMixin):
         self._zalo_pending_creations.pop(owner_key, None)
         self._zalo_pending_deletions.pop(owner_key, None)
         self._zalo_pending_cameras.pop(owner_key, None)
+        self._zalo_pending_calendar_events.pop(owner_key, None)
 
     @staticmethod
     def _conversation_reply_text(result: Any) -> str:
@@ -3854,7 +3908,7 @@ class ConversationalAssistantManager(NoteManagerMixin):
                     "Failed checking Assist exposure for %s", state.entity_id
                 )
                 exposed = False
-            if exposed:
+            if exposed and state.state != STATE_UNAVAILABLE:
                 states.append(state)
 
         matched = [
@@ -3868,12 +3922,640 @@ class ConversationalAssistantManager(NoteManagerMixin):
         ]
         return matched or states
 
-    async def _async_calendar_from_zalo(
+    def _zalo_writable_calendar_targets(self) -> list[CalendarTarget]:
+        """Return exposed calendars that advertise event creation support."""
+        if not self.hass.services.has_service("calendar", "create_event"):
+            return []
+        targets: list[CalendarTarget] = []
+        for state in self._zalo_exposed_calendar_states(""):
+            raw_features = state.attributes.get(ATTR_SUPPORTED_FEATURES, 0)
+            try:
+                supported = int(raw_features)
+            except (TypeError, ValueError):
+                supported = 0
+            if not supported & int(CalendarEntityFeature.CREATE_EVENT):
+                continue
+            targets.append(
+                CalendarTarget(
+                    entity_id=state.entity_id,
+                    display_name=str(state.name or state.entity_id),
+                )
+            )
+        return sorted(
+            targets,
+            key=lambda target: (target.display_name.casefold(), target.entity_id),
+        )
+
+    @staticmethod
+    def _calendar_json_object(reply: str) -> dict[str, Any] | None:
+        """Extract one JSON object from an AI parser response."""
+        text = str(reply or "").strip()
+        if text.startswith("```"):
+            text = re.sub(r"^```(?:json)?\s*", "", text, flags=re.IGNORECASE)
+            text = re.sub(r"\s*```$", "", text)
+        first = text.find("{")
+        last = text.rfind("}")
+        if first < 0 or last <= first:
+            return None
+        try:
+            payload = json.loads(text[first : last + 1])
+        except (TypeError, ValueError, json.JSONDecodeError):
+            return None
+        return payload if isinstance(payload, dict) else None
+
+    async def _async_ai_calendar_create_request(
+        self,
+        text: str,
+        now: datetime,
+        context: ZaloWebhookContext,
+        service_context: Context | None,
+    ) -> tuple[CalendarCreateRequest | None, list[str]]:
+        """Ask configured Conversation agents to parse one event request."""
+        language = _request_language(text)
+        candidates = self._conversation_agent_candidates(
+            self.zalo_conversation_agent_id
+        )
+        attempted_agents: list[str] = []
+        total_attempts = len(candidates)
+        prompt = (
+            "You are a strict calendar request parser. Do not execute actions. "
+            "Return exactly one JSON object and no explanation. Current local "
+            f"datetime is {dt_util.as_local(now).isoformat()}. Parse this user "
+            f"request: {text!r}. JSON fields: summary (required string), "
+            "all_day (boolean), start_date and end_date for all-day events, or "
+            "start_date_time and end_date_time as ISO 8601 with timezone for "
+            "timed events; optional description and location. End is exclusive. "
+            "Resolve natural Vietnamese or English dates and number words. "
+            "Never invent the event content. If the date/time or content is "
+            "missing, return {\"error\":\"missing_information\"}."
+        )
+        for index, (agent_id, agent_name) in enumerate(candidates):
+            attempted_agents.append(agent_name)
+            try:
+                async with asyncio.timeout(min(30, ZALO_SEARCH_TIMEOUT_SECONDS)):
+                    result = await async_converse(
+                        hass=self.hass,
+                        text=prompt,
+                        conversation_id=None,
+                        context=service_context or Context(),
+                        language=language,
+                        agent_id=agent_id,
+                    )
+            except TimeoutError:
+                _LOGGER.warning(
+                    "Calendar parser agent %s timed out for Zalo thread %s",
+                    agent_id,
+                    context.thread_id,
+                )
+            except Exception:  # noqa: BLE001 - rotate to another parser agent
+                _LOGGER.exception(
+                    "Calendar parser agent %s failed for Zalo thread %s",
+                    agent_id,
+                    context.thread_id,
+                )
+            else:
+                if not self._conversation_result_error_code(result):
+                    payload = self._calendar_json_object(
+                        self._conversation_reply_text(result)
+                    )
+                    if payload and not payload.get("error"):
+                        parsed = calendar_create_request_from_ai_payload(
+                            payload, now
+                        )
+                        if parsed is not None:
+                            return parsed, attempted_agents
+
+            if index + 1 < total_attempts:
+                await self._async_send_ai_failover_notice(
+                    context,
+                    service_context,
+                    feature="calendar",
+                    failed_agent=agent_name,
+                    next_agent=candidates[index + 1][1],
+                    next_attempt=index + 2,
+                    total_attempts=total_attempts,
+                    language=language,
+                )
+        return None, attempted_agents
+
+    async def _async_ai_calendar_window(
+        self,
+        text: str,
+        now: datetime,
+        context: ZaloWebhookContext,
+        service_context: Context | None,
+    ) -> tuple[CalendarWindow | None, list[str]]:
+        """Use AI only as a fallback for an uncommon explicit time horizon."""
+        language = _request_language(text)
+        candidates = self._conversation_agent_candidates(
+            self.zalo_conversation_agent_id
+        )
+        attempted_agents: list[str] = []
+        total_attempts = len(candidates)
+        local_now = dt_util.as_local(now)
+        prompt = (
+            "You are a strict calendar time-range parser. Do not execute actions. "
+            "Return exactly JSON with end_date_time (ISO 8601 with timezone) and "
+            "label. The range always starts now. Do not choose a default date. "
+            f"Current local datetime: {local_now.isoformat()}. User request: "
+            f"{text!r}. If no explicit time horizon exists, return "
+            "{\"error\":\"missing_time_horizon\"}."
+        )
+        for index, (agent_id, agent_name) in enumerate(candidates):
+            attempted_agents.append(agent_name)
+            try:
+                async with asyncio.timeout(min(30, ZALO_SEARCH_TIMEOUT_SECONDS)):
+                    result = await async_converse(
+                        hass=self.hass,
+                        text=prompt,
+                        conversation_id=None,
+                        context=service_context or Context(),
+                        language=language,
+                        agent_id=agent_id,
+                    )
+            except TimeoutError:
+                _LOGGER.warning(
+                    "Calendar window parser agent %s timed out", agent_id
+                )
+            except Exception:  # noqa: BLE001 - rotate to another parser agent
+                _LOGGER.exception(
+                    "Calendar window parser agent %s failed", agent_id
+                )
+            else:
+                if not self._conversation_result_error_code(result):
+                    payload = self._calendar_json_object(
+                        self._conversation_reply_text(result)
+                    )
+                    if payload and not payload.get("error"):
+                        end = dt_util.parse_datetime(
+                            str(payload.get("end_date_time") or "")
+                        )
+                        if end is not None:
+                            if end.tzinfo is None:
+                                end = end.replace(tzinfo=local_now.tzinfo)
+                            end = dt_util.as_local(end)
+                            if local_now < end <= local_now + timedelta(days=3650):
+                                label = str(payload.get("label") or "đến mốc đã yêu cầu").strip()
+                                return CalendarWindow(local_now, end, label), attempted_agents
+
+            if index + 1 < total_attempts:
+                await self._async_send_ai_failover_notice(
+                    context,
+                    service_context,
+                    feature="calendar",
+                    failed_agent=agent_name,
+                    next_agent=candidates[index + 1][1],
+                    next_attempt=index + 2,
+                    total_attempts=total_attempts,
+                    language=language,
+                )
+        return None, attempted_agents
+
+    @staticmethod
+    def _deterministic_calendar_create_request(
+        text: str, now: datetime
+    ) -> CalendarCreateRequest:
+        """Parse common event creation language without requiring cloud AI."""
+        body = str(text or "").strip()
+        prefix_patterns = (
+            r"^(?:hãy\s+|please\s+)?(?:tạo|thêm|đặt|lên)\s+"
+            r"(?:một\s+)?(?:sự\s+kiện|event|lịch)\s*",
+            r"^(?:hãy\s+)?(?:tạo|thêm|đặt|lên)\s+"
+            r"(?=(?:một\s+)?(?:cuộc\s+họp|cuộc\s+hẹn))",
+            r"^(?:please\s+)?(?:create|add|schedule|book)\s+"
+            r"(?:an?\s+)?(?:calendar\s+)?event\s*",
+            r"^(?:please\s+)?(?:create|add|schedule|book)\s+"
+            r"(?=(?:an?\s+)?(?:meeting|appointment))",
+        )
+        for pattern in prefix_patterns:
+            stripped = re.sub(pattern, "", body, count=1, flags=re.IGNORECASE)
+            if stripped != body:
+                body = stripped.strip(" :-,.")
+                break
+        if not body:
+            raise ReminderParseError("Thiếu nội dung và thời gian sự kiện.")
+
+        # Keep event titles clean when the user explicitly says "all day".
+        explicit_all_day = bool(
+            re.search(r"\b(?:cả\s+ngày|ca\s+ngay|all\s+day)\b", body, re.IGNORECASE)
+        )
+        body = re.sub(
+            r"\b(?:cả\s+ngày|ca\s+ngay|all\s+day)\b",
+            " ",
+            body,
+            flags=re.IGNORECASE,
+        )
+
+        # Standalone day-parts are valid natural clock expressions. Convert
+        # them to stable defaults before handing the rest to the reminder
+        # parser: morning 08:00, noon 12:00, afternoon 15:00, evening 19:00,
+        # night 22:00.
+        period_hour: int | None = None
+        preserved_meal_period: str | None = None
+        period_labels = {
+            "sáng": 8,
+            "sang": 8,
+            "morning": 8,
+            "trưa": 12,
+            "trua": 12,
+            "noon": 12,
+            "chiều": 15,
+            "chieu": 15,
+            "afternoon": 15,
+            "tối": 19,
+            "toi": 19,
+            "evening": 19,
+            "đêm": 22,
+            "dem": 22,
+            "night": 22,
+        }
+        numeric_clock = bool(
+            re.search(
+                r"(?:\b(?:[01]?\d|2[0-3])\s*(?:h|giờ|gio|:)"
+                r"(?:\s*[0-5]?\d)?\b|"
+                r"\b(?:at\s+)?(?:1[0-2]|0?[1-9])(?:[:.]?[0-5]\d)?\s*(?:am|pm)\b)",
+                body,
+                re.IGNORECASE,
+            )
+        )
+        if not numeric_clock:
+            # "tối nay", "sáng mai", "chiều mốt" need both a date and a
+            # clock. Replace the complete phrase so bare "mai" is not left
+            # behind after removing the day-part.
+            compact_period = re.search(
+                r"\b(?P<p>sáng|sang|trưa|trua|chiều|chieu|tối|toi|đêm|dem)"
+                r"\s+(?P<d>nay|mai|kia|mốt|mot)\b",
+                body,
+                re.IGNORECASE,
+            )
+            if compact_period:
+                period_word = compact_period.group("p")
+                period_hour = period_labels[period_word.casefold()]
+                # In phrases such as "ăn tối mai", the day-part is also an
+                # essential part of the event title. Remember it while still
+                # using it as the natural clock expression.
+                if re.search(
+                    r"\b(?:ăn|an|dùng\s+bữa|dung\s+bua)\s*$",
+                    body[: compact_period.start()],
+                    re.IGNORECASE,
+                ):
+                    preserved_meal_period = period_word
+                date_word = compact_period.group("d").casefold()
+                replacement = "hôm nay" if date_word == "nay" else (
+                    "ngày mai" if date_word == "mai" else "ngày kia"
+                )
+                body = (
+                    body[: compact_period.start()]
+                    + replacement
+                    + body[compact_period.end() :]
+                )
+            else:
+                period_match = re.search(
+                    r"\b(?:vào|vao|lúc|luc)?\s*(?:buổi|buoi)?\s*"
+                    r"(?P<p>sáng|sang|trưa|trua|chiều|chieu|tối|toi|đêm|dem|"
+                    r"morning|noon|afternoon|evening|night)\b",
+                    body,
+                    re.IGNORECASE,
+                )
+                if period_match:
+                    period_hour = period_labels[period_match.group("p").casefold()]
+                    body = (
+                        body[: period_match.start()]
+                        + " "
+                        + body[period_match.end() :]
+                    )
+
+        # The reminder parser already understands concrete dates. For relative
+        # durations placed anywhere in the sentence ("họp 2 hôm nữa", "sau
+        # hai tuần họp"), resolve the target date first, remove only the time
+        # phrase, and feed an explicit date back into that parser.
+        number_token = (
+            r"(?:\d+|không|khong|một|mot|mốt|hai|ba|bốn|bon|tư|tu|năm|nam|"
+            r"lăm|lam|sáu|sau|bảy|bay|tám|tam|chín|chin|mười|muoi|mươi|"
+            r"trăm|tram|linh|lẻ|le|one|two|three|four|five|six|seven|eight|"
+            r"nine|ten|eleven|twelve|thirteen|fourteen|fifteen|sixteen|"
+            r"seventeen|eighteen|nineteen|twenty|thirty|forty|fifty|sixty|"
+            r"seventy|eighty|ninety|hundred)"
+        )
+        number_expression = rf"{number_token}(?:\s+{number_token}){{0,5}}"
+        unit = r"(?:hôm|hom|ngày|ngay|tuần|tuan|tháng|thang|năm|nam|days?|weeks?|months?|years?)"
+        relative_component = rf"(?:{number_expression})\s+{unit}"
+        relative_sequence = (
+            rf"{relative_component}(?:\s*(?:,|và|va|and)?\s*"
+            rf"{relative_component})*"
+        )
+        relative_tail = (
+            r"(?:nữa|nua|sau|tới|toi|kể\s+từ\s+hôm\s+nay|"
+            r"ke\s+tu\s+hom\s+nay|tính\s+từ\s+hôm\s+nay|"
+            r"tinh\s+tu\s+hom\s+nay|from\s+now|from\s+today|ahead)"
+        )
+        relative_pattern = re.compile(
+            rf"\b(?:"
+            rf"(?:sau|trong|after|in)\s+{relative_sequence}"
+            rf"(?:\s+{relative_tail})?"
+            rf"|{relative_sequence}\s+{relative_tail}"
+            rf")\b",
+            re.IGNORECASE,
+        )
+        parser_body = body
+        named_horizon_pattern = re.compile(
+            r"\b(?:"
+            r"(?:thứ|thu)\s+(?:hai|ba|tư|tu|năm|nam|sáu|sau|bảy|bay)"
+            r"\s+(?:tuần|tuan)\s+(?:này|nay|sau|tới|toi)"
+            r"|(?:chủ\s+nhật|chu\s+nhat)\s+(?:tuần|tuan)"
+            r"\s+(?:này|nay|sau|tới|toi)"
+            r"|(?:(?:this|next)\s+)?(?:monday|tuesday|wednesday|"
+            r"thursday|friday|saturday|sunday)\s+(?:this|next)\s+week"
+            r"|(?:ngày|ngay)\s+(?:\d{1,2}|không|khong|một|mot|hai|ba|"
+            r"bốn|bon|tư|tu|năm|nam|lăm|lam|sáu|sau|bảy|bay|tám|tam|"
+            r"chín|chin|mười|muoi)(?:\s+(?:một|mot|hai|ba|bốn|bon|tư|"
+            r"tu|năm|nam|lăm|lam|sáu|sau|bảy|bay|tám|tam|chín|chin))*"
+            r"\s+(?:tháng|thang)\s+(?:này|nay|sau|tới|toi)"
+            r"|(?:cuối|cuoi)\s+(?:tuần|tuan)\s+(?:sau|tới|toi)"
+            r"|(?:cuối|cuoi)\s+(?:tháng|thang)(?:\s+(?:sau|tới|toi))?"
+            r"|(?:đầu|dau)\s+(?:tháng|thang)\s+(?:sau|tới|toi)"
+            r"|(?:cuối|cuoi)\s+năm"
+            r"|next\s+weekend|end\s+of\s+(?:this|next)\s+month|"
+            r"end\s+of\s+this\s+year"
+            r")\b",
+            re.IGNORECASE,
+        )
+        named_horizon = named_horizon_pattern.search(body)
+        if named_horizon:
+            target_window = calendar_window_from_text(
+                named_horizon.group(0), now
+            )
+            if target_window is None:
+                raise ReminderParseError(
+                    "Mốc ngày được yêu cầu đã qua hoặc không hợp lệ."
+                )
+            target_date = (
+                dt_util.as_local(target_window.end)
+                - timedelta(microseconds=1)
+            ).date()
+            parser_body = (
+                body[: named_horizon.start()]
+                + " "
+                + body[named_horizon.end() :]
+            ).strip()
+            parser_body = f"{parser_body} {target_date.strftime('%d/%m/%Y')}"
+        else:
+            relative_match = relative_pattern.search(body)
+            if relative_match:
+                relative_text = relative_match.group(0)
+                # The calendar range parser treats "hôm" and "ngày" equally
+                # and supports words, digits, weeks, months, and years.
+                target_window = calendar_window_from_text(relative_text, now)
+                if target_window is not None:
+                    # Calendar windows use an exclusive end at midnight so the
+                    # entire requested target day is included. Subtract one
+                    # tiny unit to recover that inclusive target date.
+                    target_date = (
+                        dt_util.as_local(target_window.end)
+                        - timedelta(microseconds=1)
+                    ).date()
+                    parser_body = (
+                        body[: relative_match.start()]
+                        + " "
+                        + body[relative_match.end() :]
+                    ).strip()
+                    parser_body = (
+                        f"{parser_body} {target_date.strftime('%d/%m/%Y')}"
+                    )
+
+        parser_body = re.sub(r"\s+", " ", parser_body).strip(" :-,.")
+        if not parser_body:
+            raise ReminderParseError("Thiếu nội dung sự kiện.")
+
+        parser_prefix = (
+            "remind me to "
+            if _request_language(text).startswith("en")
+            else "nhắc tôi "
+        )
+        parsed = parse_reminder_request(f"{parser_prefix}{parser_body}", now=now)
+        summary = parsed.message.strip()
+        if preserved_meal_period and not re.search(
+            rf"\b{re.escape(preserved_meal_period)}\b",
+            summary,
+            re.IGNORECASE,
+        ):
+            summary = f"{summary} {preserved_meal_period}".strip()
+        if not summary:
+            raise ReminderParseError("Thiếu nội dung sự kiện.")
+        local_start = dt_util.as_local(parsed.first_run)
+
+        if period_hour is not None:
+            local_start = local_start.replace(
+                hour=period_hour, minute=0, second=0, microsecond=0
+            )
+            if local_start <= dt_util.as_local(now):
+                raise ReminderParseError("Thời điểm sự kiện đã qua.")
+
+        all_day = explicit_all_day or (not numeric_clock and period_hour is None)
+        if all_day:
+            start = datetime.combine(
+                local_start.date(), time.min, tzinfo=local_start.tzinfo
+            )
+            end = start + timedelta(days=1)
+        else:
+            start = local_start
+            end = start + timedelta(hours=1)
+        return CalendarCreateRequest(
+            summary=summary,
+            start=start,
+            end=end,
+            all_day=all_day,
+        )
+
+    @staticmethod
+    def _calendar_selection_prompt(
+        request: CalendarCreateRequest,
+        calendars: list[CalendarTarget],
+        *,
+        invalid: bool = False,
+    ) -> str:
+        """Build a numbered writable-calendar selection prompt."""
+        lines = [
+            (
+                "⚠️ Lựa chọn chưa hợp lệ. Hãy trả lời đúng số lịch."
+                if invalid
+                else "📝 **Đã phân tích yêu cầu tạo sự kiện**"
+            ),
+            f"\n{format_calendar_create_request(request)}",
+            "\n🗓️ **Chọn lịch sẽ thêm sự kiện:**",
+        ]
+        for index, target in enumerate(calendars, start=1):
+            lines.append(f"{index}. {target.display_name}")
+        lines.append(
+            "\nTrả lời số lịch, ví dụ **1**. Có thể chọn nhiều lịch như "
+            "**1 và 3**. Gửi **hủy** để dừng."
+        )
+        return "\n".join(lines)
+
+    @staticmethod
+    def _calendar_create_service_data(
+        request: CalendarCreateRequest, entity_id: str
+    ) -> dict[str, Any]:
+        """Build calendar.create_event data using exclusive end semantics."""
+        data: dict[str, Any] = {
+            "entity_id": entity_id,
+            "summary": request.summary,
+        }
+        if request.description:
+            data["description"] = request.description
+        if request.location:
+            data["location"] = request.location
+        if request.all_day:
+            data["start_date"] = request.start.date().isoformat()
+            data["end_date"] = request.end.date().isoformat()
+        else:
+            data["start_date_time"] = request.start.isoformat()
+            data["end_date_time"] = request.end.isoformat()
+        return data
+
+    async def _async_create_calendar_event_from_zalo(
         self,
         context: ZaloWebhookContext,
         service_context: Context | None,
     ) -> str:
-        """Read events from exposed Home Assistant calendar entities."""
+        """Parse an event, list writable calendars, and wait for selection."""
+        calendars = self._zalo_writable_calendar_targets()
+        if not calendars:
+            return (
+                "Chưa có lịch nào vừa được expose cho Assist vừa hỗ trợ tạo "
+                "sự kiện. Hãy dùng Local Calendar, Google Calendar hoặc lịch "
+                "khác có quyền ghi, rồi bật expose cho entity đó."
+            )
+
+        now = dt_util.now()
+        parsed: CalendarCreateRequest | None = None
+        attempted_agents: list[str] = []
+
+        # Prefer the configured AI for nuanced language, but keep a complete
+        # deterministic fallback so calendar creation still works offline.
+        if self.zalo_conversation_agent_id != HOME_ASSISTANT_AGENT:
+            parsed, attempted_agents = await self._async_ai_calendar_create_request(
+                context.text, now, context, service_context
+            )
+        if parsed is None:
+            try:
+                parsed = self._deterministic_calendar_create_request(
+                    context.text, now
+                )
+            except ReminderParseError as err:
+                if not attempted_agents:
+                    parsed, attempted_agents = await self._async_ai_calendar_create_request(
+                        context.text, now, context, service_context
+                    )
+                if parsed is None:
+                    message = (
+                        f"Tôi chưa tách được đầy đủ nội dung và thời gian sự kiện. {err} "
+                        "Ví dụ: **tạo sự kiện họp nhóm lúc 18h30 ngày mai**; "
+                        "hoặc **thêm sự kiện sinh nhật cả ngày 15/08/2026**."
+                    )
+                    return self._append_ai_attempt_summary(
+                        message,
+                        attempted_agents,
+                        language=_request_language(context.text),
+                        zalo=True,
+                    )
+
+        self._zalo_pending_calendar_events[context.owner_key] = (
+            PendingZaloCalendarEvent(
+                request=parsed,
+                calendars=calendars,
+                expires_at=dt_util.now()
+                + timedelta(minutes=PENDING_SELECTION_TIMEOUT_MINUTES),
+                ai_attempted_agents=attempted_agents,
+            )
+        )
+        prompt = self._calendar_selection_prompt(parsed, calendars)
+        return self._append_ai_attempt_summary(
+            prompt,
+            attempted_agents,
+            language=_request_language(context.text),
+            zalo=True,
+        )
+
+    async def _async_zalo_pending_calendar_event_reply(
+        self,
+        context: ZaloWebhookContext,
+        pending: PendingZaloCalendarEvent,
+        service_context: Context | None,
+    ) -> str:
+        """Create a pending event after the user selects one or more calendars."""
+        if self._is_cancel_pending_text(context.text):
+            self._zalo_pending_calendar_events.pop(context.owner_key, None)
+            return "Đã hủy yêu cầu tạo sự kiện."
+
+        indexes = parse_target_selection(
+            context.text,
+            [calendar.display_name for calendar in pending.calendars],
+        )
+        if not indexes:
+            pending.expires_at = dt_util.now() + timedelta(
+                minutes=PENDING_SELECTION_TIMEOUT_MINUTES
+            )
+            return self._calendar_selection_prompt(
+                pending.request, pending.calendars, invalid=True
+            )
+
+        selected = [pending.calendars[index] for index in indexes]
+        created: list[str] = []
+        failed: list[str] = []
+        for target in selected:
+            try:
+                await self.hass.services.async_call(
+                    "calendar",
+                    "create_event",
+                    self._calendar_create_service_data(
+                        pending.request, target.entity_id
+                    ),
+                    blocking=True,
+                    context=service_context,
+                )
+            except Exception:  # noqa: BLE001 - report each failed calendar
+                failed.append(target.display_name)
+                _LOGGER.exception(
+                    "Failed creating event in calendar %s", target.entity_id
+                )
+            else:
+                created.append(target.display_name)
+
+        if not created:
+            pending.expires_at = dt_util.now() + timedelta(
+                minutes=PENDING_SELECTION_TIMEOUT_MINUTES
+            )
+            return (
+                "⚠️ Chưa tạo được sự kiện trong lịch đã chọn: "
+                + ", ".join(failed)
+                + ". Hãy kiểm tra quyền ghi của lịch hoặc chọn lịch khác.\n\n"
+                + self._calendar_selection_prompt(
+                    pending.request, pending.calendars
+                )
+            )
+
+        self._zalo_pending_calendar_events.pop(context.owner_key, None)
+        lines = [
+            "✅ **Đã tạo sự kiện thành công**",
+            f"\n{format_calendar_create_request(pending.request)}",
+            f"\n**Đã thêm vào:** {', '.join(created)}",
+        ]
+        if failed:
+            lines.append(f"**Không thêm được vào:** {', '.join(failed)}")
+        return self._append_ai_attempt_summary(
+            "\n".join(lines),
+            pending.ai_attempted_agents,
+            language=_request_language(context.text),
+            zalo=True,
+        )
+
+    async def _async_read_calendar_from_zalo(
+        self,
+        context: ZaloWebhookContext,
+        service_context: Context | None,
+    ) -> str:
+        """Read all exposed calendar events from now to an explicit horizon."""
         states = self._zalo_exposed_calendar_states(context.text)
         if not states:
             return (
@@ -3883,6 +4565,35 @@ class ConversationalAssistantManager(NoteManagerMixin):
 
         now = dt_util.now()
         window = calendar_window_from_text(context.text, now)
+        attempted_agents: list[str] = []
+        has_time_reference = calendar_has_time_reference(context.text)
+        if window is None and has_time_reference:
+            window, attempted_agents = await self._async_ai_calendar_window(
+                context.text, now, context, service_context
+            )
+        if window is None:
+            if has_time_reference:
+                heading = (
+                    "🕒 **Mốc thời gian chưa hợp lệ, đã qua hoặc chưa đủ rõ.**"
+                )
+            else:
+                heading = (
+                    "🕒 **Bạn chưa nêu mốc thời gian cụ thể để tra lịch.**"
+                )
+            message = (
+                f"{heading}\n\n"
+                "Hãy thêm mốc như **hôm nay**, **ngày mai**, **ngày kia**, "
+                "**2 hôm nữa**, **15 ngày nữa**, **1 tuần nữa**, "
+                "**1 tháng nữa** hoặc một ngày cụ thể như **15/08/2026**.\n\n"
+                "Ví dụ: **sự kiện trong 15 ngày nữa**."
+            )
+            return self._append_ai_attempt_summary(
+                message,
+                attempted_agents,
+                language=_request_language(context.text),
+                zalo=True,
+            )
+
         events = []
         service_available = self.hass.services.has_service(
             "calendar", "get_events"
@@ -3914,13 +4625,33 @@ class ConversationalAssistantManager(NoteManagerMixin):
 
             if not calendar_events:
                 fallback = event_from_calendar_state(
-                    dict(state.attributes), calendar_name
+                    dict(state.attributes), state.entity_id, calendar_name
                 )
                 if fallback is not None:
                     calendar_events.append(fallback)
             events.extend(calendar_events)
 
-        return format_calendar_events(events, window, now)
+        reply = format_calendar_events(events, window, now)
+        return self._append_ai_attempt_summary(
+            reply,
+            attempted_agents,
+            language=_request_language(context.text),
+            zalo=True,
+        )
+
+    async def _async_calendar_from_zalo(
+        self,
+        context: ZaloWebhookContext,
+        service_context: Context | None,
+    ) -> str:
+        """Read calendar events or start the event-creation flow."""
+        if calendar_request_action(context.text) == "create":
+            return await self._async_create_calendar_event_from_zalo(
+                context, service_context
+            )
+        return await self._async_read_calendar_from_zalo(
+            context, service_context
+        )
 
     async def _async_process_home_assistant_from_zalo(
         self,
@@ -3970,6 +4701,15 @@ class ConversationalAssistantManager(NoteManagerMixin):
         pending_creation = self._zalo_pending_creation(context.owner_key)
         pending_deletion = self._zalo_pending_deletion(context.owner_key)
         pending_camera = self._zalo_pending_camera(context.owner_key)
+        pending_calendar = self._zalo_pending_calendar_event(context.owner_key)
+        if (
+            pending_calendar is not None
+            and command is None
+            and explicit_ha_kind is None
+        ):
+            return await self._async_zalo_pending_calendar_event_reply(
+                context, pending_calendar, service_context
+            )
         if (
             pending_camera is not None
             and command is None
@@ -4017,6 +4757,7 @@ class ConversationalAssistantManager(NoteManagerMixin):
             self._zalo_pending_creations.pop(context.owner_key, None)
             self._zalo_pending_deletions.pop(context.owner_key, None)
             self._zalo_pending_cameras.pop(context.owner_key, None)
+            self._zalo_pending_calendar_events.pop(context.owner_key, None)
             return await self._async_process_note_zalo_command(
                 context, command
             )
@@ -4035,15 +4776,18 @@ class ConversationalAssistantManager(NoteManagerMixin):
             self._zalo_pending_creations.pop(context.owner_key, None)
             self._zalo_pending_deletions.pop(context.owner_key, None)
             self._zalo_pending_cameras.pop(context.owner_key, None)
+            self._zalo_pending_calendar_events.pop(context.owner_key, None)
             return await self._async_create_from_zalo(context)
         if command == "list":
             self._zalo_pending_notes.pop(context.owner_key, None)
             self._zalo_pending_cameras.pop(context.owner_key, None)
+            self._zalo_pending_calendar_events.pop(context.owner_key, None)
             return await self._async_list_from_zalo(context)
         if command == "delete":
             self._zalo_pending_notes.pop(context.owner_key, None)
             self._zalo_pending_creations.pop(context.owner_key, None)
             self._zalo_pending_cameras.pop(context.owner_key, None)
+            self._zalo_pending_calendar_events.pop(context.owner_key, None)
             return await self._async_delete_from_zalo(context)
         if command == "help":
             self._clear_zalo_pending_for_owner(context.owner_key)
@@ -4099,6 +4843,20 @@ class ConversationalAssistantManager(NoteManagerMixin):
                 if instructions and instructions.strip()
                 else None
             )
+        if (
+            self.zalo_home_assistant_enabled
+            and explicit_home_assistant_request_kind(effective_text) == "calendar"
+        ):
+            if (
+                calendar_request_action(effective_text) == "create"
+                and self.zalo_conversation_agent_id != HOME_ASSISTANT_AGENT
+            ):
+                return ACTION_CALENDAR
+            if (
+                calendar_has_time_reference(effective_text)
+                and calendar_window_from_text(effective_text, dt_util.now()) is None
+            ):
+                return ACTION_CALENDAR
         return None
 
     @staticmethod
@@ -4115,13 +4873,21 @@ class ConversationalAssistantManager(NoteManagerMixin):
             feature = (
                 "image generation"
                 if action == ACTION_IMAGE_GENERATION
+                else "calendar analysis"
+                if action == ACTION_CALENDAR
                 else "search"
             )
             return (
                 f"⌛ **The {feature} request took too long**\n\n"
                 "The AI service did not respond in time. Please try again."
             )
-        feature = "tạo ảnh" if action == ACTION_IMAGE_GENERATION else "tìm kiếm"
+        feature = (
+            "tạo ảnh"
+            if action == ACTION_IMAGE_GENERATION
+            else "phân tích lịch"
+            if action == ACTION_CALENDAR
+            else "tìm kiếm"
+        )
         return (
             f"⌛ **Yêu cầu {feature} đã chờ quá lâu**\n\n"
             "Dịch vụ AI chưa phản hồi kịp. Hãy thử lại nhé."

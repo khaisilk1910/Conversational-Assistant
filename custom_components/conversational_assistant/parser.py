@@ -889,7 +889,10 @@ def _looks_like_english_reminder(text: str) -> bool:
         "weekends",
         "noon",
         "midnight",
-    } | set(_EN_WEEKDAYS) | set(_EN_MONTHS)
+    } | set(_EN_WEEKDAYS) | (set(_EN_MONTHS) - {"may"})
+    # "máy" (device/machine) folds to "may" and is extremely common in
+    # Vietnamese reminder content. It must not switch the whole request to
+    # the English parser merely because May is also an English month name.
     return bool(tokens & markers)
 
 
