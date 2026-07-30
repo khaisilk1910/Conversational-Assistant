@@ -14,7 +14,8 @@
           "zalo_webhook_bot_account_id": "ID tài khoản Zalo của bot",
           "zalo_webhook_account_selection": "Tài khoản Zalo dùng trả lời webhook",
           "zalo_home_assistant_enabled": "Cho phép Zalo kiểm tra và điều khiển Home Assistant",
-          "zalo_conversation_agent_id": "Conversation agent dùng cho Zalo"
+          "zalo_conversation_agent_id": "Conversation agent dùng cho Zalo",
+          "ai_search_agent_id": "AI Agent Search dùng để tìm kiếm Internet"
         },
         "data_description": {
           "confirm_targets": "Cả Voice Assist và lệnh Zalo sẽ quét theo yêu cầu rồi liệt kê điện thoại, nơi nhận Zalo và loa, sau đó chờ câu trả lời như: chọn 1 và 3.",
@@ -24,7 +25,8 @@
           "zalo_webhook_bot_account_id": "Bắt buộc khi bật xử lý webhook Zalo. Hãy nhập ID tài khoản bot từ payload webhook Zalo của chính bạn; giá trị này được kết hợp với isSelf và uidFrom để bỏ qua tin nhắn do bot gửi.",
           "zalo_webhook_account_selection": "Giá trị account_selection của dịch vụ zalo_bot.send_message, thường là số điện thoại bot. Nếu để trống, integration dùng tài khoản của nơi nhận Zalo đầu tiên đã cấu hình.",
           "zalo_home_assistant_enabled": "Chuyển các yêu cầu điều khiển thiết bị, trạng thái, phòng, khu vực, sàn, thời tiết và lịch từ Zalo vào Home Assistant. Chỉ các entity đã expose cho Assist mới có thể sử dụng.",
-          "zalo_conversation_agent_id": "Chọn Home Assistant hoặc Conversation agent tùy chỉnh để hiểu lệnh Zalo. Cấu hình expose của Assist vẫn được áp dụng cho lịch và các điều khiển tích hợp sẵn."
+          "zalo_conversation_agent_id": "Chọn Home Assistant hoặc Conversation agent tùy chỉnh để hiểu lệnh Zalo. Cấu hình expose của Assist vẫn được áp dụng cho lịch và các điều khiển tích hợp sẵn.",
+          "ai_search_agent_id": "Chọn Conversation agent có khả năng truy cập Internet. Agent này chỉ xử lý yêu cầu tìm kiếm bằng tiếng Việt hoặc tiếng Anh, tách riêng với agent điều khiển Home Assistant."
         }
       }
     },
@@ -57,7 +59,8 @@
           "zalo_webhook_bot_account_id": "ID tài khoản Zalo của bot",
           "zalo_webhook_account_selection": "Tài khoản Zalo dùng trả lời webhook",
           "zalo_home_assistant_enabled": "Cho phép Zalo kiểm tra và điều khiển Home Assistant",
-          "zalo_conversation_agent_id": "Conversation agent dùng cho Zalo"
+          "zalo_conversation_agent_id": "Conversation agent dùng cho Zalo",
+          "ai_search_agent_id": "AI Agent Search dùng để tìm kiếm Internet"
         },
         "data_description": {
           "confirm_targets": "Khi bật, cả nhắc hẹn từ Voice Assist và Zalo chỉ được lưu sau khi bạn trả lời bằng số thứ tự hoặc tên nơi nhận.",
@@ -67,7 +70,8 @@
           "zalo_webhook_bot_account_id": "Bắt buộc khi bật xử lý webhook Zalo. Hãy nhập ID tài khoản bot từ payload webhook Zalo của chính bạn; giá trị này được kết hợp với isSelf và uidFrom để bỏ qua tin nhắn do bot gửi.",
           "zalo_webhook_account_selection": "Giá trị account_selection của dịch vụ zalo_bot.send_message, thường là số điện thoại bot. Nếu để trống, integration dùng tài khoản của nơi nhận Zalo đầu tiên đã cấu hình.",
           "zalo_home_assistant_enabled": "Chuyển các yêu cầu điều khiển thiết bị, trạng thái, phòng, khu vực, sàn, thời tiết và lịch từ Zalo vào Home Assistant. Chỉ các entity đã expose cho Assist mới có thể sử dụng.",
-          "zalo_conversation_agent_id": "Chọn Home Assistant hoặc Conversation agent tùy chỉnh để hiểu lệnh Zalo. Cấu hình expose của Assist vẫn được áp dụng cho lịch và các điều khiển tích hợp sẵn."
+          "zalo_conversation_agent_id": "Chọn Home Assistant hoặc Conversation agent tùy chỉnh để hiểu lệnh Zalo. Cấu hình expose của Assist vẫn được áp dụng cho lịch và các điều khiển tích hợp sẵn.",
+          "ai_search_agent_id": "Chọn Conversation agent có khả năng truy cập Internet. Agent này chỉ xử lý yêu cầu tìm kiếm bằng tiếng Việt hoặc tiếng Anh, tách riêng với agent điều khiển Home Assistant."
         }
       },
       "add_zalo": {

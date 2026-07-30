@@ -14,7 +14,8 @@
           "zalo_webhook_bot_account_id": "Zalo bot account ID",
           "zalo_webhook_account_selection": "Zalo account for webhook replies",
           "zalo_home_assistant_enabled": "Allow Zalo to query and control Home Assistant",
-          "zalo_conversation_agent_id": "Conversation agent used for Zalo"
+          "zalo_conversation_agent_id": "Conversation agent used for Zalo",
+          "ai_search_agent_id": "AI Agent Search for Internet queries"
         },
         "data_description": {
           "confirm_targets": "Voice Assist and Zalo commands list discovered phones, Zalo destinations, and speakers, then wait for a reply such as: choose 1 and 3.",
@@ -24,7 +25,8 @@
           "zalo_webhook_bot_account_id": "Required when Zalo webhook processing is enabled. Enter the bot account ID from your own Zalo webhook payload; it is used with isSelf and uidFrom to ignore messages sent by the bot itself.",
           "zalo_webhook_account_selection": "The account selector expected by zalo_bot.send_message, usually the bot phone number. If empty, the first configured Zalo destination account is used.",
           "zalo_home_assistant_enabled": "Routes device control, state, room, area, floor, weather, and calendar requests from Zalo into Home Assistant. Only entities exposed to Assist can be used.",
-          "zalo_conversation_agent_id": "Choose the Home Assistant or custom Conversation agent that should interpret Zalo commands. Home Assistant Assist exposure settings are still enforced for calendars and built-in controls."
+          "zalo_conversation_agent_id": "Choose the Home Assistant or custom Conversation agent that should interpret Zalo commands. Home Assistant Assist exposure settings are still enforced for calendars and built-in controls.",
+          "ai_search_agent_id": "Choose an Internet-capable Conversation agent. It handles Vietnamese and English search requests separately from the agent used to control Home Assistant."
         }
       }
     },
@@ -57,7 +59,8 @@
           "zalo_webhook_bot_account_id": "Zalo bot account ID",
           "zalo_webhook_account_selection": "Zalo account for webhook replies",
           "zalo_home_assistant_enabled": "Allow Zalo to query and control Home Assistant",
-          "zalo_conversation_agent_id": "Conversation agent used for Zalo"
+          "zalo_conversation_agent_id": "Conversation agent used for Zalo",
+          "ai_search_agent_id": "AI Agent Search for Internet queries"
         },
         "data_description": {
           "confirm_targets": "When enabled, both Voice Assist and Zalo reminders are saved only after you reply with destination numbers or names.",
@@ -67,7 +70,8 @@
           "zalo_webhook_bot_account_id": "Required when Zalo webhook processing is enabled. Enter the bot account ID from your own Zalo webhook payload; it is used with isSelf and uidFrom to ignore messages sent by the bot itself.",
           "zalo_webhook_account_selection": "The account selector expected by zalo_bot.send_message, usually the bot phone number. If empty, the first configured Zalo destination account is used.",
           "zalo_home_assistant_enabled": "Routes device control, state, room, area, floor, weather, and calendar requests from Zalo into Home Assistant. Only entities exposed to Assist can be used.",
-          "zalo_conversation_agent_id": "Choose the Home Assistant or custom Conversation agent that should interpret Zalo commands. Home Assistant Assist exposure settings are still enforced for calendars and built-in controls."
+          "zalo_conversation_agent_id": "Choose the Home Assistant or custom Conversation agent that should interpret Zalo commands. Home Assistant Assist exposure settings are still enforced for calendars and built-in controls.",
+          "ai_search_agent_id": "Choose an Internet-capable Conversation agent. It handles Vietnamese and English search requests separately from the agent used to control Home Assistant."
         }
       },
       "add_zalo": {
