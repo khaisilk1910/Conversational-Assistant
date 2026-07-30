@@ -969,7 +969,7 @@ python -m json.tool custom_components/conversational_assistant/translations/en.j
 
 ## Phiên bản
 
-Phiên bản hiện tại: **1.0.0**
+Phiên bản hiện tại: **2026.07.30**
 
 Domain:
 
