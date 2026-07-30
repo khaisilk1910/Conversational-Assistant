@@ -15,7 +15,8 @@
           "zalo_webhook_account_selection": "Tài khoản Zalo dùng trả lời webhook",
           "zalo_home_assistant_enabled": "Cho phép Zalo kiểm tra và điều khiển Home Assistant",
           "zalo_conversation_agent_id": "Conversation agent dùng cho Zalo",
-          "ai_search_agent_id": "AI Agent Search dùng để tìm kiếm Internet"
+          "ai_search_agent_id": "AI Agent Search dùng để tìm kiếm Internet",
+          "ai_image_task_entity_id": "AI Task Agent dùng để tạo ảnh"
         },
         "data_description": {
           "confirm_targets": "Cả Voice Assist và lệnh Zalo sẽ quét theo yêu cầu rồi liệt kê điện thoại, nơi nhận Zalo và loa, sau đó chờ câu trả lời như: chọn 1 và 3.",
@@ -26,7 +27,8 @@
           "zalo_webhook_account_selection": "Giá trị account_selection của dịch vụ zalo_bot.send_message, thường là số điện thoại bot. Nếu để trống, integration dùng tài khoản của nơi nhận Zalo đầu tiên đã cấu hình.",
           "zalo_home_assistant_enabled": "Chuyển các yêu cầu điều khiển thiết bị, trạng thái, phòng, khu vực, sàn, thời tiết và lịch từ Zalo vào Home Assistant. Chỉ các entity đã expose cho Assist mới có thể sử dụng.",
           "zalo_conversation_agent_id": "Chọn Home Assistant hoặc Conversation agent tùy chỉnh để hiểu lệnh Zalo. Cấu hình expose của Assist vẫn được áp dụng cho lịch và các điều khiển tích hợp sẵn.",
-          "ai_search_agent_id": "Chọn Conversation agent có khả năng truy cập Internet. Agent này chỉ xử lý yêu cầu tìm kiếm bằng tiếng Việt hoặc tiếng Anh, tách riêng với agent điều khiển Home Assistant."
+          "ai_search_agent_id": "Chọn Conversation agent có khả năng truy cập Internet. Agent này chỉ xử lý yêu cầu tìm kiếm bằng tiếng Việt hoặc tiếng Anh, tách riêng với agent điều khiển Home Assistant.",
+          "ai_image_task_entity_id": "Chọn AI Task entity hỗ trợ action ai_task.generate_image. Khi người dùng yêu cầu tạo ảnh trên Zalo, integration gọi agent này và gửi ảnh hoàn thành trở lại đúng cuộc trò chuyện."
         }
       }
     },
@@ -38,40 +40,77 @@
     "step": {
       "init": {
         "title": "Tùy chọn Conversational Assistant",
-        "description": "Quản lý việc quét điện thoại/loa theo yêu cầu và các nơi nhận Zalo. Hiện có {zalo_count} nơi nhận Zalo.",
+        "description": "Các cài đặt đã được chia theo từng nhóm chức năng. Hiện có {zalo_count} nơi nhận Zalo.",
         "menu_options": {
-          "general": "Cài đặt chung và quét thiết bị theo yêu cầu",
-          "add_zalo": "Thêm nơi nhận Zalo",
-          "edit_zalo_select": "Sửa nơi nhận Zalo",
-          "delete_zalo": "Xóa nơi nhận Zalo",
+          "general": "Cài đặt chung",
+          "zalo": "Cài đặt Zalo",
+          "ai": "Cài đặt AI",
+          "tts": "Cài đặt TTS",
           "finish": "Lưu và hoàn tất"
         }
       },
       "general": {
         "title": "Cài đặt chung",
-        "description": "Mobile App và loa tương thích được quét theo yêu cầu, có cache ngắn, rồi xuất hiện trong cùng danh sách lựa chọn với Zalo.",
+        "description": "Thiết lập hành vi xác nhận và xử lý thông báo chung của Conversational Assistant.",
         "data": {
           "dismiss_on_clear": "Vuốt bỏ thông báo cũng được xem là Bỏ qua (chỉ Android)",
-          "confirm_targets": "Hỏi nơi nhận và loa phát trước khi lưu từng nhắc nhở",
-          "speaker_enabled": "Đưa các loa tự quét vào danh sách nơi nhận",
-          "tts_entity_id": "Bộ máy TTS dùng để đọc nhắc nhở",
-          "zalo_webhook_enabled": "Xử lý lệnh từ webhook Zalo hiện có",
-          "zalo_webhook_bot_account_id": "ID tài khoản Zalo của bot",
-          "zalo_webhook_account_selection": "Tài khoản Zalo dùng trả lời webhook",
-          "zalo_home_assistant_enabled": "Cho phép Zalo kiểm tra và điều khiển Home Assistant",
-          "zalo_conversation_agent_id": "Conversation agent dùng cho Zalo",
-          "ai_search_agent_id": "AI Agent Search dùng để tìm kiếm Internet"
+          "confirm_targets": "Hỏi nơi nhận và loa phát trước khi lưu từng nhắc nhở"
         },
         "data_description": {
-          "confirm_targets": "Khi bật, cả nhắc hẹn từ Voice Assist và Zalo chỉ được lưu sau khi bạn trả lời bằng số thứ tự hoặc tên nơi nhận.",
-          "speaker_enabled": "Khi cần tạo danh sách nơi nhận, Conversational Assistant quét media_player hỗ trợ play_media, bỏ qua TV, máy chiếu hoặc thiết bị đang unavailable, rồi cache kết quả trong thời gian ngắn.",
-          "tts_entity_id": "Nếu không chọn, integration tự dùng TTS entity đầu tiên đang có.",
+          "confirm_targets": "Khi bật, cả nhắc hẹn từ Voice Assist và Zalo chỉ được lưu sau khi bạn trả lời bằng số thứ tự hoặc tên nơi nhận."
+        }
+      },
+      "zalo": {
+        "title": "Cài đặt Zalo",
+        "description": "Quản lý webhook và {zalo_count} nơi nhận Zalo đã cấu hình.",
+        "menu_options": {
+          "zalo_webhook": "Webhook Zalo và quyền truy cập Home Assistant",
+          "add_zalo": "Thêm nơi nhận Zalo",
+          "edit_zalo_select": "Sửa nơi nhận Zalo",
+          "delete_zalo": "Xóa nơi nhận Zalo",
+          "init": "Quay lại Tùy chọn Conversational Assistant"
+        }
+      },
+      "zalo_webhook": {
+        "title": "Webhook Zalo và Home Assistant",
+        "description": "Thiết lập cách nhận lệnh từ webhook hiện có, tài khoản bot dùng để phản hồi và quyền truy vấn hoặc điều khiển Home Assistant.",
+        "data": {
+          "zalo_webhook_enabled": "Xử lý lệnh từ webhook Zalo hiện có",
+          "zalo_home_assistant_enabled": "Cho phép Zalo kiểm tra và điều khiển Home Assistant",
+          "zalo_webhook_bot_account_id": "ID tài khoản Zalo của bot",
+          "zalo_webhook_account_selection": "Tài khoản Zalo dùng trả lời webhook"
+        },
+        "data_description": {
           "zalo_webhook_enabled": "Không tạo endpoint mới. Webhook hoặc automation hiện có gọi action conversational_assistant.process_zalo_webhook và truyền payload JSON vào trường payload.",
-          "zalo_webhook_bot_account_id": "Bắt buộc khi bật xử lý webhook Zalo. Hãy nhập ID tài khoản bot từ payload webhook Zalo của chính bạn; giá trị này được kết hợp với isSelf và uidFrom để bỏ qua tin nhắn do bot gửi.",
-          "zalo_webhook_account_selection": "Giá trị account_selection của dịch vụ zalo_bot.send_message, thường là số điện thoại bot. Nếu để trống, integration dùng tài khoản của nơi nhận Zalo đầu tiên đã cấu hình.",
-          "zalo_home_assistant_enabled": "Chuyển các yêu cầu điều khiển thiết bị, trạng thái, phòng, khu vực, sàn, thời tiết và lịch từ Zalo vào Home Assistant. Chỉ các entity đã expose cho Assist mới có thể sử dụng.",
-          "zalo_conversation_agent_id": "Chọn Home Assistant hoặc Conversation agent tùy chỉnh để hiểu lệnh Zalo. Cấu hình expose của Assist vẫn được áp dụng cho lịch và các điều khiển tích hợp sẵn.",
-          "ai_search_agent_id": "Chọn Conversation agent có khả năng truy cập Internet. Agent này chỉ xử lý yêu cầu tìm kiếm bằng tiếng Việt hoặc tiếng Anh, tách riêng với agent điều khiển Home Assistant."
+          "zalo_webhook_bot_account_id": "Bắt buộc khi bật xử lý webhook Zalo. Nhập ID tài khoản bot từ payload webhook để bỏ qua tin nhắn do chính bot gửi.",
+          "zalo_webhook_account_selection": "Giá trị account_selection của zalo_bot, thường là số điện thoại bot. Nếu để trống, integration dùng tài khoản của nơi nhận Zalo đầu tiên đã cấu hình.",
+          "zalo_home_assistant_enabled": "Chuyển yêu cầu điều khiển thiết bị, trạng thái, phòng, khu vực, sàn, thời tiết và lịch từ Zalo vào Home Assistant. Chỉ entity đã expose cho Assist mới có thể sử dụng."
+        }
+      },
+      "ai": {
+        "title": "Cài đặt AI",
+        "description": "Chọn riêng agent trò chuyện Zalo, agent tìm kiếm Internet và AI Task Agent tạo ảnh.",
+        "data": {
+          "zalo_conversation_agent_id": "Conversation agent dùng cho Zalo",
+          "ai_search_agent_id": "AI Agent Search dùng để tìm kiếm Internet",
+          "ai_image_task_entity_id": "AI Task Agent dùng để tạo ảnh"
+        },
+        "data_description": {
+          "zalo_conversation_agent_id": "Agent hiểu lệnh Zalo và điều khiển Home Assistant. Cấu hình expose của Assist vẫn được áp dụng.",
+          "ai_search_agent_id": "Agent có khả năng truy cập Internet, xử lý riêng yêu cầu tìm kiếm tiếng Việt hoặc tiếng Anh.",
+          "ai_image_task_entity_id": "AI Task entity hỗ trợ ai_task.generate_image. Ảnh tạo thành công được gửi lại đúng cuộc trò chuyện Zalo bằng zalo_bot.send_image."
+        }
+      },
+      "tts": {
+        "title": "Cài đặt TTS",
+        "description": "Thiết lập việc quét loa và bộ máy đọc thông báo nhắc nhở.",
+        "data": {
+          "speaker_enabled": "Đưa các loa tự quét vào danh sách nơi nhận",
+          "tts_entity_id": "Bộ máy TTS dùng để đọc nhắc nhở"
+        },
+        "data_description": {
+          "speaker_enabled": "Khi cần danh sách nơi nhận, integration quét media_player hỗ trợ play_media, bỏ qua TV, máy chiếu và thiết bị unavailable.",
+          "tts_entity_id": "Nếu không chọn, integration tự dùng TTS entity đầu tiên đang có."
         }
       },
       "add_zalo": {

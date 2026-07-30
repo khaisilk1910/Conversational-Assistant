@@ -15,7 +15,8 @@
           "zalo_webhook_account_selection": "Zalo account for webhook replies",
           "zalo_home_assistant_enabled": "Allow Zalo to query and control Home Assistant",
           "zalo_conversation_agent_id": "Conversation agent used for Zalo",
-          "ai_search_agent_id": "AI Agent Search for Internet queries"
+          "ai_search_agent_id": "AI Agent Search for Internet queries",
+          "ai_image_task_entity_id": "AI Task agent for image generation"
         },
         "data_description": {
           "confirm_targets": "Voice Assist and Zalo commands list discovered phones, Zalo destinations, and speakers, then wait for a reply such as: choose 1 and 3.",
@@ -26,7 +27,8 @@
           "zalo_webhook_account_selection": "The account selector expected by zalo_bot.send_message, usually the bot phone number. If empty, the first configured Zalo destination account is used.",
           "zalo_home_assistant_enabled": "Routes device control, state, room, area, floor, weather, and calendar requests from Zalo into Home Assistant. Only entities exposed to Assist can be used.",
           "zalo_conversation_agent_id": "Choose the Home Assistant or custom Conversation agent that should interpret Zalo commands. Home Assistant Assist exposure settings are still enforced for calendars and built-in controls.",
-          "ai_search_agent_id": "Choose an Internet-capable Conversation agent. It handles Vietnamese and English search requests separately from the agent used to control Home Assistant."
+          "ai_search_agent_id": "Choose an Internet-capable Conversation agent. It handles Vietnamese and English search requests separately from the agent used to control Home Assistant.",
+          "ai_image_task_entity_id": "Choose an AI Task entity that supports ai_task.generate_image. Image requests received from Zalo are sent to this agent and the completed image is returned to the same conversation."
         }
       }
     },
@@ -38,40 +40,77 @@
     "step": {
       "init": {
         "title": "Conversational Assistant options",
-        "description": "Manage automatic phone/speaker discovery and Zalo destinations. Currently configured Zalo destinations: {zalo_count}.",
+        "description": "Settings are organized by feature. Currently configured Zalo destinations: {zalo_count}.",
         "menu_options": {
-          "general": "General settings and automatic discovery",
-          "add_zalo": "Add Zalo destination",
-          "edit_zalo_select": "Edit Zalo destination",
-          "delete_zalo": "Delete Zalo destination",
-          "finish": "Save and finish"
+          "general": "General settings",
+          "zalo": "Zalo settings",
+          "ai": "AI settings",
+          "tts": "TTS settings",
+          "finish": "Save and Finish"
         }
       },
       "general": {
         "title": "General settings",
-        "description": "Mobile App notification devices and compatible speakers are discovered automatically and appear in the same destination list as Zalo.",
+        "description": "Configure shared confirmation and notification behavior for Conversational Assistant.",
         "data": {
           "dismiss_on_clear": "Treat swiping away as dismiss (Android only)",
-          "confirm_targets": "Ask which destinations and speakers to use before saving each reminder",
-          "speaker_enabled": "Offer discovered speakers as reminder destinations",
-          "tts_entity_id": "TTS engine for speaker announcements",
-          "zalo_webhook_enabled": "Process commands from an existing Zalo webhook",
-          "zalo_webhook_bot_account_id": "Zalo bot account ID",
-          "zalo_webhook_account_selection": "Zalo account for webhook replies",
-          "zalo_home_assistant_enabled": "Allow Zalo to query and control Home Assistant",
-          "zalo_conversation_agent_id": "Conversation agent used for Zalo",
-          "ai_search_agent_id": "AI Agent Search for Internet queries"
+          "confirm_targets": "Ask which destinations and speakers to use before saving each reminder"
         },
         "data_description": {
-          "confirm_targets": "When enabled, both Voice Assist and Zalo reminders are saved only after you reply with destination numbers or names.",
-          "speaker_enabled": "Conversational Assistant automatically scans media players that support play_media and excludes unavailable TVs and projectors.",
-          "tts_entity_id": "If no engine is selected, the first available TTS entity is used automatically.",
+          "confirm_targets": "When enabled, both Voice Assist and Zalo reminders are saved only after you reply with destination numbers or names."
+        }
+      },
+      "zalo": {
+        "title": "Zalo settings",
+        "description": "Manage the webhook and {zalo_count} configured Zalo destinations.",
+        "menu_options": {
+          "zalo_webhook": "Zalo webhook and Home Assistant access",
+          "add_zalo": "Add Zalo destination",
+          "edit_zalo_select": "Edit Zalo destination",
+          "delete_zalo": "Delete Zalo destination",
+          "init": "Back to Conversational Assistant options"
+        }
+      },
+      "zalo_webhook": {
+        "title": "Zalo webhook and Home Assistant",
+        "description": "Configure command processing from your existing webhook, the bot account used for replies, and Home Assistant access.",
+        "data": {
+          "zalo_webhook_enabled": "Process commands from an existing Zalo webhook",
+          "zalo_home_assistant_enabled": "Allow Zalo to query and control Home Assistant",
+          "zalo_webhook_bot_account_id": "Zalo bot account ID",
+          "zalo_webhook_account_selection": "Zalo account for webhook replies"
+        },
+        "data_description": {
           "zalo_webhook_enabled": "Does not create a new endpoint. Your existing webhook or automation calls conversational_assistant.process_zalo_webhook and passes its JSON body in the payload field.",
-          "zalo_webhook_bot_account_id": "Required when Zalo webhook processing is enabled. Enter the bot account ID from your own Zalo webhook payload; it is used with isSelf and uidFrom to ignore messages sent by the bot itself.",
-          "zalo_webhook_account_selection": "The account selector expected by zalo_bot.send_message, usually the bot phone number. If empty, the first configured Zalo destination account is used.",
-          "zalo_home_assistant_enabled": "Routes device control, state, room, area, floor, weather, and calendar requests from Zalo into Home Assistant. Only entities exposed to Assist can be used.",
-          "zalo_conversation_agent_id": "Choose the Home Assistant or custom Conversation agent that should interpret Zalo commands. Home Assistant Assist exposure settings are still enforced for calendars and built-in controls.",
-          "ai_search_agent_id": "Choose an Internet-capable Conversation agent. It handles Vietnamese and English search requests separately from the agent used to control Home Assistant."
+          "zalo_webhook_bot_account_id": "Required when webhook processing is enabled. Enter the bot account ID from your payload so messages sent by the bot itself can be ignored.",
+          "zalo_webhook_account_selection": "The account_selection value expected by zalo_bot, usually the bot phone number. If empty, the first configured Zalo destination account is used.",
+          "zalo_home_assistant_enabled": "Routes device control, state, room, area, floor, weather, and calendar requests from Zalo into Home Assistant. Only entities exposed to Assist can be used."
+        }
+      },
+      "ai": {
+        "title": "AI settings",
+        "description": "Select separate agents for Zalo conversation, Internet search, and AI image generation.",
+        "data": {
+          "zalo_conversation_agent_id": "Conversation agent used for Zalo",
+          "ai_search_agent_id": "AI Agent Search for Internet queries",
+          "ai_image_task_entity_id": "AI Task agent for image generation"
+        },
+        "data_description": {
+          "zalo_conversation_agent_id": "The agent that interprets Zalo commands and controls Home Assistant. Assist exposure settings are still enforced.",
+          "ai_search_agent_id": "An Internet-capable agent that separately handles Vietnamese and English search requests.",
+          "ai_image_task_entity_id": "An AI Task entity supporting ai_task.generate_image. Completed images are returned to the same Zalo conversation with zalo_bot.send_image."
+        }
+      },
+      "tts": {
+        "title": "TTS settings",
+        "description": "Configure speaker discovery and the voice used for reminders.",
+        "data": {
+          "speaker_enabled": "Offer discovered speakers as reminder destinations",
+          "tts_entity_id": "TTS engine for speaker announcements"
+        },
+        "data_description": {
+          "speaker_enabled": "When a destination list is needed, compatible media players are scanned while unavailable TVs and projectors are excluded.",
+          "tts_entity_id": "If no engine is selected, the first available TTS entity is used automatically."
         }
       },
       "add_zalo": {
@@ -119,7 +158,7 @@
         }
       },
       "finish": {
-        "title": "Save Conversational Assistant options"
+        "title": "Save and Finish"
       }
     },
     "error": {
