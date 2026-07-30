@@ -125,7 +125,7 @@
   "services": {
     "process_zalo_webhook": {
       "name": "Xử lý payload Zalo",
-      "description": "Nhận payload JSON từ webhook Zalo đang có, lọc tin do bot tự gửi, quản lý nhắc hẹn/ghi chú, đồng thời kiểm tra hoặc điều khiển các entity Home Assistant đã expose.",
+      "description": "Nhận payload JSON từ webhook Zalo đang có, lọc tin do bot tự gửi, quản lý nhắc hẹn, ghi chú và câu lệnh đã học, đồng thời kiểm tra hoặc điều khiển các entity Home Assistant đã expose.",
       "fields": {
         "payload": {
           "name": "Payload Zalo",

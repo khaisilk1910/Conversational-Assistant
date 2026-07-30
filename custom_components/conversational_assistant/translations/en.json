@@ -125,7 +125,7 @@
   "services": {
     "process_zalo_webhook": {
       "name": "Process Zalo payload",
-      "description": "Accept JSON from an existing Zalo webhook, reject self-sent messages, manage reminders and notes, and query or control exposed Home Assistant entities.",
+      "description": "Accept JSON from an existing Zalo webhook, reject self-sent messages, manage reminders, notes, and learned commands, and query or control exposed Home Assistant entities.",
       "fields": {
         "payload": {
           "name": "Zalo payload",
