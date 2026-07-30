@@ -6,6 +6,16 @@ import re
 import unicodedata
 
 _INDEX_WORDS = {
+    "one": 1,
+    "two": 2,
+    "three": 3,
+    "four": 4,
+    "five": 5,
+    "six": 6,
+    "seven": 7,
+    "eight": 8,
+    "nine": 9,
+    "ten": 10,
     "mot": 1,
     "hai": 2,
     "ba": 3,
@@ -20,6 +30,16 @@ _INDEX_WORDS = {
 }
 
 _ORDINAL_WORDS = {
+    "first": 1,
+    "second": 2,
+    "third": 3,
+    "fourth": 4,
+    "fifth": 5,
+    "sixth": 6,
+    "seventh": 7,
+    "eighth": 8,
+    "ninth": 9,
+    "tenth": 10,
     "thu nhat": 1,
     "thu hai": 2,
     "thu ba": 3,
@@ -45,8 +65,9 @@ def normalize_text(value: str) -> str:
 def parse_target_selection(selection: str, target_names: list[str]) -> list[int]:
     """Return selected zero-based target indexes.
 
-    Selection can contain option numbers, Vietnamese number words, target names,
-    category phrases such as "tất cả loa", or a general "tất cả" choice.
+    Selection can contain option numbers, Vietnamese or English number words,
+    target names, category phrases such as "tất cả loa"/"all speakers", or a
+    general "tất cả"/"all" choice.
     Invalid/out-of-range indexes are ignored.
     """
     normalized = normalize_text(selection)
@@ -64,12 +85,31 @@ def parse_target_selection(selection: str, target_names: list[str]) -> list[int]
 
     category_requested = False
     category_phrases = (
-        (("tat ca loa", "toan bo loa", "moi loa"), ("loa ",)),
         (
-            ("tat ca dien thoai", "toan bo dien thoai", "moi dien thoai"),
-            ("dien thoai ",),
+            ("tat ca loa", "toan bo loa", "moi loa", "all speakers", "every speaker"),
+            ("loa ", "speaker "),
         ),
-        (("tat ca zalo", "toan bo zalo", "moi zalo"), ("zalo ",)),
+        (
+            (
+                "tat ca dien thoai",
+                "toan bo dien thoai",
+                "moi dien thoai",
+                "all phones",
+                "all mobile devices",
+                "every phone",
+            ),
+            ("dien thoai ", "phone ", "mobile "),
+        ),
+        (
+            (
+                "tat ca zalo",
+                "toan bo zalo",
+                "moi zalo",
+                "all zalo",
+                "all zalo destinations",
+            ),
+            ("zalo ",),
+        ),
     )
     for phrases, prefixes in category_phrases:
         if any(phrase in normalized for phrase in phrases):
@@ -80,7 +120,17 @@ def parse_target_selection(selection: str, target_names: list[str]) -> list[int]
 
     if not category_requested and any(
         phrase in normalized
-        for phrase in ("tat ca", "toan bo", "het", "moi noi", "ca hai")
+        for phrase in (
+            "tat ca",
+            "toan bo",
+            "het",
+            "moi noi",
+            "ca hai",
+            "all",
+            "everything",
+            "everywhere",
+            "both",
+        )
     ):
         return list(range(len(target_names)))
 
@@ -95,9 +145,17 @@ def parse_target_selection(selection: str, target_names: list[str]) -> list[int]
         aliases = {normalized_name}
         for prefix in (
             "dien thoai ",
+            "phone ",
+            "mobile ",
             "zalo nhom ",
             "zalo nguoi dung ",
+            "zalo group ",
+            "zalo user ",
             "loa ",
+            "speaker ",
+            "camera ",
+            "may quay ",
+            "cam ",
         ):
             if normalized_name.startswith(prefix):
                 aliases.add(normalized_name[len(prefix) :])

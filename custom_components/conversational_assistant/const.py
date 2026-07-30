@@ -95,6 +95,10 @@ PENDING_FOLLOWUP_SENTENCES = ["{selection}"]
 # These management commands are static; learned phrases themselves are
 # registered dynamically after loading Home Assistant Store.
 COMMAND_LEARN_SENTENCES = [
+    "[please ](learn|teach|add) command",
+    "[please ](learn|teach|add) command {request}",
+    "[please ]add custom command {request}",
+    "[please ]add phrase {request}",
     "[hãy ](học|dạy|thêm) câu lệnh",
     "[hãy ](học|dạy|thêm) câu lệnh {request}",
     "[hãy ]thêm câu lệnh tùy chỉnh",
@@ -104,6 +108,11 @@ COMMAND_LEARN_SENTENCES = [
 ]
 
 COMMAND_LIST_SENTENCES = [
+    "[please ]list learned commands",
+    "[please ]show learned commands",
+    "[please ]show custom commands",
+    "what commands have I taught you",
+    "command memory",
     "[hãy ]danh sách câu lệnh đã học",
     "[hãy ]liệt kê câu lệnh đã học",
     "[hãy ]xem câu lệnh đã học",
@@ -113,6 +122,10 @@ COMMAND_LIST_SENTENCES = [
 ]
 
 COMMAND_DELETE_SENTENCES = [
+    "[please ](delete|remove|forget) command",
+    "[please ](delete|remove|forget) command {request}",
+    "[please ](delete|remove|forget) all learned commands",
+    "[please ]clear command memory",
     "[hãy ](xóa|xoá|quên) câu lệnh",
     "[hãy ](xóa|xoá|quên) câu lệnh {request}",
     "[hãy ](xóa|xoá) câu lệnh đã học {request}",
@@ -124,6 +137,15 @@ COMMAND_DELETE_SENTENCES = [
 # A dedicated help trigger keeps usage-guide requests inside this integration,
 # including while another workflow is waiting for a follow-up answer.
 HELP_SENTENCES = [
+    "help",
+    "[please ]show help",
+    "[please ]show commands",
+    "[please ]show features",
+    "[please ](help|guide) me [to ]use (the integration|conversational assistant)",
+    "how [do I ]use (the integration|conversational assistant)",
+    "how does (the integration|conversational assistant) work",
+    "what can (the integration|conversational assistant) do",
+    "what features does (the integration|conversational assistant) support",
     "[hãy ](trợ giúp|hướng dẫn|hướng dẫn sử dụng|lệnh|các lệnh|các tính năng)",
     "[hãy ](hướng dẫn|chỉ) [tôi ]sử dụng (tích hợp|conversational assistant)",
     "[hãy ](hướng dẫn|chỉ) [tôi ]cách sử dụng (tích hợp|conversational assistant)",
@@ -141,6 +163,11 @@ HELP_SENTENCES = [
 ]
 
 CREATE_SENTENCES = [
+    "[please ]remind me {request}",
+    "[please ]set [a ]reminder {request}",
+    "[please ]create [a ]reminder {request}",
+    "[please ]add [a ]reminder {request}",
+    "[please ]schedule [a ]reminder {request}",
     # Explicit forms first so their wildcard contains only the actual request.
     "[hãy ]nhắc tôi {request}",
     "[hãy ]hẹn giờ nhắc tôi {request}",
@@ -153,6 +180,12 @@ CREATE_SENTENCES = [
 
 
 LIST_SENTENCES = [
+    "[please ](list|show|read) [my ]reminders",
+    "[please ]show [my ]reminder list",
+    "what reminders do I have",
+    "what is my next reminder",
+    "what's my next reminder",
+    "next reminder",
     "liệt kê (nhắc hẹn|nhắc nhở|lịch nhắc|hẹn giờ)",
     "đọc danh sách (nhắc hẹn|nhắc nhở|lịch nhắc|hẹn giờ)",
     "xem danh sách (nhắc hẹn|nhắc nhở|lịch nhắc|hẹn giờ)",
@@ -163,6 +196,10 @@ LIST_SENTENCES = [
 ]
 
 CANCEL_SENTENCES = [
+    "[please ](delete|cancel|remove) [a ]reminder",
+    "[please ](delete|cancel|remove) [a ]reminder {request}",
+    "[please ](delete|cancel|remove) all reminders",
+    "[please ]clear all reminders",
     # Accept both common Vietnamese spellings: xóa/xoá and hủy/huỷ.
     "(hủy|huỷ|xóa|xoá) (nhắc hẹn|nhắc nhở|lịch nhắc|hẹn giờ)",
     "(hủy|huỷ|xóa|xoá) (nhắc hẹn|nhắc nhở|lịch nhắc|hẹn giờ) {request}",
@@ -172,6 +209,10 @@ CANCEL_SENTENCES = [
 
 
 CAMERA_SENTENCES = [
+    "[please ](take|capture|get|send) (a photo|a picture|an image) [from ](camera|cameras)",
+    "[please ](take|capture|get|send) (a photo|a picture|an image) [from ](camera|cameras) {request}",
+    "[please ](take|capture) [a ]camera snapshot",
+    "[please ](take|capture) [a ]camera snapshot {request}",
     "[hãy ](chụp|lấy) (ảnh|hình) [từ ](camera|máy quay)",
     "[hãy ](chụp|lấy) (ảnh|hình) [từ ](camera|máy quay) {request}",
     "[hãy ]chụp (camera|máy quay)",
@@ -180,6 +221,11 @@ CAMERA_SENTENCES = [
 
 
 TARGET_SELECTION_SENTENCES = [
+    "(select|choose|confirm|send to|notify) {selection}",
+    "I (select|choose) {selection}",
+    "[please ]send [it ]to {selection}",
+    "all",
+    "all (speakers|phones|zalo destinations)",
     "(chọn|xác nhận|gửi đến|thông báo đến) {selection}",
     "tôi chọn {selection}",
     "hãy gửi đến {selection}",
@@ -196,6 +242,10 @@ TARGET_SELECTION_SENTENCES = [
 ]
 
 CANCEL_PENDING_SENTENCES = [
+    "cancel the last request",
+    "do not save this reminder",
+    "stop creating the reminder",
+    "cancel",
     "bỏ yêu cầu vừa rồi",
     "không lưu nhắc nhở này",
     "dừng tạo nhắc nhở",
@@ -205,6 +255,11 @@ CANCEL_PENDING_SENTENCES = [
 # Natural-language note commands. Protected notes are encrypted per note and
 # are never exposed through list responses or sensor attributes.
 NOTE_CREATE_SENTENCES = [
+    "[please ](add|create|save|write) [a ]note",
+    "[please ](add|create|save|write) [a ]note {request}",
+    "[please ]remember {request}",
+    "[please ]make [a ]note {request}",
+    "note {request}",
     "(thêm|tạo|lưu|viết) (ghi chú|ghi nhớ|note)",
     "(thêm|tạo|lưu|viết) (ghi chú|ghi nhớ|note) {request}",
     "(ghi chú|ghi nhớ|note|ghi lại)",
@@ -216,6 +271,10 @@ NOTE_CREATE_SENTENCES = [
 
 
 NOTE_LIST_SENTENCES = [
+    "[please ](list|show|read) [my ]notes",
+    "[please ]show [my ]note list",
+    "what notes do I have",
+    "my notes",
     "liệt kê (ghi chú|ghi nhớ)",
     "danh sách (ghi chú|ghi nhớ)",
     "xem danh sách (ghi chú|ghi nhớ)",
@@ -230,16 +289,22 @@ NOTE_LIST_SENTENCES = [
 ]
 
 NOTE_EDIT_SENTENCES = [
+    "[please ](edit|update|change) [a ]note",
+    "[please ](edit|update|change) [a ]note {request}",
     "(sửa|chỉnh sửa|cập nhật|đổi) (ghi chú|ghi nhớ|note)",
     "(sửa|chỉnh sửa|cập nhật|đổi) (ghi chú|ghi nhớ|note) {request}",
 ]
 
 NOTE_DELETE_SENTENCES = [
+    "[please ](delete|remove|cancel) [a ]note",
+    "[please ](delete|remove|cancel) [a ]note {request}",
     "(xóa|xoá|hủy|huỷ) (ghi chú|ghi nhớ|note)",
     "(xóa|xoá|hủy|huỷ) (ghi chú|ghi nhớ|note) {request}",
 ]
 
 NOTE_VIEW_SENTENCES = [
+    "[please ](open|read|view|show) note {request}",
+    "[please ]show note number {request}",
     "(mở|đọc) ghi chú {request}",
     "xem nội dung ghi chú {request}",
     "xem ghi chú số {request}",

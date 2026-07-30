@@ -46,6 +46,41 @@ def explicit_home_assistant_request_kind(text: str) -> str | None:
         return "calendar"
 
     command_prefixes = (
+        "turn on ",
+        "turn off ",
+        "turn ",
+        "set ",
+        "dim ",
+        "brighten ",
+        "activate ",
+        "deactivate ",
+        "switch on ",
+        "switch off ",
+        "open ",
+        "close ",
+        "lock ",
+        "unlock ",
+        "increase ",
+        "decrease ",
+        "raise ",
+        "lower ",
+        "set temperature ",
+        "set thermostat ",
+        "set air conditioner ",
+        "change ",
+        "stop ",
+        "pause ",
+        "resume ",
+        "play ",
+        "start ",
+        "clean ",
+        "check ",
+        "show status ",
+        "status of ",
+        "tell me ",
+        "report ",
+        "weather ",
+        "forecast ",
         "bat ",
         "tat ",
         "mo ",
@@ -73,6 +108,14 @@ def explicit_home_assistant_request_kind(text: str) -> str | None:
         "du bao ",
     )
     exact_queries = {
+        "weather",
+        "weather forecast",
+        "temperature",
+        "humidity",
+        "home status",
+        "house status",
+        "check the house",
+        "how is the house",
         "thoi tiet",
         "du bao thoi tiet",
         "nhiet do",
@@ -85,6 +128,28 @@ def explicit_home_assistant_request_kind(text: str) -> str | None:
         return "conversation"
 
     query_terms = (
+        "weather",
+        "forecast",
+        "status",
+        "turned on",
+        "turned off",
+        "is on",
+        "is off",
+        "locked",
+        "unlocked",
+        "temperature",
+        "humidity",
+        "which room",
+        "which area",
+        "which floor",
+        "which device",
+        "which lights",
+        "lights on",
+        "lights off",
+        "devices on",
+        "devices off",
+        "doors locked",
+        "doors unlocked",
         "thoi tiet",
         "du bao",
         "trang thai",
@@ -115,35 +180,55 @@ def calendar_window_from_text(text: str, now: datetime) -> CalendarWindow:
     today_start = datetime.combine(local_now.date(), time.min, tzinfo=tzinfo)
     tomorrow_start = today_start + timedelta(days=1)
 
-    if "ngay mai" in normalized:
+    if "day after tomorrow" in normalized:
+        target_start = tomorrow_start + timedelta(days=1)
+        return CalendarWindow(
+            start=target_start,
+            end=target_start + timedelta(days=1),
+            label="the day after tomorrow",
+        )
+    if "tomorrow" in normalized or "ngay mai" in normalized:
         return CalendarWindow(
             start=tomorrow_start,
             end=tomorrow_start + timedelta(days=1),
-            label="ngày mai",
+            label="tomorrow" if "tomorrow" in normalized else "ngày mai",
         )
-    if "hom nay" in normalized:
+    if "today" in normalized or "hom nay" in normalized:
         return CalendarWindow(
             start=local_now,
             end=tomorrow_start,
-            label="hôm nay",
+            label="today" if "today" in normalized else "hôm nay",
         )
-    if "tuan nay" in normalized:
+    if "this week" in normalized or "tuan nay" in normalized:
         end = today_start + timedelta(days=7 - local_now.weekday())
-        return CalendarWindow(local_now, end, "tuần này")
-    if "tuan toi" in normalized or "7 ngay" in normalized:
+        return CalendarWindow(
+            local_now,
+            end,
+            "this week" if "this week" in normalized else "tuần này",
+        )
+    if (
+        "next week" in normalized
+        or "next 7 days" in normalized
+        or "7 days" in normalized
+        or "tuan toi" in normalized
+        or "7 ngay" in normalized
+    ):
         return CalendarWindow(
             local_now,
             local_now + timedelta(days=7),
-            "7 ngày tới",
+            "the next 7 days" if "day" in normalized or "week" in normalized else "7 ngày tới",
         )
 
-    match = re.search(r"\b(\d{1,2})\s*ngay(?:\s*(?:toi|sap toi))?\b", normalized)
+    match = re.search(
+        r"\b(\d{1,2})\s*(?:days?|ngay)(?:\s*(?:ahead|from now|toi|sap toi))?\b",
+        normalized,
+    )
     if match:
         days = max(1, min(31, int(match.group(1))))
         return CalendarWindow(
             local_now,
             local_now + timedelta(days=days),
-            f"{days} ngày tới",
+            f"the next {days} days" if "day" in normalized else f"{days} ngày tới",
         )
 
     return CalendarWindow(
@@ -254,6 +339,19 @@ def _is_camera_image_request(normalized: str) -> bool:
         return False
 
     direct_image_prefixes = (
+        "take a photo",
+        "take a picture",
+        "take an image",
+        "capture a photo",
+        "capture a picture",
+        "capture an image",
+        "get a photo",
+        "get a picture",
+        "get an image",
+        "send a photo",
+        "send a picture",
+        "send an image",
+        "camera snapshot",
         "chup anh",
         "chup hinh",
         "lay anh",
@@ -269,11 +367,27 @@ def _is_camera_image_request(normalized: str) -> bool:
         or "camera" in normalized
         or "may quay" in normalized
         or normalized.startswith("cam ")
+        or "cctv" in normalized
     )
     if not mentions_camera:
         return False
 
     image_phrases = (
+        "take photo",
+        "take a photo",
+        "take picture",
+        "take a picture",
+        "capture photo",
+        "capture image",
+        "capture picture",
+        "camera photo",
+        "camera picture",
+        "camera image",
+        "camera snapshot",
+        "view camera",
+        "check camera",
+        "show camera",
+        "send camera image",
         "chup anh",
         "chup hinh",
         "lay anh",
@@ -295,12 +409,39 @@ def _is_camera_image_request(normalized: str) -> bool:
 
 def _is_calendar_query(normalized: str) -> bool:
     """Return whether normalized text asks about calendar events."""
-    reminder_terms = ("lich nhac", "nhac hen", "nhac nho", "hen gio")
+    reminder_terms = (
+        "reminder",
+        "reminders",
+        "timer",
+        "lich nhac",
+        "nhac hen",
+        "nhac nho",
+        "hen gio",
+    )
     if any(term in normalized for term in reminder_terms):
         return False
-    if "su kien" in normalized:
+    if "event" in normalized or "events" in normalized or "su kien" in normalized:
         return True
     calendar_phrases = {
+        "calendar",
+        "show calendar",
+        "check calendar",
+        "my calendar",
+        "calendar today",
+        "calendar tomorrow",
+        "upcoming calendar",
+        "calendar this week",
+        "calendar next week",
+        "what is on my calendar",
+        "whats on my calendar",
+        "what s on my calendar",
+        "what is on my calendar today",
+        "whats on my calendar today",
+        "what s on my calendar today",
+        "what is on my calendar tomorrow",
+        "whats on my calendar tomorrow",
+        "what s on my calendar tomorrow",
+        "do i have any events",
         "lich",
         "xem lich",
         "kiem tra lich",
@@ -316,6 +457,12 @@ def _is_calendar_query(normalized: str) -> bool:
     }
     return (
         normalized in calendar_phrases
+        or normalized.startswith("show calendar ")
+        or normalized.startswith("check calendar ")
+        or normalized.startswith("calendar ")
+        or normalized.startswith("what is on my calendar ")
+        or normalized.startswith("whats on my calendar ")
+        or normalized.startswith("what s on my calendar ")
         or normalized.startswith("xem lich ")
         or normalized.startswith("lich ")
     )

@@ -134,12 +134,20 @@ def parse_security_level(text: str, current_level: int | None = None) -> int | N
     normalized = normalize_text(text)
     if current_level is not None and any(
         phrase in normalized
-        for phrase in ("giu nguyen", "muc cu", "bao mat cu")
+        for phrase in (
+            "keep current",
+            "keep the same",
+            "same level",
+            "current level",
+            "giu nguyen",
+            "muc cu",
+            "bao mat cu",
+        )
     ):
         return current_level
-    if re.search(r"\bmuc\s*1\b", normalized):
+    if re.search(r"\b(?:muc|level)\s*1\b", normalized):
         return NOTE_SECURITY_PRIVATE
-    if re.search(r"\bmuc\s*2\b", normalized):
+    if re.search(r"\b(?:muc|level)\s*2\b", normalized):
         return NOTE_SECURITY_PUBLIC
     if any(
         phrase in normalized
@@ -149,17 +157,28 @@ def parse_security_level(text: str, current_level: int | None = None) -> int | N
             "co pass",
             "can pass",
             "private",
+            "protected",
+            "password protected",
+            "with password",
+            "secure",
         )
     ):
         return NOTE_SECURITY_PRIVATE
     if any(
         phrase in normalized
-        for phrase in ("cong khai", "khong pass", "public")
+        for phrase in (
+            "cong khai",
+            "khong pass",
+            "public",
+            "without password",
+            "no password",
+            "unprotected",
+        )
     ):
         return NOTE_SECURITY_PUBLIC
-    if normalized in {"1", "mot"}:
+    if normalized in {"1", "mot", "one"}:
         return NOTE_SECURITY_PRIVATE
-    if normalized in {"2", "hai"}:
+    if normalized in {"2", "hai", "two"}:
         return NOTE_SECURITY_PUBLIC
     return None
 
@@ -169,7 +188,7 @@ def extract_password(text: str, *, allow_whole_text: bool = False) -> str | None
     value = str(text or "").strip()
     match = re.search(
         r"(?:pass(?:word)?|mật\s*khẩu|mat\s*khau)"
-        r"\s*(?:(?:là|la)\s*)?[:=\-]?\s*(.+)$",
+        r"\s*(?:(?:là|la|is)\s*)?[:=\-]?\s*(.+)$",
         value,
         re.IGNORECASE,
     )
@@ -190,6 +209,14 @@ def is_affirmative(text: str) -> bool:
         "ok",
         "okay",
         "yes",
+        "confirm",
+        "confirmed",
+        "save",
+        "save it",
+        "proceed",
+        "continue",
+        "go ahead",
+        "do it",
         "tiep tuc",
     }
 
@@ -205,6 +232,16 @@ def is_negative(text: str) -> bool:
         "bo qua",
         "thoi",
         "no",
+        "cancel",
+        "cancel it",
+        "stop",
+        "do not save",
+        "don't save",
+        "don t save",
+        "do not delete",
+        "don't delete",
+        "don t delete",
+        "never mind",
     }
 
 

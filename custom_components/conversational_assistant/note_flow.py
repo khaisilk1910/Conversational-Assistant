@@ -64,7 +64,30 @@ def _extract_note_request(text: str) -> str:
     """Strip common note command prefixes from arbitrary text."""
     value = str(text or "").strip()
     folded = normalize_text(value)
+    if folded.startswith("please "):
+        value = " ".join(value.split()[1:]).strip()
+        folded = normalize_text(value)
     prefixes = (
+        "please add note",
+        "please create note",
+        "please save note",
+        "please write note",
+        "please make note",
+        "please remember",
+        "add a note",
+        "create a note",
+        "save a note",
+        "write a note",
+        "make a note",
+        "add note",
+        "create note",
+        "save note",
+        "write note",
+        "make note",
+        "remember that",
+        "remember",
+        "note that",
+        "note",
         "them ghi chu",
         "tao ghi chu",
         "luu ghi chu",
@@ -105,10 +128,23 @@ def _extract_note_request(text: str) -> str:
 def note_zalo_command_kind(text: str) -> str | None:
     """Classify natural Vietnamese note commands from Zalo."""
     normalized = normalize_text(text)
+    if normalized.startswith("please "):
+        normalized = normalized[7:].strip()
     if not normalized:
         return None
 
     list_phrases = {
+        "list notes",
+        "list my notes",
+        "show notes",
+        "show my notes",
+        "read notes",
+        "read my notes",
+        "show note list",
+        "show my note list",
+        "what notes do i have",
+        "my notes",
+        "notes",
         "ghi chu cua toi",
         "ghi nho cua toi",
         "liet ke ghi chu",
@@ -133,6 +169,14 @@ def note_zalo_command_kind(text: str) -> str | None:
 
     if normalized.startswith(
         (
+            "edit note",
+            "edit a note",
+            "update note",
+            "update a note",
+            "change note",
+            "change a note",
+            "please edit note",
+            "please update note",
             "sua ghi chu",
             "sua ghi nho",
             "chinh sua ghi chu",
@@ -146,6 +190,12 @@ def note_zalo_command_kind(text: str) -> str | None:
         return "note_edit"
     if normalized.startswith(
         (
+            "delete note",
+            "delete a note",
+            "remove note",
+            "remove a note",
+            "please delete note",
+            "please remove note",
             "xoa ghi chu",
             "xoa ghi nho",
             "huy ghi chu",
@@ -157,6 +207,13 @@ def note_zalo_command_kind(text: str) -> str | None:
         return "note_delete"
     if normalized.startswith(
         (
+            "open note",
+            "read note",
+            "view note",
+            "show note",
+            "show note number",
+            "please open note",
+            "please read note",
             "mo ghi chu",
             "doc ghi chu so",
             "xem noi dung ghi chu",
@@ -165,6 +222,21 @@ def note_zalo_command_kind(text: str) -> str | None:
     ):
         return "note_view"
     if normalized in {
+        "note",
+        "add note",
+        "add a note",
+        "create note",
+        "create a note",
+        "save note",
+        "save a note",
+        "write note",
+        "write a note",
+        "make note",
+        "make a note",
+        "remember",
+        "please remember",
+        "please add note",
+        "please create note",
         "ghi chu",
         "ghi nho",
         "nho",
@@ -182,6 +254,22 @@ def note_zalo_command_kind(text: str) -> str | None:
         "nho giup toi",
     } or normalized.startswith(
         (
+            "add note ",
+            "add a note ",
+            "create note ",
+            "create a note ",
+            "save note ",
+            "save a note ",
+            "write note ",
+            "write a note ",
+            "make note ",
+            "make a note ",
+            "remember ",
+            "remember that ",
+            "note that ",
+            "please remember ",
+            "please add note ",
+            "please create note ",
             "them ghi chu ",
             "tao ghi chu ",
             "luu ghi chu ",

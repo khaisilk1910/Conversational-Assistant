@@ -162,6 +162,23 @@ _LOGGER = logging.getLogger(__name__)
 _HELP_EXACT_PHRASES = frozenset(
     {
         "help",
+        "show help",
+        "usage guide",
+        "user guide",
+        "instructions",
+        "commands",
+        "features",
+        "how to use the integration",
+        "how do i use the integration",
+        "how can i use the integration",
+        "how to use conversational assistant",
+        "how do i use conversational assistant",
+        "how can i use conversational assistant",
+        "how does the integration work",
+        "how does conversational assistant work",
+        "what can the integration do",
+        "what can conversational assistant do",
+        "what features are supported",
         "tro giup",
         "huong dan",
         "huong dan su dung",
@@ -200,6 +217,8 @@ def _is_integration_help_request(text: str) -> bool:
     normalized = normalize_text(text)
     if normalized.startswith("hay "):
         normalized = normalized[4:].strip()
+    elif normalized.startswith("please "):
+        normalized = normalized[7:].strip()
     if not normalized:
         return False
     if normalized in _HELP_EXACT_PHRASES:
@@ -209,6 +228,8 @@ def _is_integration_help_request(text: str) -> bool:
         term in normalized
         for term in (
             "tich hop",
+            "integration",
+            "assistant",
             "conversational assistant",
             "cac tinh nang",
             "tinh nang cua",
@@ -218,6 +239,17 @@ def _is_integration_help_request(text: str) -> bool:
     asks_for_guidance = any(
         term in normalized
         for term in (
+            "help",
+            "guide",
+            "instructions",
+            "how to use",
+            "how do i use",
+            "how can i use",
+            "how does",
+            "what can",
+            "what features",
+            "show commands",
+            "show features",
             "huong dan",
             "cach su dung",
             "cach dung",
@@ -230,6 +262,30 @@ def _is_integration_help_request(text: str) -> bool:
         )
     )
     return mentions_subject and asks_for_guidance
+
+
+def _request_language(text: str) -> str:
+    """Infer whether an inbound command should use English or Vietnamese."""
+    normalized = normalize_text(text)
+    tokens = set(normalized.split())
+    english_markers = {
+        "the", "a", "an", "my", "me", "please", "turn", "switch", "set",
+        "open", "close", "lock", "unlock", "check", "status", "weather",
+        "temperature", "calendar", "event", "today", "tomorrow", "remind",
+        "reminder", "note", "camera", "take", "photo", "picture", "show",
+        "list", "delete", "cancel", "help", "what", "which", "where",
+        "is", "are", "any", "light", "lights", "fan", "fans", "device",
+        "devices", "room", "floor", "upstairs", "downstairs", "living",
+        "kitchen", "bedroom", "brightness", "volume", "thermostat", "door",
+    }
+    vietnamese_markers = {
+        "toi", "hay", "bat", "tat", "mo", "dong", "kiem", "tra",
+        "trang", "thai", "thoi", "tiet", "nhac", "ghi", "chu", "chup",
+        "anh", "hom", "nay", "ngay", "mai", "xoa", "huy", "danh", "sach",
+    }
+    english_score = len(tokens & english_markers)
+    vietnamese_score = len(tokens & vietnamese_markers)
+    return "en" if english_score > vietnamese_score else "vi"
 
 
 @dataclass(slots=True)
@@ -1385,6 +1441,17 @@ class ConversationalAssistantManager(NoteManagerMixin):
             return "help"
 
         list_phrases = {
+            "list reminders",
+            "list my reminders",
+            "show reminders",
+            "show my reminders",
+            "show reminder list",
+            "show my reminder list",
+            "read reminders",
+            "what reminders do i have",
+            "what is my next reminder",
+            "whats my next reminder",
+            "next reminder",
             "liet ke nhac nho",
             "liet ke nhac hen",
             "liet ke lich nhac",
@@ -1418,6 +1485,17 @@ class ConversationalAssistantManager(NoteManagerMixin):
             return "list"
 
         delete_prefixes = (
+            "delete reminder",
+            "delete a reminder",
+            "delete my reminder",
+            "remove reminder",
+            "remove a reminder",
+            "cancel reminder",
+            "cancel a reminder",
+            "delete all reminders",
+            "remove all reminders",
+            "cancel all reminders",
+            "clear all reminders",
             "huy nhac hen",
             "xoa nhac hen",
             "huy nhac nho",
@@ -1431,6 +1509,18 @@ class ConversationalAssistantManager(NoteManagerMixin):
             return "delete"
 
         create_prefixes = (
+            "remind me ",
+            "please remind me ",
+            "set reminder ",
+            "set a reminder ",
+            "please set reminder ",
+            "please set a reminder ",
+            "create reminder ",
+            "create a reminder ",
+            "add reminder ",
+            "add a reminder ",
+            "schedule reminder ",
+            "schedule a reminder ",
             "nhac ",
             "hay nhac ",
             "hen ",
@@ -1469,7 +1559,25 @@ class ConversationalAssistantManager(NoteManagerMixin):
     def _zalo_delete_request(text: str) -> str:
         """Return normalized text following a delete command prefix."""
         normalized = normalize_text(text)
+        if normalized in {
+            "delete all reminders",
+            "remove all reminders",
+            "cancel all reminders",
+            "clear all reminders",
+        }:
+            return "all"
         prefixes = (
+            "delete reminder",
+            "delete a reminder",
+            "delete my reminder",
+            "remove reminder",
+            "remove a reminder",
+            "cancel reminder",
+            "cancel a reminder",
+            "delete all reminders",
+            "remove all reminders",
+            "cancel all reminders",
+            "clear all reminders",
             "huy nhac hen",
             "xoa nhac hen",
             "huy nhac nho",
@@ -1488,41 +1596,31 @@ class ConversationalAssistantManager(NoteManagerMixin):
 
     @staticmethod
     def _integration_help_text() -> str:
-        """Return a compact, structured guide for Voice Assist and Zalo."""
+        """Return a compact bilingual guide for Voice Assist and Zalo."""
         return (
-            "HƯỚNG DẪN CONVERSATIONAL ASSISTANT\n"
-            "Các câu lệnh dưới đây dùng được trên Voice Assistant và Zalo.\n\n"
-            "1. NHÀ THÔNG MINH\n"
-            "Điều khiển hoặc kiểm tra thiết bị, phòng, khu vực và tầng.\n"
-            "Ví dụ:\n"
-            "• Bật đèn phòng khách.\n"
-            "• Kiểm tra thiết bị nào đang bật ở tầng 2.\n\n"
-            "2. THỜI TIẾT VÀ LỊCH\n"
-            "Xem thời tiết, nhiệt độ và sự kiện từ Home Assistant.\n"
-            "Ví dụ:\n"
-            "• Thời tiết hôm nay thế nào?\n"
-            "• Ngày mai tôi có lịch gì?\n\n"
+            "HƯỚNG DẪN / CONVERSATIONAL ASSISTANT GUIDE\n"
+            "Có thể dùng tiếng Việt hoặc English trên Voice Assistant và Zalo.\n\n"
+            "1. NHÀ THÔNG MINH / SMART HOME\n"
+            "• Bật đèn phòng khách. / Turn on the living room light.\n"
+            "• Kiểm tra tầng 2. / Check which devices are on upstairs.\n\n"
+            "2. THỜI TIẾT VÀ LỊCH / WEATHER & CALENDAR\n"
+            "• Thời tiết hôm nay thế nào? / What's the weather today?\n"
+            "• Ngày mai tôi có lịch gì? / What is on my calendar tomorrow?\n\n"
             "3. CAMERA\n"
-            "Chọn một hoặc nhiều camera, xác nhận rồi gửi ảnh đến Zalo; nếu chưa có destination, tích hợp sẽ yêu cầu cấu hình.\n"
-            "Ví dụ:\n"
-            "• Chụp camera.\n"
-            "• Lấy ảnh camera sân trước.\n\n"
-            "4. NHẮC HẸN\n"
-            "Tạo, xem hoặc xóa nhắc hẹn; có thể chọn điện thoại, loa và Zalo nhận thông báo.\n"
-            "Ví dụ:\n"
+            "• Chụp camera. / Take a camera photo.\n"
+            "• Lấy ảnh camera sân trước. / Capture the front yard camera.\n\n"
+            "4. NHẮC HẸN / REMINDERS\n"
             "• Nhắc tôi 30 phút nữa uống thuốc.\n"
-            "• Danh sách nhắc hẹn.\n\n"
-            "5. GHI CHÚ\n"
-            "Thêm, xem, sửa hoặc xóa ghi chú; hỗ trợ mức Bảo mật và Công khai.\n"
-            "Ví dụ:\n"
-            "• Ghi nhớ mã tủ đồ là 2468.\n"
-            "• Danh sách ghi chú.\n\n"
-            "6. BỘ NHỚ CÂU LỆNH\n"
-            "Dạy cách nói mới cho chức năng có sẵn, xem lại hoặc xóa câu đã học.\n"
-            "Ví dụ:\n"
+            "• Remind me to take medicine in 30 minutes.\n"
+            "• Danh sách nhắc hẹn. / Show my reminders.\n\n"
+            "5. GHI CHÚ / NOTES\n"
+            "• Ghi nhớ mã tủ đồ là 2468. / Remember that the locker code is 2468.\n"
+            "• Danh sách ghi chú. / Show my notes.\n\n"
+            "6. BỘ NHỚ CÂU LỆNH / COMMAND MEMORY\n"
             "• Học câu lệnh xem cổng để chụp ảnh camera.\n"
-            "• Xóa câu lệnh xem cổng.\n\n"
-            "Nói “hướng dẫn sử dụng tích hợp” bất cứ lúc nào để xem lại."
+            "• Learn command check the gate to take a camera photo.\n"
+            "• Xóa câu lệnh xem cổng. / Delete command check the gate.\n\n"
+            "Nói 'hướng dẫn sử dụng tích hợp' hoặc 'how to use the integration' để xem lại."
         )
 
     def _zalo_upcoming_reminders(
@@ -1862,7 +1960,7 @@ class ConversationalAssistantManager(NoteManagerMixin):
             )
             return self._zalo_deletion_prompt(reminders)
 
-        if request in {"tat ca", "toan bo", "het"}:
+        if request in {"all", "everything", "tat ca", "toan bo", "het"}:
             deleted = 0
             for _due, reminder in reminders:
                 if await self.async_delete(reminder.reminder_id):
@@ -2409,6 +2507,18 @@ class ConversationalAssistantManager(NoteManagerMixin):
         """Return True when a follow-up clearly approves capture and send."""
         normalized = normalize_text(text)
         return normalized in {
+            "yes",
+            "yes take it",
+            "yes capture",
+            "confirm",
+            "confirmed",
+            "go ahead",
+            "proceed",
+            "take it",
+            "take the photo",
+            "capture it",
+            "capture and send",
+            "send it",
             "dong y",
             "dong y chup",
             "dong y chup va gui",
@@ -2436,6 +2546,16 @@ class ConversationalAssistantManager(NoteManagerMixin):
         """Return True for a clear camera cancellation response."""
         normalized = normalize_text(text)
         return normalized in {
+            "no",
+            "cancel",
+            "stop",
+            "do not capture",
+            "dont capture",
+            "don t capture",
+            "do not take the photo",
+            "dont take the photo",
+            "don t take the photo",
+            "never mind",
             "khong",
             "khong dong y",
             "khong chup",
@@ -2589,6 +2709,17 @@ class ConversationalAssistantManager(NoteManagerMixin):
         """Handle one or more camera selections from Zalo."""
         normalized = normalize_text(context.text)
         cancel_phrases = {
+            "no",
+            "cancel",
+            "stop",
+            "skip",
+            "do not capture",
+            "dont capture",
+            "don t capture",
+            "do not take a photo",
+            "dont take a photo",
+            "don t take a photo",
+            "never mind",
             "khong",
             "huy",
             "bo qua",
@@ -2681,7 +2812,7 @@ class ConversationalAssistantManager(NoteManagerMixin):
                     context.owner_key
                 ),
                 context=service_context or Context(),
-                language="vi",
+                language=_request_language(context.text),
                 agent_id=self.zalo_conversation_agent_id,
             )
         except Exception:  # noqa: BLE001 - always return a Zalo response
@@ -3490,8 +3621,22 @@ class ConversationalAssistantManager(NoteManagerMixin):
     @staticmethod
     def _request_from_text(text: str) -> str:
         """Extract the reminder or deletion request from natural text."""
-        text = text.strip().casefold().removeprefix("hãy ")
+        text = text.strip().casefold()
+        if text.startswith("hãy "):
+            text = text[4:]
+        elif text.startswith("please "):
+            text = text[7:]
         normalized = normalize_text(text)
+        if re.fullmatch(
+            r"(?:delete|remove|cancel|clear) (?:all )?reminders?",
+            normalized,
+        ):
+            return "all"
+        if re.fullmatch(
+            r"(?:delete|remove|cancel) (?:a |my )?reminder",
+            normalized,
+        ):
+            return ""
         if re.fullmatch(
             r"(?:xoa|huy) (?:tat ca|toan bo) "
             r"(?:nhac hen|nhac nho|lich nhac|hen gio)",
@@ -3505,6 +3650,24 @@ class ConversationalAssistantManager(NoteManagerMixin):
             return ""
 
         prefixes = (
+            "remind me to ",
+            "remind me ",
+            "set a reminder to ",
+            "set a reminder ",
+            "set reminder to ",
+            "set reminder ",
+            "create a reminder to ",
+            "create a reminder ",
+            "add a reminder to ",
+            "add a reminder ",
+            "schedule a reminder to ",
+            "schedule a reminder ",
+            "delete a reminder ",
+            "delete reminder ",
+            "remove a reminder ",
+            "remove reminder ",
+            "cancel a reminder ",
+            "cancel reminder ",
             "tạo hẹn giờ nhắc tôi ",
             "hẹn giờ nhắc tôi ",
             "thêm nhắc hẹn ",
@@ -3570,6 +3733,14 @@ class ConversationalAssistantManager(NoteManagerMixin):
 
         text = user_input.text.strip().casefold()
         for prefix in (
+            "select ",
+            "choose ",
+            "confirm ",
+            "send to ",
+            "notify ",
+            "i select ",
+            "i choose ",
+            "please send to ",
             "chọn ",
             "xác nhận ",
             "gửi đến ",
@@ -4020,7 +4191,12 @@ class ConversationalAssistantManager(NoteManagerMixin):
         self, user_input: ConversationInput, result: RecognizeResult
     ) -> str:
         """Parse a reminder and optionally ask which targets should receive it."""
-        request = self._request_slot(user_input, result)
+        # Parse the complete utterance instead of only the wildcard slot.
+        # English slots such as "take medicine at 8" may not contain an
+        # explicit language marker after Hassil removes "remind me". Keeping
+        # the original command lets the parser select the English branch,
+        # while the Vietnamese parser already knows how to strip its prefixes.
+        request = user_input.text or self._request_slot(user_input, result)
         try:
             parsed = parse_reminder_request(request)
         except ReminderParseError as err:
@@ -4185,6 +4361,12 @@ class ConversationalAssistantManager(NoteManagerMixin):
         normalized = normalize_text(text)
         if normalized.startswith(
             (
+                "take a camera photo",
+                "take camera photo",
+                "take a photo from camera",
+                "capture camera image",
+                "capture a camera image",
+                "camera snapshot",
                 "chup anh camera",
                 "chup hinh camera",
                 "lay anh camera",
@@ -4196,6 +4378,20 @@ class ConversationalAssistantManager(NoteManagerMixin):
         ):
             return True
         prefixes = (
+            "remind me ",
+            "please remind me ",
+            "set reminder ",
+            "set a reminder ",
+            "create reminder ",
+            "create a reminder ",
+            "add reminder ",
+            "add a reminder ",
+            "schedule reminder ",
+            "schedule a reminder ",
+            "delete reminder ",
+            "delete a reminder ",
+            "remove reminder ",
+            "cancel reminder ",
             "nhac ",
             "hen ",
             "them ",
@@ -4211,6 +4407,23 @@ class ConversationalAssistantManager(NoteManagerMixin):
             "xoa hen gio ",
         )
         exact = {
+            "list reminders",
+            "list my reminders",
+            "show reminders",
+            "show my reminders",
+            "show reminder list",
+            "what reminders do i have",
+            "what is my next reminder",
+            "whats my next reminder",
+            "next reminder",
+            "delete reminder",
+            "delete a reminder",
+            "remove reminder",
+            "cancel reminder",
+            "delete all reminders",
+            "remove all reminders",
+            "cancel all reminders",
+            "clear all reminders",
             "liet ke nhac nho",
             "liet ke nhac hen",
             "doc danh sach nhac nho",
@@ -4245,6 +4458,27 @@ class ConversationalAssistantManager(NoteManagerMixin):
         """Return True for natural cancellation of a pending action."""
         normalized = normalize_text(text)
         return normalized in {
+            "cancel",
+            "cancel the last request",
+            "stop",
+            "stop this request",
+            "do not save",
+            "dont save",
+            "don t save",
+            "do not save this reminder",
+            "dont save this reminder",
+            "don t save this reminder",
+            "do not delete",
+            "dont delete",
+            "don t delete",
+            "cancel deletion",
+            "do not capture",
+            "dont capture",
+            "don t capture",
+            "do not take a photo",
+            "dont take a photo",
+            "don t take a photo",
+            "never mind",
             "bo yeu cau vua roi",
             "khong luu nhac nho nay",
             "dung tao nhac nho",
@@ -4533,7 +4767,13 @@ class ConversationalAssistantManager(NoteManagerMixin):
                 user_input, self._deletion_prompt(pending)
             )
 
-        if request in {"tất cả", "toàn bộ", "hết"}:
+        if normalize_text(request) in {
+            "all",
+            "everything",
+            "tat ca",
+            "toan bo",
+            "het",
+        }:
             reminders = list(self.reminders.values())
             self.reminders.clear()
             for reminder in reminders:

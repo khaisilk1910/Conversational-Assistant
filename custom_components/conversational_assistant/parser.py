@@ -769,11 +769,569 @@ def _clean_message(text: str) -> str:
     return text
 
 
+
+
+_EN_NUMBER_WORDS = {
+    "zero": 0,
+    "one": 1,
+    "two": 2,
+    "three": 3,
+    "four": 4,
+    "five": 5,
+    "six": 6,
+    "seven": 7,
+    "eight": 8,
+    "nine": 9,
+    "ten": 10,
+    "eleven": 11,
+    "twelve": 12,
+    "thirteen": 13,
+    "fourteen": 14,
+    "fifteen": 15,
+    "sixteen": 16,
+    "seventeen": 17,
+    "eighteen": 18,
+    "nineteen": 19,
+    "twenty": 20,
+    "thirty": 30,
+    "forty": 40,
+    "fifty": 50,
+    "sixty": 60,
+    "seventy": 70,
+    "eighty": 80,
+    "ninety": 90,
+}
+
+_EN_WEEKDAYS = {
+    "monday": 0,
+    "mon": 0,
+    "tuesday": 1,
+    "tue": 1,
+    "tues": 1,
+    "wednesday": 2,
+    "wed": 2,
+    "thursday": 3,
+    "thu": 3,
+    "thur": 3,
+    "thurs": 3,
+    "friday": 4,
+    "fri": 4,
+    "saturday": 5,
+    "sat": 5,
+    "sunday": 6,
+    "sun": 6,
+}
+
+_EN_WEEKDAY_LABELS = {
+    0: "Monday",
+    1: "Tuesday",
+    2: "Wednesday",
+    3: "Thursday",
+    4: "Friday",
+    5: "Saturday",
+    6: "Sunday",
+}
+
+_EN_MONTHS = {
+    "january": 1,
+    "jan": 1,
+    "february": 2,
+    "feb": 2,
+    "march": 3,
+    "mar": 3,
+    "april": 4,
+    "apr": 4,
+    "may": 5,
+    "june": 6,
+    "jun": 6,
+    "july": 7,
+    "jul": 7,
+    "august": 8,
+    "aug": 8,
+    "september": 9,
+    "sep": 9,
+    "sept": 9,
+    "october": 10,
+    "oct": 10,
+    "november": 11,
+    "nov": 11,
+    "december": 12,
+    "dec": 12,
+}
+
+_EN_MONTH_PATTERN = "|".join(sorted(_EN_MONTHS, key=len, reverse=True))
+_EN_WEEKDAY_PATTERN = "|".join(sorted(_EN_WEEKDAYS, key=len, reverse=True))
+
+
+def _looks_like_english_reminder(text: str) -> bool:
+    """Return whether a reminder request is primarily expressed in English."""
+    normalized = re.sub(r"[^a-z0-9']+", " ", _fold(str(text or "")))
+    tokens = set(normalized.split())
+    markers = {
+        "remind",
+        "reminder",
+        "tomorrow",
+        "today",
+        "after",
+        "from",
+        "minutes",
+        "minute",
+        "hours",
+        "hour",
+        "days",
+        "day",
+        "daily",
+        "weekly",
+        "monthly",
+        "yearly",
+        "every",
+        "weekdays",
+        "weekends",
+        "noon",
+        "midnight",
+    } | set(_EN_WEEKDAYS) | set(_EN_MONTHS)
+    return bool(tokens & markers)
+
+
+def _en_clean(text: str) -> str:
+    text = unicodedata.normalize("NFC", str(text or "")).casefold().strip()
+    text = text.replace("–", "-").replace("—", "-")
+    text = re.sub(r"[,!?;]+", " ", text)
+    return re.sub(r"\s+", " ", text).strip(" .")
+
+
+def _strip_english_command_prefix(text: str) -> str:
+    patterns = (
+        r"^(?:please\s+)?remind\s+me(?:\s+to)?\s+",
+        r"^(?:please\s+)?(?:set|create|add|schedule)\s+(?:me\s+)?(?:a\s+)?reminder(?:\s+to)?\s+",
+        r"^(?:please\s+)?(?:set|create|add|schedule)\s+reminder(?:\s+to)?\s+",
+    )
+    for pattern in patterns:
+        stripped = re.sub(pattern, "", text, count=1)
+        if stripped != text:
+            return stripped.strip()
+    return text
+
+
+def _parse_english_number(value: str) -> int:
+    value = _en_clean(value).replace("-", " ")
+    if value.isdigit():
+        return int(value)
+    tokens = [token for token in value.split() if token not in {"and", "a", "an"}]
+    if not tokens:
+        raise ReminderParseError("Missing number.")
+    total = 0
+    current = 0
+    for token in tokens:
+        if token in _EN_NUMBER_WORDS:
+            current += _EN_NUMBER_WORDS[token]
+        elif token == "hundred":
+            current = max(1, current) * 100
+        elif token == "thousand":
+            total += max(1, current) * 1000
+            current = 0
+        else:
+            raise ReminderParseError(f"I could not understand the number {value}.")
+    return total + current
+
+
+def _parse_english_duration(value: str) -> timedelta:
+    text = _en_clean(value)
+    if not text:
+        raise ReminderParseError("Missing duration.")
+    total_minutes = 0
+    consumed = [False] * len(text)
+
+    def mark(start: int, end: int) -> None:
+        for index in range(start, end):
+            consumed[index] = True
+
+    for match in re.finditer(r"\bhalf\s+(?:an?\s+)?hour\b", text):
+        total_minutes += 30
+        mark(match.start(), match.end())
+
+    for match in re.finditer(
+        r"\b(?P<n>\d+|[a-z]+(?:[-\s][a-z]+){0,3})\s+and\s+a\s+half\s+hours?\b",
+        text,
+    ):
+        if any(consumed[match.start():match.end()]):
+            continue
+        total_minutes += _parse_english_number(match.group("n")) * 60 + 30
+        mark(match.start(), match.end())
+
+    component = re.compile(
+        r"\b(?P<n>\d+|(?:zero|one|two|three|four|five|six|seven|eight|nine|ten|"
+        r"eleven|twelve|thirteen|fourteen|fifteen|sixteen|seventeen|eighteen|"
+        r"nineteen|twenty|thirty|forty|fifty|sixty|seventy|eighty|ninety|hundred|"
+        r"thousand)(?:[-\s](?:one|two|three|four|five|six|seven|eight|nine|ten|"
+        r"eleven|twelve|thirteen|fourteen|fifteen|sixteen|seventeen|eighteen|"
+        r"nineteen|twenty|thirty|forty|fifty|sixty|seventy|eighty|ninety|hundred)){0,3})"
+        r"\s*(?P<u>days?|hours?|hrs?|minutes?|mins?)\b"
+    )
+    for match in component.finditer(text):
+        if any(consumed[match.start():match.end()]):
+            continue
+        amount = _parse_english_number(match.group("n"))
+        unit = match.group("u")
+        if unit.startswith("day"):
+            total_minutes += amount * 24 * 60
+        elif unit.startswith("hour") or unit.startswith("hr"):
+            total_minutes += amount * 60
+        else:
+            total_minutes += amount
+        mark(match.start(), match.end())
+
+    leftover = "".join(" " if consumed[i] else char for i, char in enumerate(text))
+    leftover = re.sub(r"\b(?:and|plus)\b", " ", leftover)
+    leftover = re.sub(r"\s+", " ", leftover).strip()
+    if leftover:
+        raise ReminderParseError(
+            f"I could not understand the duration {value}. Try 30 minutes or 1 hour 30 minutes."
+        )
+    if total_minutes <= 0:
+        raise ReminderParseError("The duration must be greater than zero.")
+    return timedelta(minutes=total_minutes)
+
+
+def _extract_english_relative(text: str, now: datetime) -> ParsedReminder | None:
+    duration_component = (
+        r"(?:half\s+(?:an?\s+)?hour|"
+        r"(?:\d+|[a-z]+(?:[-\s][a-z]+){0,3})\s+and\s+a\s+half\s+hours?|"
+        r"(?:\d+|[a-z]+(?:[-\s][a-z]+){0,3})\s*(?:days?|hours?|hrs?|minutes?|mins?))"
+    )
+    duration_expression = rf"{duration_component}(?:\s*(?:and|plus|,)\s*{duration_component})*"
+    patterns = (
+        re.compile(rf"\b(?:in|after)\s+(?P<duration>{duration_expression})(?:\s+from\s+now)?\b"),
+        re.compile(rf"\b(?P<duration>{duration_expression})\s+from\s+now\b"),
+    )
+    match = next((item.search(text) for item in patterns if item.search(text)), None)
+    if match is None:
+        return None
+    delta = _parse_english_duration(match.group("duration"))
+    message = _clean_english_message(_remove_span(text, match.start(), match.end()))
+    run = now + delta
+    return ParsedReminder(
+        message=message,
+        first_run=run,
+        recurrence=Recurrence(),
+        confirmation=f"Reminder created for {message} at {_format_time_en(run)}.",
+    )
+
+
+def _extract_english_time(text: str, *, required: bool = True) -> tuple[int, int, str] | None:
+    text = _en_clean(text)
+    special = re.search(r"\b(?:at\s+)?(?P<t>noon|midnight)\b", text)
+    if special:
+        hour = 12 if special.group("t") == "noon" else 0
+        return hour, 0, _remove_span(text, special.start(), special.end())
+
+    # Numeric clock forms: 8 PM, 8:30 p.m., 18:30, at 7, 7 o'clock.
+    patterns = (
+        re.compile(
+            r"\b(?:at\s+)?(?P<h>\d{1,2})(?::(?P<m>\d{2}))?\s*"
+            r"(?P<p>a\s*\.?\s*m\.?|p\s*\.?\s*m\.?)\b"
+        ),
+        re.compile(r"\b(?:at\s+)?(?P<h>[01]?\d|2[0-3]):(?P<m>[0-5]\d)\b"),
+        re.compile(r"\b(?:at\s+)?(?P<h>\d{1,2})\s*o'?clock\b"),
+        re.compile(r"\bat\s+(?P<h>\d{1,2})(?!\s*[:/\d])\b"),
+    )
+    match = next((item.search(text) for item in patterns if item.search(text)), None)
+
+    # Spoken word forms commonly produced by English STT, such as
+    # "at eight pm" or "at seven thirty p m".
+    word_numbers = (
+        r"zero|one|two|three|four|five|six|seven|eight|nine|ten|eleven|"
+        r"twelve|thirteen|fourteen|fifteen|sixteen|seventeen|eighteen|"
+        r"nineteen|twenty|thirty|forty|fifty"
+    )
+    if match is None:
+        word_pattern = re.compile(
+            rf"\bat\s+(?P<h>{word_numbers})"
+            rf"(?:\s+(?P<m>{word_numbers}(?:[-\s](?:one|two|three|four|five|six|seven|eight|nine))?))?"
+            r"\s*(?P<p>a\s*\.?\s*m\.?|p\s*\.?\s*m\.?)\b"
+        )
+        word_match = word_pattern.search(text)
+        if word_match:
+            hour = _parse_english_number(word_match.group("h"))
+            minute = _parse_english_number(word_match.group("m")) if word_match.group("m") else 0
+            period = re.sub(r"[\s.]", "", word_match.group("p"))
+            if not 1 <= hour <= 12 or not 0 <= minute <= 59:
+                raise ReminderParseError("Invalid hour or minute.")
+            if period == "pm" and hour != 12:
+                hour += 12
+            elif period == "am" and hour == 12:
+                hour = 0
+            return hour, minute, _remove_span(text, word_match.start(), word_match.end())
+
+        word_hour = re.search(
+            rf"\bat\s+(?P<h>{word_numbers})(?:\s*o'?clock)?\b",
+            text,
+        )
+        if word_hour:
+            hour = _parse_english_number(word_hour.group("h"))
+            if not 0 <= hour <= 23:
+                raise ReminderParseError("Invalid hour.")
+            return hour, 0, _remove_span(text, word_hour.start(), word_hour.end())
+
+    if match is not None:
+        hour = int(match.group("h"))
+        minute = int(match.groupdict().get("m") or 0)
+        period = re.sub(r"[\s.]", "", match.groupdict().get("p") or "")
+        if period:
+            if not 1 <= hour <= 12:
+                raise ReminderParseError("The hour must be between 1 and 12 when using AM or PM.")
+            if period == "pm" and hour != 12:
+                hour += 12
+            elif period == "am" and hour == 12:
+                hour = 0
+        if not 0 <= hour <= 23 or not 0 <= minute <= 59:
+            raise ReminderParseError("Invalid hour or minute.")
+        return hour, minute, _remove_span(text, match.start(), match.end())
+
+    # Dayparts are useful when no exact clock time was spoken.
+    dayparts = (
+        (r"\b(?:this\s+)?morning\b", 8),
+        (r"\b(?:this\s+)?afternoon\b", 15),
+        (r"\b(?:this\s+)?evening\b|\btonight\b", 19),
+    )
+    for pattern, hour in dayparts:
+        daypart = re.search(pattern, text)
+        if daypart:
+            return hour, 0, _remove_span(text, daypart.start(), daypart.end())
+
+    if required:
+        raise ReminderParseError("I could not find a time. Try 6:30 PM or 18:30.")
+    return None
+
+def _english_month_day(text: str) -> tuple[int, int, int | None, tuple[int, int]] | None:
+    month_first = re.search(
+        rf"\b(?P<m>{_EN_MONTH_PATTERN})\s+(?P<d>\d{{1,2}})(?:st|nd|rd|th)?(?:\s+(?P<y>\d{{4}}))?\b",
+        text,
+    )
+    if month_first:
+        return (
+            _EN_MONTHS[month_first.group("m")],
+            int(month_first.group("d")),
+            int(month_first.group("y")) if month_first.group("y") else None,
+            (month_first.start(), month_first.end()),
+        )
+    day_first = re.search(
+        rf"\b(?P<d>\d{{1,2}})(?:st|nd|rd|th)?\s+(?:of\s+)?(?P<m>{_EN_MONTH_PATTERN})(?:\s+(?P<y>\d{{4}}))?\b",
+        text,
+    )
+    if day_first:
+        return (
+            _EN_MONTHS[day_first.group("m")],
+            int(day_first.group("d")),
+            int(day_first.group("y")) if day_first.group("y") else None,
+            (day_first.start(), day_first.end()),
+        )
+    return None
+
+
+def _extract_english_recurrence(text: str) -> tuple[Recurrence, str, str | None]:
+    text = _en_clean(text)
+    yearly = re.search(r"\b(?:every\s+year|yearly|annually)\b", text)
+    if yearly:
+        month_day = _english_month_day(text)
+        if month_day is None:
+            raise ReminderParseError("A yearly reminder needs a month and day, for example July 30.")
+        month, day, _year, date_span = month_day
+        rest = text
+        for start, end in sorted([(yearly.start(), yearly.end()), date_span], reverse=True):
+            rest = _remove_span(rest, start, end)
+        return Recurrence(kind="yearly", day_of_month=day, month=month), rest, f"every year on {calendar.month_name[month]} {day}"
+
+    monthly = re.search(r"\b(?:every\s+month|monthly)\b", text)
+    if monthly:
+        day_match = re.search(r"\b(?:on\s+)?(?:the\s+)?(?:day\s+)?(?P<d>\d{1,2})(?:st|nd|rd|th)?\b", text)
+        if not day_match:
+            raise ReminderParseError("A monthly reminder needs a day, for example every month on the 15th.")
+        day = int(day_match.group("d"))
+        if not 1 <= day <= 31:
+            raise ReminderParseError("The monthly day must be between 1 and 31.")
+        rest = text
+        for start, end in sorted([(monthly.start(), monthly.end()), (day_match.start(), day_match.end())], reverse=True):
+            rest = _remove_span(rest, start, end)
+        return Recurrence(kind="monthly", day_of_month=day), rest, f"every month on day {day}"
+
+    group_patterns = (
+        (r"\b(?:every\s+)?weekdays?\b|\bmonday\s+(?:through|to)\s+friday\b", "weekdays"),
+        (r"\b(?:every\s+)?weekends?\b", "weekend"),
+    )
+    for pattern, kind in group_patterns:
+        match = re.search(pattern, text)
+        if match:
+            label = "on weekdays" if kind == "weekdays" else "on weekends"
+            return Recurrence(kind=kind), _remove_span(text, match.start(), match.end()), label
+
+    daily = re.search(r"\b(?:every\s+day|daily)\b", text)
+    if daily:
+        return Recurrence(kind="daily"), _remove_span(text, daily.start(), daily.end()), "every day"
+
+    weekly_marker = re.search(r"\b(?:every\s+week|weekly)\b", text)
+    weekday_matches = list(re.finditer(rf"\b(?:{_EN_WEEKDAY_PATTERN})\b", text))
+    direct_every = re.search(rf"\bevery\s+(?P<w>{_EN_WEEKDAY_PATTERN})\b", text)
+    if weekly_marker and weekday_matches:
+        weekdays = sorted({_EN_WEEKDAYS[item.group(0)] for item in weekday_matches})
+        spans = [(weekly_marker.start(), weekly_marker.end())] + [(item.start(), item.end()) for item in weekday_matches]
+        rest = text
+        for start, end in sorted(spans, reverse=True):
+            rest = _remove_span(rest, start, end)
+        rest = re.sub(r"\b(?:on|and)\b", " ", rest)
+        labels = ", ".join(_EN_WEEKDAY_LABELS[item] for item in weekdays)
+        return Recurrence(kind="weekly", weekday=weekdays[0], weekdays=weekdays), _en_clean(rest), f"every week on {labels}"
+    if direct_every:
+        weekdays = sorted({_EN_WEEKDAYS[item.group(0)] for item in weekday_matches})
+        rest = text
+        spans = [(direct_every.start(), direct_every.end())]
+        spans.extend((item.start(), item.end()) for item in weekday_matches[1:])
+        for start, end in sorted(spans, reverse=True):
+            rest = _remove_span(rest, start, end)
+        rest = re.sub(r"\b(?:on|and)\b", " ", rest)
+        labels = ", ".join(_EN_WEEKDAY_LABELS[item] for item in weekdays)
+        return Recurrence(kind="weekly", weekday=weekdays[0], weekdays=weekdays), _en_clean(rest), f"every {labels}"
+    return Recurrence(), text, None
+
+
+def _extract_english_date(text: str, now: datetime) -> tuple[tuple[int, int, int] | None, int | None, str, bool]:
+    text = _en_clean(text)
+    relative_dates = (
+        (r"\bday\s+after\s+tomorrow\b", 2),
+        (r"\btomorrow\b", 1),
+        (r"\btoday\b", 0),
+    )
+    for pattern, offset in relative_dates:
+        match = re.search(pattern, text)
+        if match:
+            target = now + timedelta(days=offset)
+            return (target.year, target.month, target.day), None, _remove_span(text, match.start(), match.end()), True
+
+    month_day = _english_month_day(text)
+    if month_day is not None:
+        month, day, explicit_year, span = month_day
+        year = explicit_year or now.year
+        return (year, month, day), None, _remove_span(text, *span), explicit_year is not None
+
+    iso_date = re.search(r"\b(?P<y>\d{4})-(?P<m>\d{1,2})-(?P<d>\d{1,2})\b", text)
+    if iso_date:
+        return (int(iso_date.group("y")), int(iso_date.group("m")), int(iso_date.group("d"))), None, _remove_span(text, iso_date.start(), iso_date.end()), True
+
+    numeric = re.search(r"\b(?P<d>\d{1,2})[/-](?P<m>\d{1,2})(?:[/-](?P<y>\d{2,4}))?\b", text)
+    if numeric:
+        raw_year = numeric.group("y")
+        year = int(raw_year) if raw_year else now.year
+        if raw_year and year < 100:
+            year += 2000
+        return (year, int(numeric.group("m")), int(numeric.group("d"))), None, _remove_span(text, numeric.start(), numeric.end()), raw_year is not None
+
+    weekday = re.search(
+        rf"\b(?:on\s+)?(?:(?:next|this)\s+)?(?P<w>{_EN_WEEKDAY_PATTERN})\b",
+        text,
+    )
+    if weekday:
+        return None, _EN_WEEKDAYS[weekday.group("w")], _remove_span(text, weekday.start(), weekday.end()), False
+    return None, None, text, False
+
+
+def _clean_english_message(text: str) -> str:
+    text = _en_clean(text)
+    text = re.sub(r"^(?:to|that|for|on|at)\s+", "", text)
+    text = re.sub(r"\b(?:on|at)\s*$", "", text)
+    text = re.sub(r"\s+", " ", text).strip(" .:-")
+    if not text:
+        raise ReminderParseError("Missing reminder message.")
+    return text
+
+
+def _format_time_en(value: datetime) -> str:
+    return value.strftime("%H:%M on %d/%m/%Y")
+
+
+def _parse_english_reminder_request(text: str, now: datetime) -> ParsedReminder:
+    text = _strip_english_command_prefix(_en_clean(text))
+    if not text:
+        raise ReminderParseError("Missing reminder message.")
+
+    relative = _extract_english_relative(text, now)
+    if relative is not None:
+        return relative
+
+    recurrence, remaining, recurrence_label = _extract_english_recurrence(text)
+    date_tuple = None
+    one_time_weekday = None
+    year_explicit = False
+    if recurrence.kind == "none":
+        date_tuple, one_time_weekday, remaining, year_explicit = _extract_english_date(remaining, now)
+
+    time_result = _extract_english_time(remaining, required=False)
+    time_was_defaulted = time_result is None
+    if time_result is None:
+        if recurrence.kind == "none" and date_tuple is None and one_time_weekday is None:
+            raise ReminderParseError(
+                "I could not find a reminder time or date. Try in 30 minutes, tomorrow, Monday, or at 6:30 PM."
+            )
+        hour, minute = now.hour, now.minute
+    else:
+        hour, minute, remaining = time_result
+    message = _clean_english_message(remaining)
+
+    if recurrence.kind == "daily":
+        run = now.replace(hour=hour, minute=minute, second=0, microsecond=0)
+        if run <= now:
+            run += timedelta(days=1)
+    elif recurrence.kind == "weekdays":
+        run = _next_allowed_weekday(now, {0, 1, 2, 3, 4}, hour, minute)
+    elif recurrence.kind == "weekend":
+        run = _next_allowed_weekday(now, {5, 6}, hour, minute)
+    elif recurrence.kind == "weekly":
+        weekdays = set(recurrence.weekdays or [])
+        if not weekdays and recurrence.weekday is not None:
+            weekdays = {recurrence.weekday}
+        run = _next_allowed_weekday(now, weekdays, hour, minute)
+    elif recurrence.kind == "monthly":
+        day = recurrence.day_of_month or now.day
+        run = _recurring_datetime(now, now.year, now.month, day, hour, minute)
+        if run <= now:
+            year = now.year + (1 if now.month == 12 else 0)
+            month = 1 if now.month == 12 else now.month + 1
+            run = _recurring_datetime(now, year, month, day, hour, minute)
+    elif recurrence.kind == "yearly":
+        month = recurrence.month or now.month
+        day = recurrence.day_of_month or now.day
+        run = _recurring_datetime(now, now.year, month, day, hour, minute)
+        if run <= now:
+            run = _recurring_datetime(now, now.year + 1, month, day, hour, minute)
+    elif one_time_weekday is not None:
+        run = _next_allowed_weekday(now, {one_time_weekday}, hour, minute)
+    elif date_tuple is not None:
+        year, month, day = date_tuple
+        run = _strict_datetime(now, year, month, day, hour, minute)
+        if time_was_defaulted and (year, month, day) == (now.year, now.month, now.day) and run <= now:
+            run = (now + timedelta(minutes=1)).replace(second=0, microsecond=0)
+        elif run <= now and not year_explicit:
+            run = _strict_datetime(now, year + 1, month, day, hour, minute)
+        elif run <= now:
+            raise ReminderParseError("The reminder time is in the past.")
+    else:
+        run = now.replace(hour=hour, minute=minute, second=0, microsecond=0)
+        if run <= now:
+            run += timedelta(days=1)
+
+    if recurrence.kind == "none":
+        confirmation = f"Reminder created for {message} at {_format_time_en(run)}."
+    else:
+        confirmation = f"Recurring reminder created {recurrence_label} at {hour:02d}:{minute:02d}: {message}."
+    return ParsedReminder(message=message, first_run=run, recurrence=recurrence, confirmation=confirmation)
+
+
 def parse_reminder_request(
     text: str, now: datetime | None = None
 ) -> ParsedReminder:
-    """Parse a natural Vietnamese reminder request."""
+    """Parse a natural Vietnamese or English reminder request."""
     now = dt_util.as_local(now or dt_util.now())
+    if _looks_like_english_reminder(text):
+        return _parse_english_reminder_request(text, now)
     text = _strip_command_prefix(_clean(text))
     if not text:
         raise ReminderParseError("Thiếu nội dung nhắc nhở.")

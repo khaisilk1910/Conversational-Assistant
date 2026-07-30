@@ -71,6 +71,38 @@ ACTION_LABELS = {
 # "để tạo nhắc hẹn", which may not be classified by the normal command parser.
 _TARGET_LABELS = {
     "camera": ACTION_CAMERA,
+    "take camera photo": ACTION_CAMERA,
+    "take a camera photo": ACTION_CAMERA,
+    "capture camera image": ACTION_CAMERA,
+    "camera snapshot": ACTION_CAMERA,
+    "create reminder": ACTION_REMINDER_CREATE,
+    "set reminder": ACTION_REMINDER_CREATE,
+    "add reminder": ACTION_REMINDER_CREATE,
+    "reminder": ACTION_REMINDER_CREATE,
+    "list reminders": ACTION_REMINDER_LIST,
+    "show reminders": ACTION_REMINDER_LIST,
+    "show reminder list": ACTION_REMINDER_LIST,
+    "delete reminder": ACTION_REMINDER_DELETE,
+    "cancel reminder": ACTION_REMINDER_DELETE,
+    "create note": ACTION_NOTE_CREATE,
+    "add note": ACTION_NOTE_CREATE,
+    "make note": ACTION_NOTE_CREATE,
+    "list notes": ACTION_NOTE_LIST,
+    "show notes": ACTION_NOTE_LIST,
+    "show note list": ACTION_NOTE_LIST,
+    "edit note": ACTION_NOTE_EDIT,
+    "update note": ACTION_NOTE_EDIT,
+    "delete note": ACTION_NOTE_DELETE,
+    "remove note": ACTION_NOTE_DELETE,
+    "open note": ACTION_NOTE_VIEW,
+    "read note": ACTION_NOTE_VIEW,
+    "view note": ACTION_NOTE_VIEW,
+    "help": ACTION_HELP,
+    "show help": ACTION_HELP,
+    "usage guide": ACTION_HELP,
+    "how to use the integration": ACTION_HELP,
+    "how to use conversational assistant": ACTION_HELP,
+    "features": ACTION_HELP,
     "chup camera": ACTION_CAMERA,
     "chup anh camera": ACTION_CAMERA,
     "lay anh camera": ACTION_CAMERA,
@@ -110,6 +142,25 @@ _TARGET_LABELS = {
 }
 
 _RESERVED_PHRASES = {
+    "yes",
+    "no",
+    "confirm",
+    "cancel",
+    "stop",
+    "proceed",
+    "continue",
+    "all",
+    "both",
+    "one",
+    "two",
+    "three",
+    "four",
+    "five",
+    "six",
+    "seven",
+    "eight",
+    "nine",
+    "ten",
     "co",
     "khong",
     "ok",
@@ -148,6 +199,12 @@ _RESERVED_PHRASES = {
 }
 
 _LEARN_PREFIXES = (
+    "learn command",
+    "teach command",
+    "add command",
+    "add custom command",
+    "add phrase",
+    "teach phrase",
     "hoc cau lenh",
     "day cau lenh",
     "them cau lenh",
@@ -156,12 +213,25 @@ _LEARN_PREFIXES = (
     "day cach noi",
 )
 _DELETE_PREFIXES = (
+    "delete learned command",
+    "remove learned command",
+    "delete custom command",
+    "remove custom command",
+    "delete command",
+    "remove command",
+    "forget command",
     "xoa cau lenh da hoc",
     "xoa cau lenh tuy chinh",
     "xoa cau lenh",
     "quen cau lenh",
 )
 _LIST_PHRASES = {
+    "list learned commands",
+    "show learned commands",
+    "list custom commands",
+    "show custom commands",
+    "what commands have i taught you",
+    "command memory",
     "danh sach cau lenh da hoc",
     "liet ke cau lenh da hoc",
     "xem cau lenh da hoc",
@@ -170,6 +240,11 @@ _LIST_PHRASES = {
     "bo nho cau lenh",
 }
 _CLEAR_PHRASES = {
+    "all",
+    "everything",
+    "all learned commands",
+    "all custom commands",
+    "command memory",
     "tat ca",
     "toan bo",
     "het",
@@ -177,6 +252,11 @@ _CLEAR_PHRASES = {
     "toan bo cau lenh da hoc",
 }
 _CLEAR_COMMAND_PHRASES = {
+    "delete all learned commands",
+    "remove all learned commands",
+    "forget all learned commands",
+    "delete all custom commands",
+    "clear command memory",
     "xoa tat ca cau lenh da hoc",
     "xoa toan bo cau lenh da hoc",
     "quen tat ca cau lenh da hoc",
@@ -279,7 +359,8 @@ def clean_command_phrase(value: str) -> str:
         else:
             characters.append(" ")
     phrase = re.sub(r"\s+", " ", "".join(characters)).strip()
-    if normalize_text(phrase).startswith("hay "):
+    normalized_prefix = normalize_text(phrase)
+    if normalized_prefix.startswith("hay ") or normalized_prefix.startswith("please "):
         phrase = " ".join(phrase.split()[1:]).strip()
     normalized = normalize_text(phrase)
     if not phrase or not normalized:
@@ -310,6 +391,8 @@ def _normalized_management_text(text: str) -> str:
     normalized = normalize_text(text)
     if normalized.startswith("hay "):
         return normalized[4:].strip()
+    if normalized.startswith("please "):
+        return normalized[7:].strip()
     return normalized
 
 
@@ -339,7 +422,7 @@ def strip_management_prefix(text: str, kind: str) -> str:
     """Strip a management command prefix while preserving accented content."""
     words = str(text or "").strip().split()
     normalized_words = [normalize_text(word) for word in words]
-    if normalized_words and normalized_words[0] == "hay":
+    if normalized_words and normalized_words[0] in {"hay", "please"}:
         words = words[1:]
         normalized_words = normalized_words[1:]
     prefixes = _LEARN_PREFIXES if kind == "command_learn" else _DELETE_PREFIXES
@@ -362,6 +445,12 @@ def parse_learn_request(text: str) -> tuple[str, str]:
     words = value.split()
     normalized_words = [normalize_text(word) for word in words]
     connectors = (
+        ("to",),
+        ("for",),
+        ("as",),
+        ("means",),
+        ("meaning",),
+        ("equivalent", "to"),
         ("de",),
         ("thay", "cho"),
         ("tuong", "duong", "voi"),
@@ -434,9 +523,14 @@ def match_learned_command(
     normalized = normalize_text(text)
     if not normalized:
         return None
-    without_hay = normalized[4:] if normalized.startswith("hay ") else normalized
+    if normalized.startswith("hay "):
+        without_hay = normalized[4:]
+    elif normalized.startswith("please "):
+        without_hay = normalized[7:]
+    else:
+        without_hay = normalized
     original_words = str(text or "").strip().split()
-    if original_words and normalize_text(original_words[0]) == "hay":
+    if original_words and normalize_text(original_words[0]) in {"hay", "please"}:
         original_words = original_words[1:]
 
     for command in sorted(
