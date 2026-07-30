@@ -28,6 +28,7 @@ ACTION_HELP = "help"
 ACTION_HOME_ASSISTANT = "home_assistant"
 ACTION_CALENDAR = "calendar"
 ACTION_SEARCH = "search"
+ACTION_IMAGE_GENERATION = "image_generation"
 
 SUPPORTED_ACTIONS = {
     ACTION_CAMERA,
@@ -43,6 +44,7 @@ SUPPORTED_ACTIONS = {
     ACTION_HOME_ASSISTANT,
     ACTION_CALENDAR,
     ACTION_SEARCH,
+    ACTION_IMAGE_GENERATION,
 }
 
 MAX_LEARNED_COMMANDS = 100
@@ -53,6 +55,7 @@ REQUEST_ACTIONS = {
     ACTION_NOTE_CREATE,
     ACTION_NOTE_VIEW,
     ACTION_SEARCH,
+    ACTION_IMAGE_GENERATION,
 }
 
 ACTION_LABELS = {
@@ -69,6 +72,7 @@ ACTION_LABELS = {
     ACTION_HOME_ASSISTANT: "thực hiện lệnh Home Assistant",
     ACTION_CALENDAR: "xem lịch Home Assistant",
     ACTION_SEARCH: "tìm kiếm thông tin trên Internet",
+    ACTION_IMAGE_GENERATION: "tạo ảnh bằng AI và gửi về Zalo",
 }
 
 # Explicit labels also let users teach short targets such as "để camera" or
@@ -112,6 +116,12 @@ _TARGET_LABELS = {
     "search the internet": ACTION_SEARCH,
     "search for information": ACTION_SEARCH,
     "look up information": ACTION_SEARCH,
+    "generate image": ACTION_IMAGE_GENERATION,
+    "generate an image": ACTION_IMAGE_GENERATION,
+    "create image": ACTION_IMAGE_GENERATION,
+    "create an image": ACTION_IMAGE_GENERATION,
+    "make image": ACTION_IMAGE_GENERATION,
+    "draw image": ACTION_IMAGE_GENERATION,
     "chup camera": ACTION_CAMERA,
     "chup anh camera": ACTION_CAMERA,
     "lay anh camera": ACTION_CAMERA,
@@ -152,6 +162,10 @@ _TARGET_LABELS = {
     "tim kiem": ACTION_SEARCH,
     "tim kiem tren mang": ACTION_SEARCH,
     "tra cuu thong tin": ACTION_SEARCH,
+    "tao anh": ACTION_IMAGE_GENERATION,
+    "tao mot anh": ACTION_IMAGE_GENERATION,
+    "tao buc anh": ACTION_IMAGE_GENERATION,
+    "tao mot buc anh": ACTION_IMAGE_GENERATION,
 }
 
 _RESERVED_PHRASES = {
@@ -572,6 +586,7 @@ def canonical_text(
         ACTION_NOTE_CREATE: "ghi chú",
         ACTION_NOTE_VIEW: "mở ghi chú",
         ACTION_SEARCH: "tìm thông tin",
+        ACTION_IMAGE_GENERATION: "tạo ảnh",
     }
     prefix = prefixes.get(action, "")
     return f"{prefix} {request}".strip() if prefix else request

@@ -19,7 +19,7 @@ import uuid
 
 from hassil.recognize import RecognizeResult
 
-from homeassistant.components import persistent_notification
+from homeassistant.components import media_source, persistent_notification
 from homeassistant.components.mobile_app.const import ATTR_WEBHOOK_ID
 from homeassistant.components.mobile_app.util import get_notify_service
 from homeassistant.components.media_player.const import MediaPlayerEntityFeature
@@ -50,9 +50,12 @@ from homeassistant.util import dt as dt_util
 from .const import (
     ACTION_DISMISS,
     ACTION_SNOOZE,
+    AI_TASK_DOMAIN,
+    AI_TASK_SERVICE_GENERATE_IMAGE,
     ASSIST_SATELLITE_DOMAIN,
     ASSIST_SATELLITE_SERVICE_ANNOUNCE,
     CAMERA_SENTENCES,
+    CONF_AI_IMAGE_TASK_ENTITY_ID,
     CONF_AI_SEARCH_AGENT_ID,
     CANCEL_SENTENCES,
     COMMAND_DELETE_SENTENCES,
@@ -77,6 +80,7 @@ from .const import (
     CONF_ZALO_WEBHOOK_ENABLED,
     CREATE_SENTENCES,
     DEFAULT_AI_SEARCH_AGENT_ID,
+    DEFAULT_AI_IMAGE_TASK_ENTITY_ID,
     DEFAULT_CONFIRM_TARGETS,
     DEFAULT_DISMISS_ON_CLEAR,
     DEFAULT_SPEAKER_ENABLED,
@@ -92,6 +96,7 @@ from .const import (
     EVENT_NOTIFICATION_ACTION,
     EVENT_NOTIFICATION_CLEARED,
     HELP_SENTENCES,
+    IMAGE_GENERATION_PREFIXES,
     LIST_SENTENCES,
     MEDIA_PLAYER_DOMAIN,
     PENDING_FOLLOWUP_SENTENCES,
@@ -117,6 +122,7 @@ from .command_memory import (
     ACTION_CALENDAR,
     ACTION_HELP,
     ACTION_HOME_ASSISTANT,
+    ACTION_IMAGE_GENERATION,
     ACTION_LABELS,
     ACTION_NOTE_CREATE,
     ACTION_NOTE_DELETE,
@@ -282,13 +288,15 @@ def _request_language(text: str) -> str:
         "devices", "room", "floor", "upstairs", "downstairs", "living",
         "kitchen", "bedroom", "brightness", "volume", "thermostat", "door",
         "search", "internet", "web", "find", "look", "latest", "news",
-        "price", "information",
+        "price", "information", "generate", "create", "make", "draw",
+        "image",
     }
     vietnamese_markers = {
         "toi", "hay", "bat", "tat", "mo", "dong", "kiem", "tra",
         "trang", "thai", "thoi", "tiet", "nhac", "ghi", "chu", "chup",
         "anh", "hom", "nay", "ngay", "mai", "xoa", "huy", "danh", "sach",
-        "tim", "kiem", "mang", "tra", "cuu", "thong", "tin",
+        "tim", "kiem", "mang", "tra", "cuu", "thong", "tin", "tao",
+        "buc", "ve",
     }
     english_score = len(tokens & english_markers)
     vietnamese_score = len(tokens & vietnamese_markers)
@@ -320,6 +328,21 @@ def _search_request(text: str) -> str | None:
         ("web", "search"),
     )
     for prefix in prefixes:
+        if tuple(normalized_words[: len(prefix)]) == prefix:
+            return " ".join(words[len(prefix) :]).strip()
+    return None
+
+
+def _image_generation_request(text: str) -> str | None:
+    """Return image instructions, or None when text is not an image request."""
+    words = str(text or "").strip().split()
+    if not words:
+        return None
+    if normalize_text(words[0]) in {"hay", "please"}:
+        words = words[1:]
+    normalized_words = [normalize_text(word) for word in words]
+    for raw_prefix in IMAGE_GENERATION_PREFIXES:
+        prefix = tuple(normalize_text(raw_prefix).split())
         if tuple(normalized_words[: len(prefix)]) == prefix:
             return " ".join(words[len(prefix) :]).strip()
     return None
@@ -622,6 +645,17 @@ class ConversationalAssistantManager(NoteManagerMixin):
         """Return the optional Conversation agent used for Internet search."""
         return str(
             self._option(CONF_AI_SEARCH_AGENT_ID, DEFAULT_AI_SEARCH_AGENT_ID)
+            or ""
+        ).strip()
+
+    @property
+    def ai_image_task_entity_id(self) -> str:
+        """Return the optional AI Task entity used for image generation."""
+        return str(
+            self._option(
+                CONF_AI_IMAGE_TASK_ENTITY_ID,
+                DEFAULT_AI_IMAGE_TASK_ENTITY_ID,
+            )
             or ""
         ).strip()
 
@@ -934,6 +968,7 @@ class ConversationalAssistantManager(NoteManagerMixin):
             ACTION_REMINDER_DELETE,
             ACTION_HELP,
             ACTION_SEARCH,
+            ACTION_IMAGE_GENERATION,
         }:
             return builtin
 
@@ -1489,6 +1524,8 @@ class ConversationalAssistantManager(NoteManagerMixin):
 
         if _is_integration_help_request(text):
             return "help"
+        if _image_generation_request(text) is not None:
+            return ACTION_IMAGE_GENERATION
         if _search_request(text) is not None:
             return ACTION_SEARCH
 
@@ -1661,18 +1698,22 @@ class ConversationalAssistantManager(NoteManagerMixin):
             "3. TÌM KIẾM INTERNET / INTERNET SEARCH\n"
             "• Tìm thông tin giá vàng hôm nay. / Search for today's gold price.\n"
             "• Tra cứu tin mới về Home Assistant. / Look up the latest Home Assistant news.\n\n"
-            "4. CAMERA\n"
+            "4. TẠO ẢNH AI TRÊN ZALO / AI IMAGE ON ZALO\n"
+            "• Tạo ảnh một chú mèo phi hành gia.\n"
+            "• Generate an image of a cozy smart home at night.\n\n"
+            "5. CAMERA\n"
             "• Chụp camera. / Take a camera photo.\n"
             "• Lấy ảnh camera sân trước. / Capture the front yard camera.\n\n"
-            "5. NHẮC HẸN / REMINDERS\n"
+            "6. NHẮC HẸN / REMINDERS\n"
             "• Nhắc tôi 30 phút nữa uống thuốc.\n"
             "• Remind me to take medicine in 30 minutes.\n"
             "• Danh sách nhắc hẹn. / Show my reminders.\n\n"
-            "6. GHI CHÚ / NOTES\n"
+            "7. GHI CHÚ / NOTES\n"
             "• Ghi nhớ mã tủ đồ là 2468. / Remember that the locker code is 2468.\n"
             "• Danh sách ghi chú. / Show my notes.\n\n"
-            "7. BỘ NHỚ CÂU LỆNH / COMMAND MEMORY\n"
+            "8. BỘ NHỚ CÂU LỆNH / COMMAND MEMORY\n"
             "• Học câu lệnh xem cổng để chụp ảnh camera.\n"
+            "• Học câu lệnh vẽ giúp tôi để tạo ảnh.\n"
             "• Learn command check the gate to take a camera photo.\n"
             "• Xóa câu lệnh xem cổng. / Delete command check the gate.\n\n"
             "Nói 'hướng dẫn sử dụng tích hợp' hoặc 'how to use the integration' để xem lại."
@@ -3024,6 +3065,217 @@ class ConversationalAssistantManager(NoteManagerMixin):
             self._zalo_search_conversation_ids[context.owner_key] = conversation_id
         return reply
 
+    @staticmethod
+    def _image_generation_unavailable_text(language: str) -> str:
+        """Return a friendly reply when no image-capable AI Task is selected."""
+        if language == "en":
+            return (
+                "🎨 **The AI artist has no paintbrush yet**\n\n"
+                "Open **Conversational Assistant → AI settings** and select an "
+                "**AI Task agent for image generation**."
+            )
+        return (
+            "🎨 **Họa sĩ AI đang thiếu cọ vẽ**\n\n"
+            "Hãy mở **Conversational Assistant → Cài đặt AI** và chọn "
+            "**AI Task Agent tạo ảnh**."
+        )
+
+    async def _async_ai_image_local_path(
+        self, media_source_id: str
+    ) -> str | None:
+        """Resolve an AI Task media-source ID through Home Assistant."""
+        if not media_source_id.startswith("media-source://"):
+            return None
+        try:
+            resolved = await media_source.async_resolve_media(
+                self.hass, media_source_id, None
+            )
+        except Exception:  # noqa: BLE001 - return a friendly Zalo reply
+            _LOGGER.exception(
+                "Failed resolving AI generated media source %s",
+                media_source_id,
+            )
+            return None
+        image_path = str(getattr(resolved, "path", "") or "").strip()
+        return image_path or None
+
+    async def _async_generate_image_from_zalo(
+        self,
+        context: ZaloWebhookContext,
+        service_context: Context | None,
+    ) -> str | ZaloDirectResponse:
+        """Generate one AI image and deliver it to the originating Zalo chat."""
+        language = _request_language(context.text)
+        instructions = _image_generation_request(context.text)
+        if instructions is None:
+            if language == "en":
+                return (
+                    "🖌️ **What should I draw?**\n\n"
+                    "Add a description after **Generate an image**, for example: "
+                    "**Generate an image of an astronaut cat**."
+                )
+            return (
+                "🖌️ **Bạn muốn vẽ gì?**\n\n"
+                "Hãy thêm mô tả sau lệnh **Tạo ảnh**, ví dụ: "
+                "**Tạo ảnh một chú mèo phi hành gia**."
+            )
+        if not instructions.strip():
+            if language == "en":
+                return (
+                    "🖌️ **What should I draw?**\n\n"
+                    "Add a description after **Generate an image**, for example: "
+                    "**Generate an image of an astronaut cat**."
+                )
+            return (
+                "🖌️ **Bạn muốn vẽ gì?**\n\n"
+                "Hãy thêm mô tả sau lệnh **Tạo ảnh**, ví dụ: "
+                "**Tạo ảnh một chú mèo phi hành gia**."
+            )
+
+        entity_id = self.ai_image_task_entity_id
+        if not entity_id:
+            return self._image_generation_unavailable_text(language)
+        if not self.hass.services.has_service(
+            AI_TASK_DOMAIN, AI_TASK_SERVICE_GENERATE_IMAGE
+        ):
+            if language == "en":
+                return (
+                    "🤖💥 **AI Task is not ready**\n\n"
+                    "Check that Home Assistant provides the action "
+                    "**ai_task.generate_image**, then try again."
+                )
+            return (
+                "🤖💥 **AI Task chưa sẵn sàng**\n\n"
+                "Hãy kiểm tra Home Assistant đã có action "
+                "**ai_task.generate_image** và thử lại nhé."
+            )
+
+        account_selection = self._zalo_webhook_account_selection()
+        if not account_selection:
+            if language == "en":
+                return (
+                    "📮 **No Zalo sending account is configured**\n\n"
+                    "Set **Zalo account for webhook replies** in "
+                    "**Zalo settings**."
+                )
+            return (
+                "📮 **Chưa có tài khoản gửi Zalo**\n\n"
+                "Hãy cấu hình **Tài khoản Zalo trả lời webhook** trong "
+                "**Cài đặt Zalo**."
+            )
+        if not self.hass.services.has_service(
+            ZALO_DOMAIN, ZALO_SERVICE_SEND_IMAGE
+        ):
+            if language == "en":
+                return (
+                    "📷 **Zalo cannot receive the image yet**\n\n"
+                    f"The action **{ZALO_DOMAIN}.{ZALO_SERVICE_SEND_IMAGE}** "
+                    "is not available."
+                )
+            return (
+                "📷 **Zalo chưa nhận ảnh được**\n\n"
+                f"Action **{ZALO_DOMAIN}.{ZALO_SERVICE_SEND_IMAGE}** chưa sẵn sàng."
+            )
+
+        try:
+            response = await self.hass.services.async_call(
+                AI_TASK_DOMAIN,
+                AI_TASK_SERVICE_GENERATE_IMAGE,
+                {
+                    "task_name": "Conversational Assistant Zalo Image",
+                    "entity_id": entity_id,
+                    "instructions": instructions,
+                },
+                blocking=True,
+                context=service_context,
+                return_response=True,
+            )
+        except Exception:  # noqa: BLE001 - keep webhook responses user-friendly
+            _LOGGER.exception(
+                "AI Task entity %s failed to generate an image for Zalo thread %s",
+                entity_id,
+                context.thread_id,
+            )
+            if language == "en":
+                return (
+                    "🤖💥 **The AI artist lost the plot for a moment**\n\n"
+                    "Check the selected **AI Task agent** and try again."
+                )
+            return (
+                "🤖💥 **AI vừa hụt cảm hứng, chưa tạo được ảnh**\n\n"
+                "Hãy kiểm tra **AI Task Agent** đã chọn rồi thử lại nhé."
+            )
+
+        result = response if isinstance(response, dict) else {}
+        media_source_id = str(result.get("media_source_id", "") or "").strip()
+        image_path = await self._async_ai_image_local_path(media_source_id)
+        if image_path is None:
+            _LOGGER.error(
+                "AI Task returned an unsupported media source ID: %s",
+                media_source_id,
+            )
+            if language == "en":
+                return (
+                    "🧩 **The image was generated, but its local media file "
+                    "could not be resolved**\n\n"
+                    "Check Home Assistant Media settings and try again."
+                )
+            return (
+                "🧩 **Ảnh đã tạo nhưng chưa tìm thấy đường dẫn gửi Zalo**\n\n"
+                "Hãy kiểm tra thư mục Media của Home Assistant và thử lại."
+            )
+        if not await self.hass.async_add_executor_job(os.path.isfile, image_path):
+            _LOGGER.error("AI generated image file does not exist: %s", image_path)
+            if language == "en":
+                return (
+                    "🗂️ **The generated image has not appeared in the Media "
+                    "directory**\n\n"
+                    "Check Home Assistant Media settings and try again."
+                )
+            return (
+                "🗂️ **Ảnh vừa tạo chưa xuất hiện trong thư mục Media**\n\n"
+                "Hãy kiểm tra cấu hình Media của Home Assistant rồi thử lại."
+            )
+
+        summary = " ".join(instructions.split())
+        if len(summary) > 240:
+            summary = f"{summary[:237].rstrip()}..."
+        message = (
+            f"🎨 Generated image: **{summary}**"
+            if language == "en"
+            else f"🎨 Đã tạo ảnh: **{summary}**"
+        )
+        try:
+            await self.hass.services.async_call(
+                ZALO_DOMAIN,
+                ZALO_SERVICE_SEND_IMAGE,
+                {
+                    "type": context.thread_type,
+                    "ttl": 0,
+                    "image_path": image_path,
+                    "message": message,
+                    "thread_id": context.thread_id,
+                    "account_selection": account_selection,
+                },
+                blocking=True,
+                context=service_context,
+            )
+        except Exception:  # noqa: BLE001 - return a useful delivery error
+            _LOGGER.exception(
+                "Failed sending AI generated image to Zalo thread %s",
+                context.thread_id,
+            )
+            if language == "en":
+                return (
+                    "📦 **The image is ready, but Zalo did not receive it**\n\n"
+                    "Check **zalo_bot.send_image** and the sending account."
+                )
+            return (
+                "📦 **Ảnh đã tạo xong nhưng Zalo chưa nhận được**\n\n"
+                "Hãy kiểm tra action **zalo_bot.send_image** và tài khoản gửi."
+            )
+        return ZaloDirectResponse(sent=True, response_type="generated_image")
+
     async def _async_home_assistant_conversation_from_zalo(
         self,
         context: ZaloWebhookContext,
@@ -3293,6 +3545,11 @@ class ConversationalAssistantManager(NoteManagerMixin):
         if command == ACTION_SEARCH:
             self._clear_zalo_pending_for_owner(context.owner_key)
             return await self._async_search_from_zalo(
+                context, service_context
+            )
+        if command == ACTION_IMAGE_GENERATION:
+            self._clear_zalo_pending_for_owner(context.owner_key)
+            return await self._async_generate_image_from_zalo(
                 context, service_context
             )
         if command == "create":
@@ -4595,6 +4852,14 @@ class ConversationalAssistantManager(NoteManagerMixin):
                 language_hint=_request_language(request or user_input.text),
             )
             return await self._async_voice_response(user_input, reply)
+        if command.action == ACTION_IMAGE_GENERATION:
+            return await self._async_voice_response(
+                user_input,
+                (
+                    "Tính năng tạo ảnh AI hiện tạo và gửi ảnh trong cuộc trò chuyện "
+                    "Zalo. Hãy dùng câu lệnh này trên Zalo để nhận ảnh."
+                ),
+            )
         if command.action in {ACTION_HOME_ASSISTANT, ACTION_CALENDAR}:
             if not transformed_text:
                 return await self._async_voice_response(

@@ -14,6 +14,8 @@ from homeassistant.core import callback
 from homeassistant.helpers import selector
 
 from .const import (
+    AI_TASK_DOMAIN,
+    CONF_AI_IMAGE_TASK_ENTITY_ID,
     CONF_AI_SEARCH_AGENT_ID,
     CONF_CONFIRM_TARGETS,
     CONF_DISMISS_ON_CLEAR,
@@ -32,6 +34,7 @@ from .const import (
     CONF_ZALO_WEBHOOK_ACCOUNT_SELECTION,
     CONF_ZALO_WEBHOOK_BOT_ACCOUNT_ID,
     CONF_ZALO_WEBHOOK_ENABLED,
+    DEFAULT_AI_IMAGE_TASK_ENTITY_ID,
     DEFAULT_AI_SEARCH_AGENT_ID,
     DEFAULT_CONFIRM_TARGETS,
     DEFAULT_DISMISS_ON_CLEAR,
@@ -51,53 +54,69 @@ from .const import (
 CONF_SELECTED_ZALO_TARGET = "selected_zalo_target"
 
 
-def _general_schema(
+def _general_settings_schema(
     dismiss_on_clear: bool,
     confirm_targets: bool,
-    speaker_enabled: bool,
-    tts_entity_id: str | None,
+) -> vol.Schema:
+    """Build the general options schema."""
+    return vol.Schema(
+        {
+            vol.Optional(
+                CONF_DISMISS_ON_CLEAR,
+                default=dismiss_on_clear,
+            ): selector.BooleanSelector(),
+            vol.Optional(
+                CONF_CONFIRM_TARGETS,
+                default=confirm_targets,
+            ): selector.BooleanSelector(),
+        }
+    )
+
+
+def _zalo_settings_schema(
     zalo_webhook_enabled: bool,
     zalo_webhook_bot_account_id: str,
     zalo_webhook_account_selection: str,
     zalo_home_assistant_enabled: bool,
+) -> vol.Schema:
+    """Build the global Zalo settings schema."""
+    return vol.Schema(
+        {
+            vol.Optional(
+                CONF_ZALO_WEBHOOK_ENABLED,
+                default=zalo_webhook_enabled,
+            ): selector.BooleanSelector(),
+            vol.Optional(
+                CONF_ZALO_HOME_ASSISTANT_ENABLED,
+                default=zalo_home_assistant_enabled,
+            ): selector.BooleanSelector(),
+            vol.Optional(
+                CONF_ZALO_WEBHOOK_BOT_ACCOUNT_ID,
+                default=zalo_webhook_bot_account_id,
+            ): selector.TextSelector(
+                selector.TextSelectorConfig(
+                    type=selector.TextSelectorType.TEXT
+                )
+            ),
+            vol.Optional(
+                CONF_ZALO_WEBHOOK_ACCOUNT_SELECTION,
+                default=zalo_webhook_account_selection,
+            ): selector.TextSelector(
+                selector.TextSelectorConfig(
+                    type=selector.TextSelectorType.TEXT
+                )
+            ),
+        }
+    )
+
+
+def _ai_settings_schema(
     zalo_conversation_agent_id: str,
     ai_search_agent_id: str,
+    ai_image_task_entity_id: str,
 ) -> vol.Schema:
-    """Build general configuration schema."""
-    fields: dict[Any, Any] = {
-        vol.Optional(
-            CONF_DISMISS_ON_CLEAR,
-            default=dismiss_on_clear,
-        ): selector.BooleanSelector(),
-        vol.Optional(
-            CONF_CONFIRM_TARGETS,
-            default=confirm_targets,
-        ): selector.BooleanSelector(),
-        vol.Optional(
-            CONF_SPEAKER_ENABLED,
-            default=speaker_enabled,
-        ): selector.BooleanSelector(),
-        vol.Optional(
-            CONF_ZALO_WEBHOOK_ENABLED,
-            default=zalo_webhook_enabled,
-        ): selector.BooleanSelector(),
-        vol.Optional(
-            CONF_ZALO_HOME_ASSISTANT_ENABLED,
-            default=zalo_home_assistant_enabled,
-        ): selector.BooleanSelector(),
-        vol.Optional(
-            CONF_ZALO_WEBHOOK_BOT_ACCOUNT_ID,
-            default=zalo_webhook_bot_account_id,
-        ): selector.TextSelector(
-            selector.TextSelectorConfig(type=selector.TextSelectorType.TEXT)
-        ),
-        vol.Optional(
-            CONF_ZALO_WEBHOOK_ACCOUNT_SELECTION,
-            default=zalo_webhook_account_selection,
-        ): selector.TextSelector(
-            selector.TextSelectorConfig(type=selector.TextSelectorType.TEXT)
-        ),
-    }
+    """Build AI agent selectors."""
+    fields: dict[Any, Any] = {}
     conversation_selector = selector.ConversationAgentSelector(
         selector.ConversationAgentSelectorConfig(language="vi")
     )
@@ -107,6 +126,7 @@ def _general_schema(
             default=zalo_conversation_agent_id,
         )
     ] = conversation_selector
+
     search_selector = selector.ConversationAgentSelector()
     if ai_search_agent_id:
         fields[
@@ -117,6 +137,38 @@ def _general_schema(
         ] = search_selector
     else:
         fields[vol.Optional(CONF_AI_SEARCH_AGENT_ID)] = search_selector
+
+    image_task_selector = selector.EntitySelector(
+        selector.EntitySelectorConfig(
+            domain=AI_TASK_DOMAIN,
+            multiple=False,
+        )
+    )
+    if ai_image_task_entity_id:
+        fields[
+            vol.Optional(
+                CONF_AI_IMAGE_TASK_ENTITY_ID,
+                default=ai_image_task_entity_id,
+            )
+        ] = image_task_selector
+    else:
+        fields[vol.Optional(CONF_AI_IMAGE_TASK_ENTITY_ID)] = (
+            image_task_selector
+        )
+    return vol.Schema(fields)
+
+
+def _tts_settings_schema(
+    speaker_enabled: bool,
+    tts_entity_id: str | None,
+) -> vol.Schema:
+    """Build speaker and TTS settings."""
+    fields: dict[Any, Any] = {
+        vol.Optional(
+            CONF_SPEAKER_ENABLED,
+            default=speaker_enabled,
+        ): selector.BooleanSelector(),
+    }
     tts_selector = selector.EntitySelector(
         selector.EntitySelectorConfig(domain="tts", multiple=False)
     )
@@ -129,8 +181,47 @@ def _general_schema(
     return vol.Schema(fields)
 
 
-def _validate_general(user_input: dict[str, Any]) -> dict[str, str]:
-    """Validate general configuration values."""
+def _merge_schemas(*schemas: vol.Schema) -> vol.Schema:
+    """Merge multiple Voluptuous schemas while preserving field order."""
+    fields: dict[Any, Any] = {}
+    for schema in schemas:
+        fields.update(schema.schema)
+    return vol.Schema(fields)
+
+
+def _initial_schema(
+    dismiss_on_clear: bool,
+    confirm_targets: bool,
+    speaker_enabled: bool,
+    tts_entity_id: str | None,
+    zalo_webhook_enabled: bool,
+    zalo_webhook_bot_account_id: str,
+    zalo_webhook_account_selection: str,
+    zalo_home_assistant_enabled: bool,
+    zalo_conversation_agent_id: str,
+    ai_search_agent_id: str,
+    ai_image_task_entity_id: str,
+) -> vol.Schema:
+    """Build the initial installation form with all setting groups."""
+    return _merge_schemas(
+        _general_settings_schema(dismiss_on_clear, confirm_targets),
+        _zalo_settings_schema(
+            zalo_webhook_enabled,
+            zalo_webhook_bot_account_id,
+            zalo_webhook_account_selection,
+            zalo_home_assistant_enabled,
+        ),
+        _ai_settings_schema(
+            zalo_conversation_agent_id,
+            ai_search_agent_id,
+            ai_image_task_entity_id,
+        ),
+        _tts_settings_schema(speaker_enabled, tts_entity_id),
+    )
+
+
+def _validate_zalo_settings(user_input: dict[str, Any]) -> dict[str, str]:
+    """Validate global Zalo configuration values."""
     errors: dict[str, str] = {}
     if bool(
         user_input.get(
@@ -144,8 +235,8 @@ def _validate_general(user_input: dict[str, Any]) -> dict[str, str]:
     return errors
 
 
-def _normalize_general(user_input: dict[str, Any]) -> dict[str, Any]:
-    """Normalize text values before storing general configuration."""
+def _normalize_zalo_settings(user_input: dict[str, Any]) -> dict[str, Any]:
+    """Normalize global Zalo text values before storing them."""
     normalized = dict(user_input)
     normalized[CONF_ZALO_WEBHOOK_BOT_ACCOUNT_ID] = str(
         normalized.get(CONF_ZALO_WEBHOOK_BOT_ACCOUNT_ID, "") or ""
@@ -153,6 +244,12 @@ def _normalize_general(user_input: dict[str, Any]) -> dict[str, Any]:
     normalized[CONF_ZALO_WEBHOOK_ACCOUNT_SELECTION] = str(
         normalized.get(CONF_ZALO_WEBHOOK_ACCOUNT_SELECTION, "") or ""
     ).strip()
+    return normalized
+
+
+def _normalize_ai_settings(user_input: dict[str, Any]) -> dict[str, Any]:
+    """Normalize AI agent identifiers before storing them."""
+    normalized = dict(user_input)
     normalized[CONF_ZALO_CONVERSATION_AGENT_ID] = str(
         normalized.get(
             CONF_ZALO_CONVERSATION_AGENT_ID,
@@ -163,7 +260,15 @@ def _normalize_general(user_input: dict[str, Any]) -> dict[str, Any]:
     normalized[CONF_AI_SEARCH_AGENT_ID] = str(
         normalized.get(CONF_AI_SEARCH_AGENT_ID, "") or ""
     ).strip()
+    normalized[CONF_AI_IMAGE_TASK_ENTITY_ID] = str(
+        normalized.get(CONF_AI_IMAGE_TASK_ENTITY_ID, "") or ""
+    ).strip()
     return normalized
+
+
+def _normalize_initial(user_input: dict[str, Any]) -> dict[str, Any]:
+    """Normalize all text values from the initial installation form."""
+    return _normalize_ai_settings(_normalize_zalo_settings(user_input))
 
 
 def _first_tts_entity_id(hass) -> str | None:
@@ -258,8 +363,8 @@ class ConversationalAssistantConfigFlow(config_entries.ConfigFlow, domain=DOMAIN
 
         errors: dict[str, str] = {}
         if user_input is not None:
-            user_input = _normalize_general(user_input)
-            errors = _validate_general(user_input)
+            user_input = _normalize_initial(user_input)
+            errors = _validate_zalo_settings(user_input)
             if not errors:
                 return self.async_create_entry(
                     title=INTEGRATION_NAME,
@@ -270,7 +375,7 @@ class ConversationalAssistantConfigFlow(config_entries.ConfigFlow, domain=DOMAIN
 
         return self.async_show_form(
             step_id="user",
-            data_schema=_general_schema(
+            data_schema=_initial_schema(
                 bool(
                     values.get(
                         CONF_DISMISS_ON_CLEAR,
@@ -325,6 +430,13 @@ class ConversationalAssistantConfigFlow(config_entries.ConfigFlow, domain=DOMAIN
                     values.get(
                         CONF_AI_SEARCH_AGENT_ID,
                         DEFAULT_AI_SEARCH_AGENT_ID,
+                    )
+                    or ""
+                ).strip(),
+                str(
+                    values.get(
+                        CONF_AI_IMAGE_TASK_ENTITY_ID,
+                        DEFAULT_AI_IMAGE_TASK_ENTITY_ID,
                     )
                     or ""
                 ).strip(),
@@ -449,6 +561,13 @@ class ConversationalAssistantOptionsFlow(config_entries.OptionsFlow):
                 CONF_AI_SEARCH_AGENT_ID, DEFAULT_AI_SEARCH_AGENT_ID
             ),
         )
+        options.setdefault(
+            CONF_AI_IMAGE_TASK_ENTITY_ID,
+            self.config_entry.data.get(
+                CONF_AI_IMAGE_TASK_ENTITY_ID,
+                DEFAULT_AI_IMAGE_TASK_ENTITY_ID,
+            ),
+        )
         if CONF_ZALO_TARGETS not in options:
             data_targets = self.config_entry.data.get(CONF_ZALO_TARGETS)
             if isinstance(data_targets, list):
@@ -473,13 +592,9 @@ class ConversationalAssistantOptionsFlow(config_entries.OptionsFlow):
         self, _user_input: dict[str, Any] | None = None
     ) -> ConfigFlowResult:
         """Show the options navigation menu."""
-        menu_options = ["general", "add_zalo"]
-        if self._zalo_targets():
-            menu_options.extend(["edit_zalo_select", "delete_zalo"])
-        menu_options.append("finish")
         return self.async_show_menu(
             step_id="init",
-            menu_options=menu_options,
+            menu_options=["general", "zalo", "ai", "tts", "finish"],
             description_placeholders={
                 "zalo_count": str(len(self._zalo_targets()))
             },
@@ -490,23 +605,15 @@ class ConversationalAssistantOptionsFlow(config_entries.OptionsFlow):
     ) -> ConfigFlowResult:
         """Edit general discovery and voice-confirmation settings."""
         options = self._ensure_options()
-        errors: dict[str, str] = {}
         if user_input is not None:
-            user_input = _normalize_general(user_input)
-            errors = _validate_general(user_input)
-            if not errors:
-                options.update(user_input)
-                if CONF_TTS_ENTITY_ID not in user_input:
-                    options.pop(CONF_TTS_ENTITY_ID, None)
-                if not user_input.get(CONF_AI_SEARCH_AGENT_ID):
-                    options.pop(CONF_AI_SEARCH_AGENT_ID, None)
-                return await self.async_step_init()
+            options.update(user_input)
+            return await self.async_step_init()
 
         values = user_input or options
 
         return self.async_show_form(
             step_id="general",
-            data_schema=_general_schema(
+            data_schema=_general_settings_schema(
                 bool(
                     values.get(
                         CONF_DISMISS_ON_CLEAR, DEFAULT_DISMISS_ON_CLEAR
@@ -515,13 +622,42 @@ class ConversationalAssistantOptionsFlow(config_entries.OptionsFlow):
                 bool(
                     values.get(CONF_CONFIRM_TARGETS, DEFAULT_CONFIRM_TARGETS)
                 ),
-                bool(
-                    values.get(
-                        CONF_SPEAKER_ENABLED, DEFAULT_SPEAKER_ENABLED
-                    )
-                ),
-                str(values.get(CONF_TTS_ENTITY_ID) or "").strip()
-                or _first_tts_entity_id(self.hass),
+            ),
+        )
+
+    async def async_step_zalo(
+        self, _user_input: dict[str, Any] | None = None
+    ) -> ConfigFlowResult:
+        """Show all Zalo-related settings in one submenu."""
+        menu_options = ["zalo_webhook", "add_zalo"]
+        if self._zalo_targets():
+            menu_options.extend(["edit_zalo_select", "delete_zalo"])
+        menu_options.append("init")
+        return self.async_show_menu(
+            step_id="zalo",
+            menu_options=menu_options,
+            description_placeholders={
+                "zalo_count": str(len(self._zalo_targets()))
+            },
+        )
+
+    async def async_step_zalo_webhook(
+        self, user_input: dict[str, Any] | None = None
+    ) -> ConfigFlowResult:
+        """Edit global Zalo webhook and Home Assistant routing settings."""
+        options = self._ensure_options()
+        errors: dict[str, str] = {}
+        if user_input is not None:
+            user_input = _normalize_zalo_settings(user_input)
+            errors = _validate_zalo_settings(user_input)
+            if not errors:
+                options.update(user_input)
+                return await self.async_step_zalo()
+
+        values = user_input or options
+        return self.async_show_form(
+            step_id="zalo_webhook",
+            data_schema=_zalo_settings_schema(
                 bool(
                     values.get(
                         CONF_ZALO_WEBHOOK_ENABLED,
@@ -545,6 +681,28 @@ class ConversationalAssistantOptionsFlow(config_entries.OptionsFlow):
                         DEFAULT_ZALO_HOME_ASSISTANT_ENABLED,
                     )
                 ),
+            ),
+            errors=errors,
+        )
+
+    async def async_step_ai(
+        self, user_input: dict[str, Any] | None = None
+    ) -> ConfigFlowResult:
+        """Edit all AI agent settings."""
+        options = self._ensure_options()
+        if user_input is not None:
+            user_input = _normalize_ai_settings(user_input)
+            options.update(user_input)
+            if not user_input.get(CONF_AI_SEARCH_AGENT_ID):
+                options.pop(CONF_AI_SEARCH_AGENT_ID, None)
+            if not user_input.get(CONF_AI_IMAGE_TASK_ENTITY_ID):
+                options.pop(CONF_AI_IMAGE_TASK_ENTITY_ID, None)
+            return await self.async_step_init()
+
+        values = user_input or options
+        return self.async_show_form(
+            step_id="ai",
+            data_schema=_ai_settings_schema(
                 str(
                     values.get(
                         CONF_ZALO_CONVERSATION_AGENT_ID,
@@ -559,8 +717,39 @@ class ConversationalAssistantOptionsFlow(config_entries.OptionsFlow):
                     )
                     or ""
                 ).strip(),
+                str(
+                    values.get(
+                        CONF_AI_IMAGE_TASK_ENTITY_ID,
+                        DEFAULT_AI_IMAGE_TASK_ENTITY_ID,
+                    )
+                    or ""
+                ).strip(),
             ),
-            errors=errors,
+        )
+
+    async def async_step_tts(
+        self, user_input: dict[str, Any] | None = None
+    ) -> ConfigFlowResult:
+        """Edit speaker discovery and TTS settings."""
+        options = self._ensure_options()
+        if user_input is not None:
+            options.update(user_input)
+            if CONF_TTS_ENTITY_ID not in user_input:
+                options.pop(CONF_TTS_ENTITY_ID, None)
+            return await self.async_step_init()
+
+        values = user_input or options
+        return self.async_show_form(
+            step_id="tts",
+            data_schema=_tts_settings_schema(
+                bool(
+                    values.get(
+                        CONF_SPEAKER_ENABLED, DEFAULT_SPEAKER_ENABLED
+                    )
+                ),
+                str(values.get(CONF_TTS_ENTITY_ID) or "").strip()
+                or _first_tts_entity_id(self.hass),
+            ),
         )
 
     async def async_step_add_zalo(
@@ -572,7 +761,7 @@ class ConversationalAssistantOptionsFlow(config_entries.OptionsFlow):
             errors = _validate_zalo(user_input)
             if not errors:
                 self._zalo_targets().append(_make_zalo_target(user_input))
-                return await self.async_step_init()
+                return await self.async_step_zalo()
 
         return self.async_show_form(
             step_id="add_zalo",
@@ -620,7 +809,7 @@ class ConversationalAssistantOptionsFlow(config_entries.OptionsFlow):
             None,
         )
         if target is None:
-            return await self.async_step_init()
+            return await self.async_step_zalo()
 
         errors: dict[str, str] = {}
         if user_input is not None:
@@ -632,7 +821,7 @@ class ConversationalAssistantOptionsFlow(config_entries.OptionsFlow):
                 index = self._zalo_targets().index(target)
                 self._zalo_targets()[index] = replacement
                 self._editing_target_id = None
-                return await self.async_step_init()
+                return await self.async_step_zalo()
 
         return self.async_show_form(
             step_id="edit_zalo",
@@ -658,7 +847,7 @@ class ConversationalAssistantOptionsFlow(config_entries.OptionsFlow):
                 for target in targets
                 if str(target.get(CONF_ZALO_TARGET_ID)) != selected
             ]
-            return await self.async_step_init()
+            return await self.async_step_zalo()
 
         return self.async_show_form(
             step_id="delete_zalo",

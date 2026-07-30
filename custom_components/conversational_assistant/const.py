@@ -20,6 +20,7 @@ CONF_ZALO_WEBHOOK_ACCOUNT_SELECTION = "zalo_webhook_account_selection"
 CONF_ZALO_HOME_ASSISTANT_ENABLED = "zalo_home_assistant_enabled"
 CONF_ZALO_CONVERSATION_AGENT_ID = "zalo_conversation_agent_id"
 CONF_AI_SEARCH_AGENT_ID = "ai_search_agent_id"
+CONF_AI_IMAGE_TASK_ENTITY_ID = "ai_image_task_entity_id"
 
 # Legacy single-Zalo options, retained for automatic migration.
 CONF_ZALO_ENABLED = "zalo_enabled"
@@ -44,6 +45,10 @@ DEFAULT_ZALO_WEBHOOK_BOT_ACCOUNT_ID = ""
 DEFAULT_ZALO_HOME_ASSISTANT_ENABLED = True
 DEFAULT_ZALO_CONVERSATION_AGENT_ID = "conversation.home_assistant"
 DEFAULT_AI_SEARCH_AGENT_ID = ""
+DEFAULT_AI_IMAGE_TASK_ENTITY_ID = ""
+
+AI_TASK_DOMAIN = "ai_task"
+AI_TASK_SERVICE_GENERATE_IMAGE = "generate_image"
 
 # Action used by an existing webhook/automation to pass Zalo payloads in.
 SERVICE_PROCESS_ZALO_WEBHOOK = "process_zalo_webhook"
@@ -160,6 +165,23 @@ SEARCH_SENTENCES = [
     "[please ]find information about",
     "[please ]find information about {request}",
 ]
+
+# AI image generation is currently delivered to the originating Zalo chat.
+# The same action can be taught additional aliases through command memory.
+IMAGE_GENERATION_PREFIXES = (
+    "tạo một bức ảnh",
+    "tạo bức ảnh",
+    "tạo một ảnh",
+    "tạo ảnh",
+    "generate an image",
+    "generate image",
+    "create an image",
+    "create image",
+    "make an image",
+    "make image",
+    "draw an image",
+    "draw image",
+)
 
 
 HELP_SENTENCES = [
