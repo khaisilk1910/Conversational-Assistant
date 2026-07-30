@@ -1,6 +1,5 @@
 # Conversational Assistant
 
-[![Version](https://img.shields.io/badge/version-1.0.0-blue.svg)](#phiên-bản)
 [![Home Assistant](https://img.shields.io/badge/Home%20Assistant-2026.7.0%2B-41BDF5.svg)](https://www.home-assistant.io/)
 [![HACS](https://img.shields.io/badge/HACS-Custom-41BDF5.svg)](https://hacs.xyz/)
 [![Language](https://img.shields.io/badge/ngôn%20ngữ-Tiếng%20Việt-red.svg)](#ngôn-ngữ)
