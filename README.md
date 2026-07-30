@@ -4,6 +4,8 @@
 [![HACS](https://img.shields.io/badge/HACS-Custom-41BDF5.svg)](https://hacs.xyz/)
 [![Languages](https://img.shields.io/badge/ngôn%20ngữ-Tiếng%20Việt%20%7C%20English-red.svg)](#ngôn-ngữ)
 
+[**Tiếng Việt**](README.md) | [English](README_EN.md)
+
 **Conversational Assistant** là custom integration cho Home Assistant, tập trung vào trải nghiệm điều khiển bằng ngôn ngữ tự nhiên qua **Home Assistant Assist** và **Zalo**.
 
 Tích hợp kết hợp quản lý nhắc hẹn, ghi chú bảo mật, thông báo đa kênh và điều khiển nhà thông minh trong cùng một cấu hình. Người dùng có thể tạo nhắc hẹn bằng giọng nói, nhận thông báo trên điện thoại, Zalo hoặc loa, đồng thời hỏi trạng thái thiết bị, thời tiết và lịch sự kiện trực tiếp từ Zalo.
