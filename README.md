@@ -16,9 +16,11 @@ Tích hợp kết hợp quản lý nhắc hẹn, ghi chú bảo mật, thông b�
 > 
 > `webhook_id` là webhook Zalo_bot bạn đang dùng Automation.
 > 
-> Thêm `'@1080' in (trigger.json.data.content | default('') | string)` nếu bạn muốn khi yêu cầu phải nhập `@1080` + nội dung yêu cầu. Ví dụ: **`@1080` hẹn 10h30 hàng ngày uống thuốc**
+> Thêm `'@1080' in (trigger.json.data.content | default('') | string)` nếu bạn muốn khi yêu cầu phải nhập `@1080` + nội dung yêu cầu.
+> Ví dụ: **`@1080` hẹn 10h30 hàng ngày uống thuốc**
 > 
-> Nếu không muốn hãy bỏ đoạn `and '@1080' in (trigger.json.data.content | default('') | string)`. Khi đó chỉ yêu cầu: **Hẹn 10h30 hàng ngày uống thuốc**
+> Nếu không muốn hãy bỏ đoạn `and '@1080' in (trigger.json.data.content | default('') | string)`.
+> Khi đó chỉ yêu cầu: **Hẹn 10h30 hàng ngày uống thuốc**
 
 ```
 alias: Zalo - Bot Answer Multi Group Voice Reminder
