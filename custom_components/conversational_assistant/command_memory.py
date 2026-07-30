@@ -27,6 +27,7 @@ ACTION_NOTE_VIEW = "note_view"
 ACTION_HELP = "help"
 ACTION_HOME_ASSISTANT = "home_assistant"
 ACTION_CALENDAR = "calendar"
+ACTION_SEARCH = "search"
 
 SUPPORTED_ACTIONS = {
     ACTION_CAMERA,
@@ -41,6 +42,7 @@ SUPPORTED_ACTIONS = {
     ACTION_HELP,
     ACTION_HOME_ASSISTANT,
     ACTION_CALENDAR,
+    ACTION_SEARCH,
 }
 
 MAX_LEARNED_COMMANDS = 100
@@ -50,6 +52,7 @@ REQUEST_ACTIONS = {
     ACTION_REMINDER_DELETE,
     ACTION_NOTE_CREATE,
     ACTION_NOTE_VIEW,
+    ACTION_SEARCH,
 }
 
 ACTION_LABELS = {
@@ -65,6 +68,7 @@ ACTION_LABELS = {
     ACTION_HELP: "xem hướng dẫn",
     ACTION_HOME_ASSISTANT: "thực hiện lệnh Home Assistant",
     ACTION_CALENDAR: "xem lịch Home Assistant",
+    ACTION_SEARCH: "tìm kiếm thông tin trên Internet",
 }
 
 # Explicit labels also let users teach short targets such as "để camera" or
@@ -103,6 +107,11 @@ _TARGET_LABELS = {
     "how to use the integration": ACTION_HELP,
     "how to use conversational assistant": ACTION_HELP,
     "features": ACTION_HELP,
+    "search": ACTION_SEARCH,
+    "internet search": ACTION_SEARCH,
+    "search the internet": ACTION_SEARCH,
+    "search for information": ACTION_SEARCH,
+    "look up information": ACTION_SEARCH,
     "chup camera": ACTION_CAMERA,
     "chup anh camera": ACTION_CAMERA,
     "lay anh camera": ACTION_CAMERA,
@@ -139,6 +148,10 @@ _TARGET_LABELS = {
     "huong dan tich hop": ACTION_HELP,
     "hoc cach su dung tich hop": ACTION_HELP,
     "cac tinh nang": ACTION_HELP,
+    "tim thong tin": ACTION_SEARCH,
+    "tim kiem": ACTION_SEARCH,
+    "tim kiem tren mang": ACTION_SEARCH,
+    "tra cuu thong tin": ACTION_SEARCH,
 }
 
 _RESERVED_PHRASES = {
@@ -558,6 +571,7 @@ def canonical_text(
         ACTION_REMINDER_DELETE: "xóa nhắc hẹn",
         ACTION_NOTE_CREATE: "ghi chú",
         ACTION_NOTE_VIEW: "mở ghi chú",
+        ACTION_SEARCH: "tìm thông tin",
     }
     prefix = prefixes.get(action, "")
     return f"{prefix} {request}".strip() if prefix else request

@@ -14,6 +14,7 @@ from homeassistant.core import callback
 from homeassistant.helpers import selector
 
 from .const import (
+    CONF_AI_SEARCH_AGENT_ID,
     CONF_CONFIRM_TARGETS,
     CONF_DISMISS_ON_CLEAR,
     CONF_SPEAKER_ENABLED,
@@ -31,6 +32,7 @@ from .const import (
     CONF_ZALO_WEBHOOK_ACCOUNT_SELECTION,
     CONF_ZALO_WEBHOOK_BOT_ACCOUNT_ID,
     CONF_ZALO_WEBHOOK_ENABLED,
+    DEFAULT_AI_SEARCH_AGENT_ID,
     DEFAULT_CONFIRM_TARGETS,
     DEFAULT_DISMISS_ON_CLEAR,
     DEFAULT_SPEAKER_ENABLED,
@@ -59,6 +61,7 @@ def _general_schema(
     zalo_webhook_account_selection: str,
     zalo_home_assistant_enabled: bool,
     zalo_conversation_agent_id: str,
+    ai_search_agent_id: str,
 ) -> vol.Schema:
     """Build general configuration schema."""
     fields: dict[Any, Any] = {
@@ -104,6 +107,16 @@ def _general_schema(
             default=zalo_conversation_agent_id,
         )
     ] = conversation_selector
+    search_selector = selector.ConversationAgentSelector()
+    if ai_search_agent_id:
+        fields[
+            vol.Optional(
+                CONF_AI_SEARCH_AGENT_ID,
+                default=ai_search_agent_id,
+            )
+        ] = search_selector
+    else:
+        fields[vol.Optional(CONF_AI_SEARCH_AGENT_ID)] = search_selector
     tts_selector = selector.EntitySelector(
         selector.EntitySelectorConfig(domain="tts", multiple=False)
     )
@@ -139,6 +152,16 @@ def _normalize_general(user_input: dict[str, Any]) -> dict[str, Any]:
     ).strip()
     normalized[CONF_ZALO_WEBHOOK_ACCOUNT_SELECTION] = str(
         normalized.get(CONF_ZALO_WEBHOOK_ACCOUNT_SELECTION, "") or ""
+    ).strip()
+    normalized[CONF_ZALO_CONVERSATION_AGENT_ID] = str(
+        normalized.get(
+            CONF_ZALO_CONVERSATION_AGENT_ID,
+            DEFAULT_ZALO_CONVERSATION_AGENT_ID,
+        )
+        or DEFAULT_ZALO_CONVERSATION_AGENT_ID
+    ).strip()
+    normalized[CONF_AI_SEARCH_AGENT_ID] = str(
+        normalized.get(CONF_AI_SEARCH_AGENT_ID, "") or ""
     ).strip()
     return normalized
 
@@ -298,6 +321,13 @@ class ConversationalAssistantConfigFlow(config_entries.ConfigFlow, domain=DOMAIN
                     )
                     or DEFAULT_ZALO_CONVERSATION_AGENT_ID
                 ).strip(),
+                str(
+                    values.get(
+                        CONF_AI_SEARCH_AGENT_ID,
+                        DEFAULT_AI_SEARCH_AGENT_ID,
+                    )
+                    or ""
+                ).strip(),
             ),
             errors=errors,
         )
@@ -413,6 +443,12 @@ class ConversationalAssistantOptionsFlow(config_entries.OptionsFlow):
                 DEFAULT_ZALO_CONVERSATION_AGENT_ID,
             ),
         )
+        options.setdefault(
+            CONF_AI_SEARCH_AGENT_ID,
+            self.config_entry.data.get(
+                CONF_AI_SEARCH_AGENT_ID, DEFAULT_AI_SEARCH_AGENT_ID
+            ),
+        )
         if CONF_ZALO_TARGETS not in options:
             data_targets = self.config_entry.data.get(CONF_ZALO_TARGETS)
             if isinstance(data_targets, list):
@@ -462,6 +498,8 @@ class ConversationalAssistantOptionsFlow(config_entries.OptionsFlow):
                 options.update(user_input)
                 if CONF_TTS_ENTITY_ID not in user_input:
                     options.pop(CONF_TTS_ENTITY_ID, None)
+                if not user_input.get(CONF_AI_SEARCH_AGENT_ID):
+                    options.pop(CONF_AI_SEARCH_AGENT_ID, None)
                 return await self.async_step_init()
 
         values = user_input or options
@@ -513,6 +551,13 @@ class ConversationalAssistantOptionsFlow(config_entries.OptionsFlow):
                         DEFAULT_ZALO_CONVERSATION_AGENT_ID,
                     )
                     or DEFAULT_ZALO_CONVERSATION_AGENT_ID
+                ).strip(),
+                str(
+                    values.get(
+                        CONF_AI_SEARCH_AGENT_ID,
+                        DEFAULT_AI_SEARCH_AGENT_ID,
+                    )
+                    or ""
                 ).strip(),
             ),
             errors=errors,

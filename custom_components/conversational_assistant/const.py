@@ -19,6 +19,7 @@ CONF_ZALO_WEBHOOK_BOT_ACCOUNT_ID = "zalo_webhook_bot_account_id"
 CONF_ZALO_WEBHOOK_ACCOUNT_SELECTION = "zalo_webhook_account_selection"
 CONF_ZALO_HOME_ASSISTANT_ENABLED = "zalo_home_assistant_enabled"
 CONF_ZALO_CONVERSATION_AGENT_ID = "zalo_conversation_agent_id"
+CONF_AI_SEARCH_AGENT_ID = "ai_search_agent_id"
 
 # Legacy single-Zalo options, retained for automatic migration.
 CONF_ZALO_ENABLED = "zalo_enabled"
@@ -42,6 +43,7 @@ DEFAULT_ZALO_WEBHOOK_ENABLED = True
 DEFAULT_ZALO_WEBHOOK_BOT_ACCOUNT_ID = ""
 DEFAULT_ZALO_HOME_ASSISTANT_ENABLED = True
 DEFAULT_ZALO_CONVERSATION_AGENT_ID = "conversation.home_assistant"
+DEFAULT_AI_SEARCH_AGENT_ID = ""
 
 # Action used by an existing webhook/automation to pass Zalo payloads in.
 SERVICE_PROCESS_ZALO_WEBHOOK = "process_zalo_webhook"
@@ -134,8 +136,32 @@ COMMAND_DELETE_SENTENCES = [
     "[hãy ](xóa|xoá|quên) toàn bộ câu lệnh đã học",
 ]
 
-# A dedicated help trigger keeps usage-guide requests inside this integration,
+# Dedicated search triggers keep Internet queries inside this integration,
 # including while another workflow is waiting for a follow-up answer.
+SEARCH_SENTENCES = [
+    "[hãy ]tìm thông tin",
+    "[hãy ]tìm thông tin {request}",
+    "[hãy ]tìm kiếm",
+    "[hãy ]tìm kiếm {request}",
+    "[hãy ]tìm kiếm trên mạng",
+    "[hãy ]tìm kiếm trên mạng {request}",
+    "[hãy ]tìm trên mạng",
+    "[hãy ]tìm trên mạng {request}",
+    "[hãy ]tra cứu",
+    "[hãy ]tra cứu {request}",
+    "[please ]search for",
+    "[please ]search for {request}",
+    "[please ]search the internet for",
+    "[please ]search the internet for {request}",
+    "[please ]search the web for",
+    "[please ]search the web for {request}",
+    "[please ]look up",
+    "[please ]look up {request}",
+    "[please ]find information about",
+    "[please ]find information about {request}",
+]
+
+
 HELP_SENTENCES = [
     "help",
     "[please ]show help",

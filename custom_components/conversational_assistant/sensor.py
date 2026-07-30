@@ -122,6 +122,7 @@ class ConversationalAssistantCountSensor(ConversationalAssistantSensorBase):
             "zalo_conversation_agent_id": (
                 self.manager.zalo_conversation_agent_id
             ),
+            "ai_search_agent_id": self.manager.ai_search_agent_id,
         }
 
 

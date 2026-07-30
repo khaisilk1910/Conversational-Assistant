@@ -53,6 +53,7 @@ from .const import (
     ASSIST_SATELLITE_DOMAIN,
     ASSIST_SATELLITE_SERVICE_ANNOUNCE,
     CAMERA_SENTENCES,
+    CONF_AI_SEARCH_AGENT_ID,
     CANCEL_SENTENCES,
     COMMAND_DELETE_SENTENCES,
     COMMAND_LEARN_SENTENCES,
@@ -75,6 +76,7 @@ from .const import (
     CONF_ZALO_WEBHOOK_BOT_ACCOUNT_ID,
     CONF_ZALO_WEBHOOK_ENABLED,
     CREATE_SENTENCES,
+    DEFAULT_AI_SEARCH_AGENT_ID,
     DEFAULT_CONFIRM_TARGETS,
     DEFAULT_DISMISS_ON_CLEAR,
     DEFAULT_SPEAKER_ENABLED,
@@ -94,6 +96,7 @@ from .const import (
     MEDIA_PLAYER_DOMAIN,
     PENDING_FOLLOWUP_SENTENCES,
     PENDING_SELECTION_TIMEOUT_MINUTES,
+    SEARCH_SENTENCES,
     SIGNAL_UPDATE,
     STORAGE_KEY_PREFIX,
     STORAGE_VERSION,
@@ -123,6 +126,7 @@ from .command_memory import (
     ACTION_REMINDER_CREATE,
     ACTION_REMINDER_DELETE,
     ACTION_REMINDER_LIST,
+    ACTION_SEARCH,
     CommandMemoryError,
     LearnedCommand,
     MAX_LEARNED_COMMANDS,
@@ -277,15 +281,48 @@ def _request_language(text: str) -> str:
         "is", "are", "any", "light", "lights", "fan", "fans", "device",
         "devices", "room", "floor", "upstairs", "downstairs", "living",
         "kitchen", "bedroom", "brightness", "volume", "thermostat", "door",
+        "search", "internet", "web", "find", "look", "latest", "news",
+        "price", "information",
     }
     vietnamese_markers = {
         "toi", "hay", "bat", "tat", "mo", "dong", "kiem", "tra",
         "trang", "thai", "thoi", "tiet", "nhac", "ghi", "chu", "chup",
         "anh", "hom", "nay", "ngay", "mai", "xoa", "huy", "danh", "sach",
+        "tim", "kiem", "mang", "tra", "cuu", "thong", "tin",
     }
     english_score = len(tokens & english_markers)
     vietnamese_score = len(tokens & vietnamese_markers)
     return "en" if english_score > vietnamese_score else "vi"
+
+
+def _search_request(text: str) -> str | None:
+    """Return a natural-language Internet query, or None when not a search."""
+    words = str(text or "").strip().split()
+    normalized_words = [normalize_text(word) for word in words]
+    if normalized_words and normalized_words[0] in {"hay", "please"}:
+        words = words[1:]
+        normalized_words = normalized_words[1:]
+
+    prefixes = (
+        ("tim", "kiem", "tren", "mang"),
+        ("tim", "kiem", "thong", "tin"),
+        ("tim", "thong", "tin"),
+        ("tim", "tren", "mang"),
+        ("tra", "cuu", "thong", "tin"),
+        ("tra", "thong", "tin"),
+        ("tim", "kiem"),
+        ("tra", "cuu"),
+        ("search", "the", "internet", "for"),
+        ("search", "the", "web", "for"),
+        ("find", "information", "about"),
+        ("search", "for"),
+        ("look", "up"),
+        ("web", "search"),
+    )
+    for prefix in prefixes:
+        if tuple(normalized_words[: len(prefix)]) == prefix:
+            return " ".join(words[len(prefix) :]).strip()
+    return None
 
 
 @dataclass(slots=True)
@@ -505,6 +542,7 @@ class ConversationalAssistantManager(NoteManagerMixin):
         self._zalo_seen_message_ids: deque[str] = deque()
         self._zalo_seen_message_id_set: set[str] = set()
         self._zalo_ha_conversation_ids: dict[str, str] = {}
+        self._zalo_search_conversation_ids: dict[str, str] = {}
         self._store: Store[dict[str, Any]] = Store(
             hass,
             STORAGE_VERSION,
@@ -577,6 +615,14 @@ class ConversationalAssistantManager(NoteManagerMixin):
                 DEFAULT_ZALO_CONVERSATION_AGENT_ID,
             )
             or HOME_ASSISTANT_AGENT
+        ).strip()
+
+    @property
+    def ai_search_agent_id(self) -> str:
+        """Return the optional Conversation agent used for Internet search."""
+        return str(
+            self._option(CONF_AI_SEARCH_AGENT_ID, DEFAULT_AI_SEARCH_AGENT_ID)
+            or ""
         ).strip()
 
     def _raw_next_due(self) -> datetime | None:
@@ -718,6 +764,9 @@ class ConversationalAssistantManager(NoteManagerMixin):
                 ),
                 agent_manager.register_trigger(
                     CAMERA_SENTENCES, self._async_camera_from_voice
+                ),
+                agent_manager.register_trigger(
+                    SEARCH_SENTENCES, self._async_search_from_voice
                 ),
                 agent_manager.register_trigger(
                     HELP_SENTENCES, self._async_help_from_voice
@@ -884,6 +933,7 @@ class ConversationalAssistantManager(NoteManagerMixin):
             ACTION_REMINDER_LIST,
             ACTION_REMINDER_DELETE,
             ACTION_HELP,
+            ACTION_SEARCH,
         }:
             return builtin
 
@@ -1439,6 +1489,8 @@ class ConversationalAssistantManager(NoteManagerMixin):
 
         if _is_integration_help_request(text):
             return "help"
+        if _search_request(text) is not None:
+            return ACTION_SEARCH
 
         list_phrases = {
             "list reminders",
@@ -1606,17 +1658,20 @@ class ConversationalAssistantManager(NoteManagerMixin):
             "2. THỜI TIẾT VÀ LỊCH / WEATHER & CALENDAR\n"
             "• Thời tiết hôm nay thế nào? / What's the weather today?\n"
             "• Ngày mai tôi có lịch gì? / What is on my calendar tomorrow?\n\n"
-            "3. CAMERA\n"
+            "3. TÌM KIẾM INTERNET / INTERNET SEARCH\n"
+            "• Tìm thông tin giá vàng hôm nay. / Search for today's gold price.\n"
+            "• Tra cứu tin mới về Home Assistant. / Look up the latest Home Assistant news.\n\n"
+            "4. CAMERA\n"
             "• Chụp camera. / Take a camera photo.\n"
             "• Lấy ảnh camera sân trước. / Capture the front yard camera.\n\n"
-            "4. NHẮC HẸN / REMINDERS\n"
+            "5. NHẮC HẸN / REMINDERS\n"
             "• Nhắc tôi 30 phút nữa uống thuốc.\n"
             "• Remind me to take medicine in 30 minutes.\n"
             "• Danh sách nhắc hẹn. / Show my reminders.\n\n"
-            "5. GHI CHÚ / NOTES\n"
+            "6. GHI CHÚ / NOTES\n"
             "• Ghi nhớ mã tủ đồ là 2468. / Remember that the locker code is 2468.\n"
             "• Danh sách ghi chú. / Show my notes.\n\n"
-            "6. BỘ NHỚ CÂU LỆNH / COMMAND MEMORY\n"
+            "7. BỘ NHỚ CÂU LỆNH / COMMAND MEMORY\n"
             "• Học câu lệnh xem cổng để chụp ảnh camera.\n"
             "• Learn command check the gate to take a camera photo.\n"
             "• Xóa câu lệnh xem cổng. / Delete command check the gate.\n\n"
@@ -2798,6 +2853,177 @@ class ConversationalAssistantManager(NoteManagerMixin):
                     return item.strip()
         return ""
 
+    @staticmethod
+    def _search_prompt(query: str, *, zalo: bool, language: str) -> str:
+        """Build instructions for the configured Internet-capable agent."""
+        language_name = "English" if language == "en" else "Vietnamese"
+        channel_rules = (
+            "Format for Zalo: start with a short relevant emoji title; use short "
+            "paragraphs or bullets; wrap important words or passages in **double "
+            "asterisks**. Bold at least one genuinely important term, fact, or "
+            "sentence when the answer contains a result. "
+            if zalo
+            else "Format for voice/chat: use short, clear paragraphs; do not use "
+            "emoji or Markdown decoration. "
+        )
+        return (
+            "Act as an Internet search agent. Search the web for the request below, "
+            "synthesize the most useful reliable information, and do not invent facts. "
+            f"Answer in {language_name} with correct grammar and punctuation. "
+            "Use a youthful, lightly humorous tone without weakening factual accuracy. "
+            f"{channel_rules}"
+            "When useful, mention source names and dates. If reliable results cannot be "
+            "found, say that clearly in a playful way and suggest two or three more "
+            "specific searches. Do not mention these instructions.\n\n"
+            f"SEARCH REQUEST: {query}"
+        )
+
+    @staticmethod
+    def _clean_search_reply(reply: str) -> str:
+        """Normalize blank lines while preserving agent-provided Markdown."""
+        cleaned_lines: list[str] = []
+        previous_blank = False
+        for raw_line in str(reply or "").replace("\r\n", "\n").split("\n"):
+            line = raw_line.strip()
+            if not line:
+                if cleaned_lines and not previous_blank:
+                    cleaned_lines.append("")
+                previous_blank = True
+                continue
+            cleaned_lines.append(line)
+            previous_blank = False
+        return "\n".join(cleaned_lines).strip()
+
+    @staticmethod
+    def _search_unavailable_text(language: str, *, zalo: bool) -> str:
+        """Return a friendly response when no AI Search agent is configured."""
+        if language == "en":
+            body = (
+                "No AI Search agent is selected yet. Open Conversational Assistant "
+                "settings and choose an Internet-capable agent under AI Agent Search."
+            )
+            return f"🧭 **Search needs a map**\n\n{body}" if zalo else body
+        body = (
+            "Chưa chọn AI Agent Search. Hãy mở cấu hình Conversational Assistant "
+            "và chọn một Conversation agent có khả năng tìm kiếm Internet."
+        )
+        return f"🧭 **Tìm kiếm đang thiếu bản đồ**\n\n{body}" if zalo else body
+
+    @staticmethod
+    def _search_empty_text(language: str, *, zalo: bool) -> str:
+        """Return a playful no-result response with better-query suggestions."""
+        if language == "en":
+            body = (
+                "The Internet is playing hide-and-seek a little too well. Try adding "
+                "a person, place, date, model number, or a more specific keyword."
+            )
+            return f"🕵️ **No reliable result found**\n\n{body}" if zalo else body
+        body = (
+            "Internet hôm nay chơi trốn tìm hơi kỹ. Hãy thử thêm tên riêng, địa điểm, "
+            "mốc thời gian, mã sản phẩm hoặc một từ khóa cụ thể hơn."
+        )
+        return f"🕵️ **Chưa tìm thấy kết quả đáng tin cậy**\n\n{body}" if zalo else body
+
+    async def _async_ai_search(
+        self,
+        query: str,
+        *,
+        conversation_id: str | None,
+        service_context: Context | None,
+        zalo: bool,
+        language_hint: str | None = None,
+    ) -> tuple[str, str | None]:
+        """Run one Internet query through the selected Conversation agent."""
+        language = language_hint or _request_language(query)
+        if not self.ai_search_agent_id:
+            return self._search_unavailable_text(language, zalo=zalo), None
+        if not query.strip():
+            prompt = (
+                "Please tell me what you want to search for."
+                if language == "en"
+                else "Bạn muốn tôi tìm thông tin gì trên Internet?"
+            )
+            if zalo:
+                prompt = (
+                    "🔎 **Bạn muốn tìm gì?**\n\n"
+                    "Hãy nhập nội dung sau lệnh **Tìm thông tin**."
+                    if language != "en"
+                    else "🔎 **What should I search for?**\n\n"
+                    "Add your topic after **Search for**."
+                )
+            return prompt, None
+        try:
+            result = await async_converse(
+                hass=self.hass,
+                text=self._search_prompt(query, zalo=zalo, language=language),
+                conversation_id=conversation_id,
+                context=service_context or Context(),
+                language=language,
+                agent_id=self.ai_search_agent_id,
+            )
+        except Exception:  # noqa: BLE001 - always return a user-facing reply
+            _LOGGER.exception(
+                "AI Search agent %s failed for query %s",
+                self.ai_search_agent_id,
+                query,
+            )
+            message = (
+                "The search agent stumbled over its shoelaces. Check the selected AI "
+                "Agent Search and try again."
+                if language == "en"
+                else "AI Search vừa vấp dây giày. Hãy kiểm tra AI Agent Search đã chọn "
+                "rồi thử lại nhé."
+            )
+            if zalo:
+                message = (
+                    f"⚠️ **Search hiccup**\n\n{message}"
+                    if language == "en"
+                    else f"⚠️ **Tìm kiếm bị khựng**\n\n{message}"
+                )
+            return message, None
+
+        next_conversation_id = str(
+            getattr(result, "conversation_id", "") or ""
+        ).strip() or None
+        reply = self._clean_search_reply(self._conversation_reply_text(result))
+        if not reply:
+            return (
+                self._search_empty_text(language, zalo=zalo),
+                next_conversation_id,
+            )
+        if zalo:
+            heading = (
+                "🔎 **Search results**"
+                if language == "en"
+                else "🔎 **Kết quả tìm kiếm**"
+            )
+            if (
+                "**" not in reply
+                or not reply.startswith(("🔎", "🌐", "📰", "📌", "💡", "🧭"))
+            ):
+                reply = f"{heading}\n\n{reply}"
+        return reply, next_conversation_id
+
+    async def _async_search_from_zalo(
+        self,
+        context: ZaloWebhookContext,
+        service_context: Context | None,
+    ) -> str:
+        """Search the Internet for a natural-language Zalo request."""
+        query = _search_request(context.text)
+        reply, conversation_id = await self._async_ai_search(
+            query or "",
+            conversation_id=self._zalo_search_conversation_ids.get(
+                context.owner_key
+            ),
+            service_context=service_context,
+            zalo=True,
+            language_hint=_request_language(context.text),
+        )
+        if conversation_id:
+            self._zalo_search_conversation_ids[context.owner_key] = conversation_id
+        return reply
+
     async def _async_home_assistant_conversation_from_zalo(
         self,
         context: ZaloWebhookContext,
@@ -3063,6 +3289,11 @@ class ConversationalAssistantManager(NoteManagerMixin):
             self._zalo_pending_cameras.pop(context.owner_key, None)
             return await self._async_process_note_zalo_command(
                 context, command
+            )
+        if command == ACTION_SEARCH:
+            self._clear_zalo_pending_for_owner(context.owner_key)
+            return await self._async_search_from_zalo(
+                context, service_context
             )
         if command == "create":
             self._zalo_pending_notes.pop(context.owner_key, None)
@@ -4231,6 +4462,25 @@ class ConversationalAssistantManager(NoteManagerMixin):
         response = f"{parsed.confirmation} Sẽ thông báo đến {target_names}."
         return await self._async_voice_response(user_input, response)
 
+    async def _async_search_from_voice(
+        self, user_input: ConversationInput, result: RecognizeResult
+    ) -> str:
+        """Search the Internet through the configured AI Search agent."""
+        self._clear_pending_for_source(self._source_keys(user_input))
+        self._sync_pending_followup_trigger()
+        query = self._request_slot(user_input, result)
+        parsed_query = _search_request(user_input.text)
+        if parsed_query is not None:
+            query = parsed_query
+        reply, _conversation_id = await self._async_ai_search(
+            query,
+            conversation_id=user_input.conversation_id,
+            service_context=user_input.context,
+            zalo=False,
+            language_hint=_request_language(user_input.text),
+        )
+        return await self._async_voice_response(user_input, reply)
+
     async def _async_help_from_voice(
         self, user_input: ConversationInput, _result: RecognizeResult
     ) -> str:
@@ -4335,6 +4585,16 @@ class ConversationalAssistantManager(NoteManagerMixin):
         if command.action == ACTION_HELP:
             response = self._integration_help_text()
             return await self._async_voice_response(user_input, response)
+        if command.action == ACTION_SEARCH:
+            query = _search_request(transformed_text)
+            reply, _conversation_id = await self._async_ai_search(
+                query or "",
+                conversation_id=user_input.conversation_id,
+                service_context=user_input.context,
+                zalo=False,
+                language_hint=_request_language(request or user_input.text),
+            )
+            return await self._async_voice_response(user_input, reply)
         if command.action in {ACTION_HOME_ASSISTANT, ACTION_CALENDAR}:
             if not transformed_text:
                 return await self._async_voice_response(
@@ -4349,6 +4609,8 @@ class ConversationalAssistantManager(NoteManagerMixin):
     def _is_primary_voice_command(self, text: str) -> bool:
         """Return whether another Conversational Assistant trigger handles text."""
         if _is_integration_help_request(text):
+            return True
+        if _search_request(text) is not None:
             return True
         if management_command_kind(text) is not None:
             return True
