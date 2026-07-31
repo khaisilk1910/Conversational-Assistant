@@ -100,9 +100,6 @@ ACTION_DISMISS = "CONVERSATIONAL_ASSISTANT_DISMISS"
 
 PENDING_SELECTION_TIMEOUT_MINUTES = 5
 
-ASSIST_SATELLITE_DOMAIN = "assist_satellite"
-ASSIST_SATELLITE_SERVICE_ANNOUNCE = "announce"
-
 # Registered only while a reminder is waiting for destination confirmation.
 PENDING_FOLLOWUP_SENTENCES = ["{selection}"]
 

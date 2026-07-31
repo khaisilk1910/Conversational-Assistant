@@ -42,7 +42,6 @@ from homeassistant.const import (
 )
 from homeassistant.core import Context, CoreState, Event, HomeAssistant, callback
 from homeassistant.helpers import device_registry as dr
-from homeassistant.helpers import entity_registry as er
 from homeassistant.helpers.dispatcher import async_dispatcher_send
 from homeassistant.helpers.event import async_track_point_in_time
 from homeassistant.helpers.start import async_at_started
@@ -54,8 +53,6 @@ from .const import (
     ACTION_SNOOZE,
     AI_TASK_DOMAIN,
     AI_TASK_SERVICE_GENERATE_IMAGE,
-    ASSIST_SATELLITE_DOMAIN,
-    ASSIST_SATELLITE_SERVICE_ANNOUNCE,
     CAMERA_SENTENCES,
     CONF_AI_AGENT_FAILOVER_ENABLED,
     CONF_AI_IMAGE_TASK_ENTITY_ID,
@@ -5959,103 +5956,20 @@ class ConversationalAssistantManager(NoteManagerMixin):
             "Nói bỏ yêu cầu vừa rồi để không xóa."
         )
 
-    def _request_satellite_entity_id(
-        self, user_input: ConversationInput
-    ) -> str | None:
-        """Resolve the Assist satellite that received the voice command."""
-        def supports_announce(entity_id: str) -> bool:
-            state = self.hass.states.get(entity_id)
-            if state is None or state.state in (STATE_UNAVAILABLE, STATE_UNKNOWN):
-                return False
-            try:
-                features = int(
-                    state.attributes.get(ATTR_SUPPORTED_FEATURES, 0) or 0
-                )
-            except (TypeError, ValueError):
-                return False
-            # AssistSatelliteEntityFeature.ANNOUNCE == 1. Keeping the numeric
-            # feature check avoids a hard dependency on the integration module.
-            return bool(features & 1)
-
-        satellite_id = user_input.satellite_id
-        if satellite_id and supports_announce(satellite_id):
-            return satellite_id
-
-        if not user_input.device_id:
-            return None
-        registry = er.async_get(self.hass)
-        for entry in er.async_entries_for_device(registry, user_input.device_id):
-            if (
-                entry.domain == ASSIST_SATELLITE_DOMAIN
-                and entry.disabled_by is None
-                and supports_announce(entry.entity_id)
-            ):
-                return entry.entity_id
-        return None
-
-    @staticmethod
-    def _spoken_response_text(text: str) -> str:
-        """Turn a multiline chat response into smooth satellite speech."""
-        lines = []
-        for raw_line in text.splitlines():
-            line = _sanitize_spoken_text(raw_line)
-            if line:
-                lines.append(line)
-        return ". ".join(lines)
-
-    async def _async_delayed_satellite_announce(
-        self, satellite_entity_id: str, text: str
-    ) -> None:
-        """Announce after the active pipeline has released the satellite."""
-        spoken = self._spoken_response_text(text)
-        if not spoken:
-            return
-        # The trigger callback runs while the satellite is still processing.
-        # Retry after short delays instead of failing with SatelliteBusyError.
-        for delay in (0.8, 1.5, 3.0):
-            await asyncio.sleep(delay)
-            try:
-                await self.hass.services.async_call(
-                    ASSIST_SATELLITE_DOMAIN,
-                    ASSIST_SATELLITE_SERVICE_ANNOUNCE,
-                    {"message": spoken, "preannounce": False},
-                    blocking=True,
-                    target={"entity_id": satellite_entity_id},
-                )
-                return
-            except Exception:  # noqa: BLE001 - retry while satellite is busy
-                _LOGGER.debug(
-                    "Could not announce Conversational Assistant response on %s yet",
-                    satellite_entity_id,
-                    exc_info=True,
-                )
-        _LOGGER.warning(
-            "Unable to announce Conversational Assistant response on %s",
-            satellite_entity_id,
-        )
-
     async def _async_voice_response(
         self, user_input: ConversationInput, text: str
     ) -> str:
-        """Return chat text or explicitly speak it on the requesting satellite."""
-        satellite_entity_id = self._request_satellite_entity_id(user_input)
-        if (
-            satellite_entity_id
-            and self.hass.services.has_service(
-                ASSIST_SATELLITE_DOMAIN,
-                ASSIST_SATELLITE_SERVICE_ANNOUNCE,
-            )
-        ):
-            self.hass.async_create_task(
-                self._async_delayed_satellite_announce(
-                    satellite_entity_id,
-                    text,
-                )
-            )
-            # Suppress the normal pipeline speech to avoid double playback.
-            # The explicit announcement above is used for voice satellites.
-            return ""
-        return text
+        """Return response text to the Home Assistant Assist pipeline.
+
+        Sentence-trigger callbacks are converted by Home Assistant into the
+        ``speech`` field of the conversation response. The Assist pipeline then
+        sends that speech through its configured TTS engine while also showing
+        the same text in the Assist conversation UI. Returning an empty string
+        suppresses pipeline TTS, so every voice feature must return its actual
+        response here.
+        """
+        del user_input  # Kept in the signature for every voice workflow.
+        return str(text or "").strip()
 
     @staticmethod
     def _reminder_from_targets(
