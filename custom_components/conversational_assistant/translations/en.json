@@ -67,17 +67,19 @@
       },
       "calendar": {
         "title": "Calendar settings",
-        "description": "The sensor scans every available calendar. Found {mobile_count} Mobile App devices and {zalo_count} enabled Zalo destinations for fixed daily notifications.",
+        "description": "Choose the calendars to scan and notify. Found {calendar_count} calendars, {mobile_count} Mobile App devices, and {zalo_count} enabled Zalo destinations. Submit saves immediately and reloads the notification schedule.",
         "data": {
           "calendar_lookahead_days": "Number of upcoming days to scan",
+          "calendar_entities": "Calendars to monitor and include in notifications",
           "calendar_notification_enabled": "Send a daily calendar notification when events exist",
           "calendar_notification_time": "Daily notification time",
           "calendar_notification_mobile_devices": "Fixed Mobile App recipients",
           "calendar_notification_zalo_targets": "Fixed Zalo recipients"
         },
         "data_description": {
-          "calendar_lookahead_days": "Default: 30 days. The sensor state is the total event count; its attributes contain the normalized event list from all available calendar entities.",
-          "calendar_notification_enabled": "When enabled, the integration refreshes the sensor at the selected time and sends a summary only when the event count is greater than zero.",
+          "calendar_lookahead_days": "Default: 30 days. The sensor only counts selected calendars and hides ordinary lunar dates without event content while keeping lunar day 1, day 15, and meaningful events.",
+          "calendar_entities": "Only selected calendars are included in the sensor and daily summary. Selecting none disables calendar scanning.",
+          "calendar_notification_enabled": "When enabled, the integration refreshes at the selected time and sends when events exist. A failure in one calendar no longer blocks valid events from other calendars.",
           "calendar_notification_time": "Local Home Assistant time. Default: 07:00 every day.",
           "calendar_notification_mobile_devices": "Select one or more Mobile App devices that always receive the calendar summary.",
           "calendar_notification_zalo_targets": "Select one or more enabled Zalo destinations already configured in Zalo settings."

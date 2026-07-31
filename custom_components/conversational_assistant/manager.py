@@ -48,6 +48,7 @@ from homeassistant.helpers import device_registry as dr
 from homeassistant.helpers.dispatcher import async_dispatcher_send
 from homeassistant.helpers.event import (
     async_track_point_in_time,
+    async_track_time_change,
     async_track_time_interval,
 )
 from homeassistant.helpers.start import async_at_started
@@ -73,6 +74,7 @@ from .const import (
     COMMAND_DELETE_SENTENCES,
     COMMAND_LEARN_SENTENCES,
     COMMAND_LIST_SENTENCES,
+    CONF_CALENDAR_ENTITIES,
     CONF_CALENDAR_LOOKAHEAD_DAYS,
     CONF_CALENDAR_NOTIFICATION_ENABLED,
     CONF_CALENDAR_NOTIFICATION_MOBILE_DEVICES,
@@ -188,6 +190,8 @@ from .zalo_home_assistant import (
     CalendarDisplayEvent,
     CalendarWindow,
     calendar_create_request_from_ai_payload,
+    calendar_event_display_summary,
+    calendar_event_should_be_skipped,
     calendar_events_for_display,
     calendar_has_time_reference,
     calendar_matches_query,
@@ -668,6 +672,9 @@ class ConversationalAssistantManager(NoteManagerMixin):
         self._calendar_window_end: datetime | None = None
         self._calendar_last_update: datetime | None = None
         self._calendar_refresh_error: str | None = None
+        self._calendar_last_notification_at: datetime | None = None
+        self._calendar_last_notification_result: str | None = None
+        self._calendar_last_notification_error: str | None = None
         self._unsubs: list[Callable[[], None]] = []
         self._learned_trigger_unsubs: list[Callable[[], None]] = []
         # Optional targets are discovered only when a command actually needs
@@ -794,6 +801,22 @@ class ConversationalAssistantManager(NoteManagerMixin):
         return max(1, min(MAX_CALENDAR_LOOKAHEAD_DAYS, days))
 
     @property
+    def calendar_configured_entity_ids(self) -> list[str] | None:
+        """Return selected calendar IDs, or None for legacy scan-all mode."""
+        if CONF_CALENDAR_ENTITIES in self.entry.options:
+            value = self.entry.options.get(CONF_CALENDAR_ENTITIES)
+        elif CONF_CALENDAR_ENTITIES in self.entry.data:
+            value = self.entry.data.get(CONF_CALENDAR_ENTITIES)
+        else:
+            return None
+        return self._normalized_option_list(value)
+
+    @property
+    def calendar_monitored_entity_ids(self) -> list[str]:
+        """Return currently available calendar IDs included in the scan."""
+        return [state.entity_id for state in self._all_calendar_states()]
+
+    @property
     def calendar_notification_enabled(self) -> bool:
         """Return whether the daily calendar summary is enabled."""
         return bool(
@@ -869,6 +892,21 @@ class ConversationalAssistantManager(NoteManagerMixin):
     def calendar_refresh_error(self) -> str | None:
         """Return the last calendar refresh error, if any."""
         return self._calendar_refresh_error
+
+    @property
+    def calendar_last_notification_at(self) -> datetime | None:
+        """Return when the scheduled calendar notification last ran."""
+        return self._calendar_last_notification_at
+
+    @property
+    def calendar_last_notification_result(self) -> str | None:
+        """Return a concise delivery result for diagnostics."""
+        return self._calendar_last_notification_result
+
+    @property
+    def calendar_last_notification_error(self) -> str | None:
+        """Return the most recent delivery error, if any."""
+        return self._calendar_last_notification_error
 
     @property
     def calendar_upcoming_events(self) -> list[CalendarDisplayEvent]:
@@ -5127,12 +5165,15 @@ class ConversationalAssistantManager(NoteManagerMixin):
                     )
 
     def _all_calendar_states(self) -> list[Any]:
-        """Return every available calendar entity, regardless of Assist exposure."""
+        """Return available calendar entities allowed by Calendar settings."""
+        configured = self.calendar_configured_entity_ids
+        selected = set(configured) if configured is not None else None
         return sorted(
             (
                 state
                 for state in self.hass.states.async_all("calendar")
                 if state.state not in (STATE_UNAVAILABLE, STATE_UNKNOWN)
+                and (selected is None or state.entity_id in selected)
             ),
             key=lambda state: (
                 str(state.name or state.entity_id).casefold(),
@@ -5206,8 +5247,15 @@ class ConversationalAssistantManager(NoteManagerMixin):
                     start=dt_util.as_local(event_start),
                     end=dt_util.as_local(event_end) if event_end else None,
                 )
-                if self._calendar_event_in_window(normalized, window):
-                    unique[self._calendar_event_key(normalized)] = normalized
+                if not self._calendar_event_in_window(normalized, window):
+                    continue
+                if calendar_event_should_be_skipped(normalized):
+                    continue
+                normalized = replace(
+                    normalized,
+                    summary=calendar_event_display_summary(normalized),
+                )
+                unique[self._calendar_event_key(normalized)] = normalized
 
             self._calendar_events = sorted(
                 unique.values(),
@@ -5227,10 +5275,11 @@ class ConversationalAssistantManager(NoteManagerMixin):
             )
             self._notify_update()
 
-    async def _async_calendar_refresh_interval(self, _now: datetime) -> None:
-        """Periodically refresh the calendar count sensor."""
+    async def _async_calendar_refresh_interval(self, _now: datetime) -> bool:
+        """Refresh the calendar sensor and report whether the cycle completed."""
         try:
             await self.async_refresh_calendar_events()
+            return True
         except asyncio.CancelledError:
             raise
         except Exception as err:  # noqa: BLE001 - keep future refreshes alive
@@ -5238,6 +5287,7 @@ class ConversationalAssistantManager(NoteManagerMixin):
             self._calendar_last_update = dt_util.now()
             self._notify_update()
             _LOGGER.exception("Unexpected calendar sensor refresh failure")
+            return False
 
     @callback
     def _start_calendar_monitoring(self) -> None:
@@ -5275,40 +5325,54 @@ class ConversationalAssistantManager(NoteManagerMixin):
 
     @callback
     def _schedule_calendar_notification(self) -> None:
-        """Schedule the next configured daily calendar summary."""
+        """Register a reliable recurring local-time calendar notification."""
         if self._unsub_calendar_notification_timer is not None:
             self._unsub_calendar_notification_timer()
             self._unsub_calendar_notification_timer = None
         if not self.calendar_notification_enabled:
             return
 
-        local_now = dt_util.now()
-        target = datetime.combine(
-            local_now.date(),
-            self.calendar_notification_time,
-            tzinfo=local_now.tzinfo,
-        )
-        if target <= local_now:
-            target += timedelta(days=1)
-        self._unsub_calendar_notification_timer = async_track_point_in_time(
+        configured_time = self.calendar_notification_time
+        self._unsub_calendar_notification_timer = async_track_time_change(
             self.hass,
             self._async_calendar_notification_due,
-            target,
+            hour=configured_time.hour,
+            minute=configured_time.minute,
+            second=configured_time.second,
+        )
+        _LOGGER.debug(
+            "Calendar notification scheduled daily at %s",
+            configured_time.strftime("%H:%M:%S"),
         )
 
     async def _async_calendar_notification_due(self, _now: datetime) -> None:
         """Refresh calendars and send the daily summary when events exist."""
-        self._unsub_calendar_notification_timer = None
-        try:
-            await self._async_calendar_refresh_interval(dt_util.now())
-            if (
-                self.calendar_notification_enabled
-                and self.calendar_event_count > 0
-                and self._calendar_refresh_error is None
-            ):
-                await self._async_send_calendar_notifications()
-        finally:
-            self._schedule_calendar_notification()
+        if not self.calendar_notification_enabled:
+            return
+        refresh_completed = await self._async_calendar_refresh_interval(
+            dt_util.now()
+        )
+        if not refresh_completed:
+            self._calendar_last_notification_at = dt_util.now()
+            self._calendar_last_notification_result = (
+                "Không gửi vì làm mới lịch thất bại"
+            )
+            self._calendar_last_notification_error = self._calendar_refresh_error
+            self._notify_update()
+            return
+        if self.calendar_event_count <= 0:
+            self._calendar_last_notification_at = dt_util.now()
+            self._calendar_last_notification_result = (
+                "Không gửi vì không có sự kiện phù hợp"
+            )
+            self._calendar_last_notification_error = None
+            self._notify_update()
+            return
+
+        # A failure from one calendar must not suppress valid events fetched
+        # from the remaining selected calendars. The partial refresh error stays
+        # visible in the sensor attributes for diagnostics.
+        await self._async_send_calendar_notifications()
 
     @staticmethod
     def _calendar_remaining_text(days: int) -> str:
@@ -5364,13 +5428,20 @@ class ConversationalAssistantManager(NoteManagerMixin):
 
     async def _async_send_calendar_mobile_notification(
         self, message: str
-    ) -> bool:
+    ) -> tuple[int, list[str]]:
         """Send the daily calendar summary to fixed Mobile App devices."""
         device_ids = self.calendar_notification_mobile_device_ids
         if not device_ids:
-            return False
+            return 0, []
         services = self._notification_services_for_device_ids(device_ids)
-        sent = False
+        errors: list[str] = []
+        if not services:
+            errors.append(
+                "Không tìm thấy notify service cho Mobile App đã chọn"
+            )
+            return 0, errors
+
+        sent_count = 0
         for service in services:
             try:
                 await self.hass.services.async_call(
@@ -5387,12 +5458,15 @@ class ConversationalAssistantManager(NoteManagerMixin):
                     },
                     blocking=True,
                 )
-                sent = True
-            except Exception:  # noqa: BLE001 - keep other devices working
+                sent_count += 1
+            except Exception as err:  # noqa: BLE001 - keep other devices working
+                errors.append(
+                    f"notify.{service}: {str(err) or err.__class__.__name__}"
+                )
                 _LOGGER.exception(
                     "Failed sending calendar summary via notify.%s", service
                 )
-        return sent
+        return sent_count, errors
 
     def _calendar_notification_zalo_targets(self) -> list[dict[str, Any]]:
         """Resolve fixed calendar Zalo IDs against current enabled targets."""
@@ -5405,23 +5479,31 @@ class ConversationalAssistantManager(NoteManagerMixin):
             if str(target.get(CONF_ZALO_TARGET_ID, "")) in selected
         ]
 
-    async def _async_send_calendar_zalo_notification(self, message: str) -> bool:
+    async def _async_send_calendar_zalo_notification(
+        self, message: str
+    ) -> tuple[int, list[str]]:
         """Send the daily calendar summary to fixed Zalo destinations."""
+        selected_ids = self.calendar_notification_zalo_target_ids
+        if not selected_ids:
+            return 0, []
         targets = self._calendar_notification_zalo_targets()
+        errors: list[str] = []
         if not targets:
-            return False
+            errors.append(
+                "Không tìm thấy nơi nhận Zalo đã chọn hoặc nơi nhận đang tắt"
+            )
+            return 0, errors
         if not self.hass.services.has_service(
             ZALO_DOMAIN, ZALO_SERVICE_SEND_MESSAGE
         ):
-            _LOGGER.error(
-                "Service %s.%s is unavailable for calendar notifications",
-                ZALO_DOMAIN,
-                ZALO_SERVICE_SEND_MESSAGE,
+            message_error = (
+                f"Service {ZALO_DOMAIN}.{ZALO_SERVICE_SEND_MESSAGE} không khả dụng"
             )
-            return False
+            _LOGGER.error(message_error)
+            return 0, [message_error]
 
         message = self._zalo_emphasize_important_text(message)
-        sent = False
+        sent_count = 0
         for target in targets:
             thread_id = str(target.get(CONF_ZALO_THREAD_ID, "") or "").strip()
             account_selection = str(
@@ -5431,6 +5513,7 @@ class ConversationalAssistantManager(NoteManagerMixin):
                 target.get(CONF_ZALO_TYPE, DEFAULT_ZALO_TYPE)
             ).strip()
             if not thread_id or not account_selection:
+                errors.append("Nơi nhận Zalo thiếu thread_id hoặc tài khoản gửi")
                 continue
             try:
                 await self._async_send_zalo_typing_to_target(
@@ -5448,27 +5531,49 @@ class ConversationalAssistantManager(NoteManagerMixin):
                     },
                     blocking=True,
                 )
-                sent = True
-            except Exception:  # noqa: BLE001 - keep other targets working
+                sent_count += 1
+            except Exception as err:  # noqa: BLE001 - keep other targets working
+                errors.append(
+                    f"Zalo {thread_id}: {str(err) or err.__class__.__name__}"
+                )
                 _LOGGER.exception(
                     "Failed sending calendar summary to Zalo thread %s",
                     thread_id,
                 )
-        return sent
+        return sent_count, errors
 
     async def _async_send_calendar_notifications(self) -> None:
         """Send one refreshed calendar summary to all fixed destinations."""
-        mobile_sent = await self._async_send_calendar_mobile_notification(
-            self._format_calendar_notification(markdown=False)
+        mobile_sent, mobile_errors = (
+            await self._async_send_calendar_mobile_notification(
+                self._format_calendar_notification(markdown=False)
+            )
         )
-        zalo_sent = await self._async_send_calendar_zalo_notification(
-            self._format_calendar_notification(markdown=True)
+        zalo_sent, zalo_errors = (
+            await self._async_send_calendar_zalo_notification(
+                self._format_calendar_notification(markdown=True)
+            )
         )
-        if not mobile_sent and not zalo_sent:
+        requested_mobile = len(self.calendar_notification_mobile_device_ids)
+        requested_zalo = len(self.calendar_notification_zalo_target_ids)
+        self._calendar_last_notification_at = dt_util.now()
+        self._calendar_last_notification_result = (
+            f"Mobile: {mobile_sent}/{requested_mobile}; "
+            f"Zalo: {zalo_sent}/{requested_zalo}"
+        )
+        all_errors = [*mobile_errors, *zalo_errors]
+        if requested_mobile == 0 and requested_zalo == 0:
+            all_errors.append("Chưa chọn Mobile App hoặc Zalo nhận thông báo")
+        self._calendar_last_notification_error = (
+            "; ".join(all_errors) if all_errors else None
+        )
+        self._notify_update()
+
+        if mobile_sent == 0 and zalo_sent == 0:
             _LOGGER.warning(
-                "Calendar notification is enabled and %s event(s) exist, but no "
-                "configured Mobile App or Zalo destination was available",
+                "Calendar notification had %s event(s) but was not delivered: %s",
                 self.calendar_event_count,
+                self._calendar_last_notification_error or "unknown reason",
             )
 
     def _zalo_exposed_calendar_states(self, text: str) -> list[Any]:

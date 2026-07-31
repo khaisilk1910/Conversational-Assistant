@@ -1241,7 +1241,8 @@ def _lunar_summary_has_content(summary: str) -> bool:
     return len(normalized) >= 3
 
 
-def _should_skip_lunar_event(event: CalendarDisplayEvent) -> bool:
+def calendar_event_should_be_skipped(event: CalendarDisplayEvent) -> bool:
+    """Return whether a plain, ordinary lunar-calendar date should be hidden."""
     if not _is_lunar_calendar(event):
         return False
     lunar_day = _lunar_day_from_summary(event.summary)
@@ -1252,7 +1253,8 @@ def _should_skip_lunar_event(event: CalendarDisplayEvent) -> bool:
     return True
 
 
-def _display_event_summary(event: CalendarDisplayEvent) -> str:
+def calendar_event_display_summary(event: CalendarDisplayEvent) -> str:
+    """Return the same user-facing lunar summary used by calendar lookup."""
     if not _is_lunar_calendar(event):
         return event.summary
     lunar_day = _lunar_day_from_summary(event.summary)
@@ -1261,6 +1263,11 @@ def _display_event_summary(event: CalendarDisplayEvent) -> str:
     if lunar_day == 15 and not _lunar_summary_has_content(event.summary):
         return f"Ngày rằm, 15 âm lịch ({event.summary})"
     return event.summary
+
+
+# Backward-compatible private aliases used inside older call sites.
+_should_skip_lunar_event = calendar_event_should_be_skipped
+_display_event_summary = calendar_event_display_summary
 
 
 def _is_camera_image_request(normalized: str) -> bool:

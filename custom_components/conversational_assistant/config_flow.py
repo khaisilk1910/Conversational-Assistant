@@ -23,6 +23,7 @@ from .const import (
     CONF_AI_CAMERA_TASK_ENTITY_ID,
     CONF_AI_IMAGE_TASK_ENTITY_ID,
     CONF_AI_SEARCH_AGENT_ID,
+    CONF_CALENDAR_ENTITIES,
     CONF_CALENDAR_LOOKAHEAD_DAYS,
     CONF_CALENDAR_NOTIFICATION_ENABLED,
     CONF_CALENDAR_NOTIFICATION_MOBILE_DEVICES,
@@ -272,6 +273,21 @@ def _mobile_device_choices(hass: HomeAssistant) -> dict[str, str]:
     }
 
 
+def _calendar_entity_choices(hass: HomeAssistant) -> dict[str, str]:
+    """Return calendar entities selectable for monitoring and alerts."""
+    states = sorted(
+        hass.states.async_all("calendar"),
+        key=lambda state: (
+            str(state.name or state.entity_id).casefold(),
+            state.entity_id,
+        ),
+    )
+    return {
+        state.entity_id: f"{state.name or state.entity_id} ({state.entity_id})"
+        for state in states
+    }
+
+
 def _zalo_target_choices(
     targets: list[dict[str, Any]],
 ) -> dict[str, str]:
@@ -302,14 +318,21 @@ def _zalo_target_choices(
 
 def _calendar_settings_schema(
     lookahead_days: int,
+    selected_calendar_entities: list[str],
     notification_enabled: bool,
     notification_time: str,
     selected_mobile_devices: list[str],
     selected_zalo_targets: list[str],
+    calendar_choices: dict[str, str],
     mobile_choices: dict[str, str],
     zalo_choices: dict[str, str],
 ) -> vol.Schema:
     """Build calendar sensor and scheduled notification settings."""
+    valid_calendars = [
+        value
+        for value in selected_calendar_entities
+        if value in calendar_choices
+    ]
     valid_mobile = [
         value for value in selected_mobile_devices if value in mobile_choices
     ]
@@ -332,6 +355,10 @@ def _calendar_settings_schema(
                     unit_of_measurement="ngày",
                 )
             ),
+            vol.Optional(
+                CONF_CALENDAR_ENTITIES,
+                default=valid_calendars,
+            ): _select_multiple_schema(calendar_choices),
             vol.Optional(
                 CONF_CALENDAR_NOTIFICATION_ENABLED,
                 default=notification_enabled,
@@ -391,6 +418,7 @@ def _normalize_calendar_settings(
             DEFAULT_CALENDAR_NOTIFICATION_TIME
         )
     for key in (
+        CONF_CALENDAR_ENTITIES,
         CONF_CALENDAR_NOTIFICATION_MOBILE_DEVICES,
         CONF_CALENDAR_NOTIFICATION_ZALO_TARGETS,
     ):
@@ -775,6 +803,13 @@ class ConversationalAssistantOptionsFlow(config_entries.OptionsFlow):
             ),
         )
         options.setdefault(
+            CONF_CALENDAR_ENTITIES,
+            self.config_entry.data.get(
+                CONF_CALENDAR_ENTITIES,
+                list(_calendar_entity_choices(self.hass)),
+            ),
+        )
+        options.setdefault(
             CONF_CALENDAR_NOTIFICATION_ENABLED,
             self.config_entry.data.get(
                 CONF_CALENDAR_NOTIFICATION_ENABLED,
@@ -930,8 +965,12 @@ class ConversationalAssistantOptionsFlow(config_entries.OptionsFlow):
         options = self._ensure_options()
         if user_input is not None:
             options.update(_normalize_calendar_settings(user_input))
-            return await self.async_step_init()
+            # Calendar scheduling is time-sensitive. Persist immediately so the
+            # integration reloads and registers the new daily timer as soon as
+            # the user presses Submit; no separate Finish step is required.
+            return self.async_create_entry(title="", data=options)
 
+        calendar_choices = _calendar_entity_choices(self.hass)
         mobile_choices = _mobile_device_choices(self.hass)
         zalo_choices = _zalo_target_choices(self._zalo_targets())
         values = _normalize_calendar_settings(options)
@@ -939,14 +978,17 @@ class ConversationalAssistantOptionsFlow(config_entries.OptionsFlow):
             step_id="calendar",
             data_schema=_calendar_settings_schema(
                 int(values[CONF_CALENDAR_LOOKAHEAD_DAYS]),
+                list(values[CONF_CALENDAR_ENTITIES]),
                 bool(values[CONF_CALENDAR_NOTIFICATION_ENABLED]),
                 str(values[CONF_CALENDAR_NOTIFICATION_TIME]),
                 list(values[CONF_CALENDAR_NOTIFICATION_MOBILE_DEVICES]),
                 list(values[CONF_CALENDAR_NOTIFICATION_ZALO_TARGETS]),
+                calendar_choices,
                 mobile_choices,
                 zalo_choices,
             ),
             description_placeholders={
+                "calendar_count": str(len(calendar_choices)),
                 "mobile_count": str(len(mobile_choices)),
                 "zalo_count": str(len(zalo_choices)),
             },

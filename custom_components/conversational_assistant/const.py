@@ -15,6 +15,7 @@ CONF_TTS_ENTITY_ID = "tts_entity_id"
 
 # Calendar event sensor and scheduled notification settings.
 CONF_CALENDAR_LOOKAHEAD_DAYS = "calendar_lookahead_days"
+CONF_CALENDAR_ENTITIES = "calendar_entities"
 CONF_CALENDAR_NOTIFICATION_ENABLED = "calendar_notification_enabled"
 CONF_CALENDAR_NOTIFICATION_TIME = "calendar_notification_time"
 CONF_CALENDAR_NOTIFICATION_MOBILE_DEVICES = (

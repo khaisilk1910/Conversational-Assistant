@@ -165,7 +165,7 @@ class ConversationalAssistantNextSensor(ConversationalAssistantSensorBase):
 class ConversationalAssistantCalendarEventCountSensor(
     ConversationalAssistantSensorBase
 ):
-    """Upcoming calendar event count across every available calendar."""
+    """Upcoming calendar event count across selected calendar entities."""
 
     _attr_name = "Số sự kiện sắp diễn ra"
     _attr_icon = "mdi:calendar-multiple-check"
@@ -207,6 +207,12 @@ class ConversationalAssistantCalendarEventCountSensor(
             ),
             "list_su_kien": self.manager.calendar_event_list_text,
             "su_kien_sap_toi": rows,
+            "lich_cau_hinh": (
+                self.manager.calendar_configured_entity_ids
+                if self.manager.calendar_configured_entity_ids is not None
+                else "tat_ca_lich"
+            ),
+            "lich_dang_quan_sat": self.manager.calendar_monitored_entity_ids,
             "thong_bao_bat": self.manager.calendar_notification_enabled,
             "gio_thong_bao": (
                 self.manager.calendar_notification_time.strftime("%H:%M:%S")
@@ -216,6 +222,17 @@ class ConversationalAssistantCalendarEventCountSensor(
             ),
             "zalo_da_chon": (
                 self.manager.calendar_notification_zalo_target_ids
+            ),
+            "lan_gui_thong_bao_cuoi": (
+                self.manager.calendar_last_notification_at.isoformat()
+                if self.manager.calendar_last_notification_at is not None
+                else None
+            ),
+            "ket_qua_gui_thong_bao": (
+                self.manager.calendar_last_notification_result
+            ),
+            "loi_gui_thong_bao": (
+                self.manager.calendar_last_notification_error
             ),
             "loi_cap_nhat": self.manager.calendar_refresh_error,
         }

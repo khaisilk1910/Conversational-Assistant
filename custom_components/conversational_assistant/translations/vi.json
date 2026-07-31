@@ -67,17 +67,19 @@
       },
       "calendar": {
         "title": "Cài đặt lịch",
-        "description": "Sensor quét tất cả lịch đang khả dụng. Đã tìm thấy {mobile_count} thiết bị Mobile App và {zalo_count} nơi nhận Zalo đang bật để chọn làm nơi nhận thông báo cố định.",
+        "description": "Chọn lịch cần quét và thông báo. Đã tìm thấy {calendar_count} lịch, {mobile_count} thiết bị Mobile App và {zalo_count} nơi nhận Zalo đang bật. Nhấn Gửi để lưu ngay và tải lại lịch thông báo.",
         "data": {
           "calendar_lookahead_days": "Số ngày sự kiện sắp tới cần quét",
+          "calendar_entities": "Các lịch cần kiểm tra và gửi thông báo",
           "calendar_notification_enabled": "Gửi thông báo lịch hằng ngày khi có sự kiện",
           "calendar_notification_time": "Giờ gửi thông báo hằng ngày",
           "calendar_notification_mobile_devices": "Mobile App nhận thông báo cố định",
           "calendar_notification_zalo_targets": "Zalo nhận thông báo cố định"
         },
         "data_description": {
-          "calendar_lookahead_days": "Mặc định 30 ngày. Trạng thái sensor là tổng số sự kiện; attributes liệt kê chi tiết sự kiện từ tất cả entity calendar đang khả dụng.",
-          "calendar_notification_enabled": "Khi bật, tích hợp làm mới sensor vào giờ đã chọn và chỉ gửi thông báo khi số sự kiện lớn hơn 0.",
+          "calendar_lookahead_days": "Mặc định 30 ngày. Sensor chỉ đếm sự kiện từ các lịch đã chọn và tự bỏ ngày âm lịch thông thường không có nội dung; vẫn giữ mùng 1, ngày rằm hoặc sự kiện có nội dung.",
+          "calendar_entities": "Chỉ các lịch đã chọn mới được đưa vào sensor và bản tin. Bỏ chọn toàn bộ sẽ không quét lịch nào.",
+          "calendar_notification_enabled": "Khi bật, tích hợp làm mới sensor vào giờ đã chọn và gửi khi số sự kiện lớn hơn 0. Lỗi của một lịch không ngăn thông báo các lịch còn lại.",
           "calendar_notification_time": "Theo múi giờ Home Assistant. Mặc định 07:00 mỗi ngày.",
           "calendar_notification_mobile_devices": "Chọn một hoặc nhiều thiết bị Mobile App luôn nhận bản tin lịch.",
           "calendar_notification_zalo_targets": "Chọn một hoặc nhiều nơi nhận Zalo đang bật và đã được tạo trong Cài đặt Zalo."
