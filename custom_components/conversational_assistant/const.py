@@ -98,7 +98,9 @@ SIGNAL_UPDATE = f"{DOMAIN}_update"
 ACTION_SNOOZE = "CONVERSATIONAL_ASSISTANT_SNOOZE"
 ACTION_DISMISS = "CONVERSATIONAL_ASSISTANT_DISMISS"
 
-PENDING_SELECTION_TIMEOUT_MINUTES = 5
+# Every multi-turn confirmation/selection remains valid for exactly 120 seconds.
+# The timeout is refreshed whenever the integration sends the next prompt.
+PENDING_CONFIRMATION_TIMEOUT_SECONDS = 120
 
 # Registered only while a reminder is waiting for destination confirmation.
 PENDING_FOLLOWUP_SENTENCES = ["{selection}"]

@@ -19,7 +19,7 @@ from .const import (
     NOTE_EDIT_SENTENCES,
     NOTE_LIST_SENTENCES,
     NOTE_VIEW_SENTENCES,
-    PENDING_SELECTION_TIMEOUT_MINUTES,
+    PENDING_CONFIRMATION_TIMEOUT_SECONDS,
 )
 from .models import Note
 from .notes import (
@@ -447,7 +447,7 @@ class NoteManagerMixin:
             content=content,
             proposed_note_id=uuid.uuid4().hex if action == "create" else None,
             created_at=now,
-            expires_at=now + timedelta(minutes=PENDING_SELECTION_TIMEOUT_MINUTES),
+            expires_at=now + timedelta(seconds=PENDING_CONFIRMATION_TIMEOUT_SECONDS),
         )
         return pending
 
@@ -496,7 +496,7 @@ class NoteManagerMixin:
 
     def _touch_note_pending(self, pending: PendingNoteAction) -> None:
         pending.expires_at = dt_util.now() + timedelta(
-            minutes=PENDING_SELECTION_TIMEOUT_MINUTES
+            seconds=PENDING_CONFIRMATION_TIMEOUT_SECONDS
         )
         self._sync_pending_followup_trigger()
 

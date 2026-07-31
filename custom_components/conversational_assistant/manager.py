@@ -104,7 +104,7 @@ from .const import (
     LIST_SENTENCES,
     MEDIA_PLAYER_DOMAIN,
     PENDING_FOLLOWUP_SENTENCES,
-    PENDING_SELECTION_TIMEOUT_MINUTES,
+    PENDING_CONFIRMATION_TIMEOUT_SECONDS,
     SEARCH_SENTENCES,
     SIGNAL_UPDATE,
     STORAGE_KEY_PREFIX,
@@ -888,7 +888,14 @@ class ConversationalAssistantManager(NoteManagerMixin):
 
     @staticmethod
     def _zalo_emphasize_important_text(text: str) -> str:
-        """Apply safe Zalo Markdown emphasis to every text response."""
+        """Apply safe Zalo Markdown emphasis to every text response.
+
+        Existing ``**...**`` spans are protected first, so the formatter can
+        be called repeatedly without producing nested or broken Markdown.
+        Confirmation words are emphasized on instruction lines across every
+        Zalo workflow, including calendar, reminder, camera, note, and target
+        selection flows.
+        """
         message = str(text or "").replace("\r\n", "\n").strip()
         if not message:
             return message
@@ -960,7 +967,140 @@ class ConversationalAssistantManager(NoteManagerMixin):
                 else:
                     first = f"**{first}**"
                 lines[first_index] = first
-        return "\n".join(lines)
+
+        always_commands = (
+            "xác nhận xóa",
+            "xác nhận xoá",
+            "xác nhận sửa",
+            "xác nhận lưu",
+            "xác nhận gửi",
+            "xác nhận chụp",
+            "không xóa",
+            "không xoá",
+            "không chụp",
+            "không lưu",
+            "không sửa",
+            "bỏ yêu cầu vừa rồi",
+            "bỏ yêu cầu",
+            "bỏ qua",
+            "hủy",
+            "huỷ",
+            "confirm delete",
+            "confirm edit",
+            "confirm update",
+            "confirm save",
+            "confirm send",
+            "never mind",
+            "cancel",
+            "skip",
+        )
+        instruction_commands = (
+            "giữ nguyên",
+            "đồng ý",
+            "xác nhận",
+            "tất cả",
+            "tiếp tục",
+            "sửa",
+            "xóa",
+            "xoá",
+            "có",
+            "không",
+            "yes",
+            "no",
+            "edit",
+            "update",
+            "delete",
+            "remove",
+            "confirm",
+            "continue",
+            "stop",
+            "all",
+        )
+        # ``normalize_text`` removes Vietnamese accents, so these markers
+        # are deliberately stored in normalized form.
+        instruction_markers = (
+            "tra loi",
+            "hay tra loi",
+            "gui ",
+            "hay gui",
+            "nhap ",
+            "hay nhap",
+            "noi ",
+            "hay noi",
+            "chon ",
+            "hay chon",
+            "reply",
+            "send ",
+            "type ",
+            "say ",
+            "choose ",
+        )
+
+        def emphasize_line(line: str) -> str:
+            protected: list[str] = []
+
+            def protect(match: re.Match[str]) -> str:
+                protected.append(match.group(0))
+                return f"\x00CA_BOLD_{len(protected) - 1}\x00"
+
+            working = re.sub(r"\*\*[^*\n]+?\*\*", protect, line)
+            normalized_line = normalize_text(working)
+            commands = list(always_commands)
+            if any(marker in normalized_line for marker in instruction_markers):
+                commands.extend(instruction_commands)
+            pattern = "|".join(
+                sorted((re.escape(item) for item in commands), key=len, reverse=True)
+            )
+            if pattern:
+                working = re.sub(
+                    rf"(?<![\w*])(?:{pattern})(?![\w*])",
+                    lambda match: f"**{match.group(0)}**",
+                    working,
+                    flags=re.IGNORECASE,
+                )
+            for index, original in enumerate(protected):
+                working = working.replace(f"\x00CA_BOLD_{index}\x00", original)
+            return working
+
+        return "\n".join(emphasize_line(line) for line in lines)
+
+    def _zalo_owner_has_pending_confirmation(self, owner_key: str) -> bool:
+        """Return whether one Zalo chat is waiting for another user turn."""
+        now = dt_util.now()
+        pending_items = (
+            self._zalo_pending_notes.get(owner_key),
+            self._zalo_pending_creations.get(owner_key),
+            self._zalo_pending_deletions.get(owner_key),
+            self._zalo_pending_cameras.get(owner_key),
+            self._zalo_pending_calendar_events.get(owner_key),
+            self._zalo_pending_calendar_managements.get(owner_key),
+        )
+        return any(
+            item is not None and item.expires_at > now for item in pending_items
+        )
+
+    def _append_zalo_confirmation_timeout_notice(
+        self, context: ZaloWebhookContext, message: str
+    ) -> str:
+        """Append the common 120-second validity notice to pending prompts."""
+        response = str(message or "").rstrip()
+        if not response or not self._zalo_owner_has_pending_confirmation(
+            context.owner_key
+        ):
+            return response
+        if _request_language(context.text) == "en":
+            notice = (
+                "⏱️ Each confirmation step is valid for **120 seconds**. "
+                "After that, the pending request is cancelled automatically."
+            )
+        else:
+            notice = (
+                "⏱️ Mỗi bước xác nhận có hiệu lực trong **120 giây**. "
+                "Quá thời gian, yêu cầu đang chờ sẽ tự hủy."
+            )
+        if notice in response:
+            return response
+        return f"{response}\n\n{notice}"
 
     @staticmethod
     def _response_integrity_tokens(text: str) -> set[str]:
@@ -974,7 +1114,48 @@ class ConversationalAssistantManager(NoteManagerMixin):
         )
         tokens: set[str] = set()
         for pattern in patterns:
-            tokens.update(match.group(0).strip() for match in re.finditer(pattern, value))
+            tokens.update(
+                match.group(0).strip() for match in re.finditer(pattern, value)
+            )
+
+        # Confirmation commands must remain exactly typeable after an AI
+        # rewrite. If an editor replaces "Sửa" with a synonym, the user could
+        # follow the displayed instruction but the deterministic state machine
+        # would no longer recognize it.
+        confirmation_commands = (
+            "Xác nhận xóa",
+            "Xác nhận xoá",
+            "Xác nhận sửa",
+            "Xác nhận lưu",
+            "Bỏ qua",
+            "Bỏ yêu cầu",
+            "Không xóa",
+            "Không xoá",
+            "Không chụp",
+            "Giữ nguyên",
+            "Đồng ý",
+            "Tiếp tục",
+            "Tất cả",
+            "Sửa",
+            "Xóa",
+            "Xoá",
+            "Hủy",
+            "Huỷ",
+            "Có",
+            "Không",
+            "Confirm delete",
+            "Confirm edit",
+            "Cancel",
+            "Skip",
+            "Yes",
+            "No",
+        )
+        for command in confirmation_commands:
+            match = re.search(
+                rf"(?<!\w){re.escape(command)}(?!\w)", value, re.IGNORECASE
+            )
+            if match is not None:
+                tokens.add(match.group(0))
         return tokens
 
     async def _async_ai_polish_response(
@@ -2482,7 +2663,7 @@ class ConversationalAssistantManager(NoteManagerMixin):
                     parsed=parsed,
                     targets=targets,
                     expires_at=dt_util.now()
-                    + timedelta(minutes=PENDING_SELECTION_TIMEOUT_MINUTES),
+                    + timedelta(seconds=PENDING_CONFIRMATION_TIMEOUT_SECONDS),
                 )
             )
             return self._target_prompt_text(parsed, targets)
@@ -2515,7 +2696,7 @@ class ConversationalAssistantManager(NoteManagerMixin):
         )
         if not indexes:
             pending.expires_at = dt_util.now() + timedelta(
-                minutes=PENDING_SELECTION_TIMEOUT_MINUTES
+                seconds=PENDING_CONFIRMATION_TIMEOUT_SECONDS
             )
             return self._target_prompt_text(
                 pending.parsed, pending.targets, invalid=True
@@ -2569,7 +2750,7 @@ class ConversationalAssistantManager(NoteManagerMixin):
                 PendingZaloDeletion(
                     reminders=reminders,
                     expires_at=dt_util.now()
-                    + timedelta(minutes=PENDING_SELECTION_TIMEOUT_MINUTES),
+                    + timedelta(seconds=PENDING_CONFIRMATION_TIMEOUT_SECONDS),
                 )
             )
             return self._zalo_deletion_prompt(reminders)
@@ -2613,7 +2794,7 @@ class ConversationalAssistantManager(NoteManagerMixin):
         indexes = parse_target_selection(context.text, labels)
         if not indexes:
             pending.expires_at = dt_util.now() + timedelta(
-                minutes=PENDING_SELECTION_TIMEOUT_MINUTES
+                seconds=PENDING_CONFIRMATION_TIMEOUT_SECONDS
             )
             return self._zalo_deletion_prompt(
                 pending.reminders, invalid=True
@@ -2773,7 +2954,7 @@ class ConversationalAssistantManager(NoteManagerMixin):
         self._zalo_pending_cameras[context.owner_key] = PendingZaloCamera(
             cameras=cameras,
             expires_at=dt_util.now()
-            + timedelta(minutes=PENDING_SELECTION_TIMEOUT_MINUTES),
+            + timedelta(seconds=PENDING_CONFIRMATION_TIMEOUT_SECONDS),
         )
         return self._camera_selection_prompt(cameras)
 
@@ -3351,7 +3532,7 @@ class ConversationalAssistantManager(NoteManagerMixin):
         )
         if not selected:
             pending.expires_at = dt_util.now() + timedelta(
-                minutes=PENDING_SELECTION_TIMEOUT_MINUTES
+                seconds=PENDING_CONFIRMATION_TIMEOUT_SECONDS
             )
             return self._camera_selection_prompt(
                 pending.cameras, invalid=True
@@ -3364,7 +3545,7 @@ class ConversationalAssistantManager(NoteManagerMixin):
         available = [camera for camera in cameras if camera.available]
         if not available:
             pending.expires_at = dt_util.now() + timedelta(
-                minutes=PENDING_SELECTION_TIMEOUT_MINUTES
+                seconds=PENDING_CONFIRMATION_TIMEOUT_SECONDS
             )
             return (
                 "Các camera đã chọn hiện không khả dụng: "
@@ -4790,7 +4971,7 @@ class ConversationalAssistantManager(NoteManagerMixin):
                 request=parsed,
                 calendars=calendars,
                 expires_at=dt_util.now()
-                + timedelta(minutes=PENDING_SELECTION_TIMEOUT_MINUTES),
+                + timedelta(seconds=PENDING_CONFIRMATION_TIMEOUT_SECONDS),
                 ai_attempted_agents=attempted_agents,
             )
         )
@@ -4819,7 +5000,7 @@ class ConversationalAssistantManager(NoteManagerMixin):
         )
         if not indexes:
             pending.expires_at = dt_util.now() + timedelta(
-                minutes=PENDING_SELECTION_TIMEOUT_MINUTES
+                seconds=PENDING_CONFIRMATION_TIMEOUT_SECONDS
             )
             return self._calendar_selection_prompt(
                 pending.request, pending.calendars, invalid=True
@@ -4849,7 +5030,7 @@ class ConversationalAssistantManager(NoteManagerMixin):
 
         if not created:
             pending.expires_at = dt_util.now() + timedelta(
-                minutes=PENDING_SELECTION_TIMEOUT_MINUTES
+                seconds=PENDING_CONFIRMATION_TIMEOUT_SECONDS
             )
             return (
                 "⚠️ Chưa tạo được sự kiện trong lịch đã chọn: "
@@ -4934,7 +5115,7 @@ class ConversationalAssistantManager(NoteManagerMixin):
                 PendingZaloCalendarManagement(
                     events=manageable,
                     expires_at=dt_util.now() + timedelta(
-                        minutes=PENDING_SELECTION_TIMEOUT_MINUTES
+                        seconds=PENDING_CONFIRMATION_TIMEOUT_SECONDS
                     ),
                     ai_attempted_agents=attempted_agents,
                 )
@@ -5063,7 +5244,7 @@ class ConversationalAssistantManager(NoteManagerMixin):
             return "Đã đóng phần quản lý sự kiện."
 
         pending.expires_at = dt_util.now() + timedelta(
-            minutes=PENDING_SELECTION_TIMEOUT_MINUTES
+            seconds=PENDING_CONFIRMATION_TIMEOUT_SECONDS
         )
         if pending.phase == "action":
             if any(word in text for word in ("sua", "chinh sua", "edit", "update")):
@@ -5506,6 +5687,9 @@ class ConversationalAssistantManager(NoteManagerMixin):
                 reply = await self._async_prepare_zalo_reply(
                     context, reply, service_context
                 )
+                reply = self._append_zalo_confirmation_timeout_notice(
+                    context, reply
+                )
                 await self._async_send_zalo_webhook_reply(context, reply)
         except TimeoutError:
             _LOGGER.error(
@@ -5530,6 +5714,7 @@ class ConversationalAssistantManager(NoteManagerMixin):
                 context, self._zalo_background_error_text(language)
             )
         finally:
+            self._sync_pending_followup_trigger()
             typing_stop.set()
             try:
                 await typing_task
@@ -5620,6 +5805,9 @@ class ConversationalAssistantManager(NoteManagerMixin):
             reply = await self._async_prepare_zalo_reply(
                 context, reply, service_context
             )
+            reply = self._append_zalo_confirmation_timeout_notice(
+                context, reply
+            )
             reply_sent = await self._async_send_zalo_webhook_reply(
                 context, reply
             )
@@ -5629,6 +5817,7 @@ class ConversationalAssistantManager(NoteManagerMixin):
                 "reply_sent": reply_sent,
             }
         finally:
+            self._sync_pending_followup_trigger()
             typing_stop.set()
             await typing_task
 
@@ -6243,6 +6432,12 @@ class ConversationalAssistantManager(NoteManagerMixin):
             *self._pending_deletions.values(),
             *self._pending_voice_cameras.values(),
             *self._note_pending_items(),
+            *self._zalo_pending_notes.values(),
+            *self._zalo_pending_creations.values(),
+            *self._zalo_pending_deletions.values(),
+            *self._zalo_pending_cameras.values(),
+            *self._zalo_pending_calendar_events.values(),
+            *self._zalo_pending_calendar_managements.values(),
         ]
         if not pending_items:
             return
@@ -6295,6 +6490,23 @@ class ConversationalAssistantManager(NoteManagerMixin):
         for pending_id, pending in list(self._pending_voice_cameras.items()):
             if pending.expires_at <= now:
                 del self._pending_voice_cameras[pending_id]
+        for owner_key, pending in list(self._zalo_pending_creations.items()):
+            if pending.expires_at <= now:
+                del self._zalo_pending_creations[owner_key]
+        for owner_key, pending in list(self._zalo_pending_deletions.items()):
+            if pending.expires_at <= now:
+                del self._zalo_pending_deletions[owner_key]
+        for owner_key, pending in list(self._zalo_pending_cameras.items()):
+            if pending.expires_at <= now:
+                del self._zalo_pending_cameras[owner_key]
+        for owner_key, pending in list(self._zalo_pending_calendar_events.items()):
+            if pending.expires_at <= now:
+                del self._zalo_pending_calendar_events[owner_key]
+        for owner_key, pending in list(
+            self._zalo_pending_calendar_managements.items()
+        ):
+            if pending.expires_at <= now:
+                del self._zalo_pending_calendar_managements[owner_key]
         self._sync_pending_followup_trigger()
 
     def _clear_pending_for_source(self, source_keys: set[str]) -> None:
@@ -6329,7 +6541,7 @@ class ConversationalAssistantManager(NoteManagerMixin):
             source_keys=source_keys,
             created_at=now,
             expires_at=now
-            + timedelta(minutes=PENDING_SELECTION_TIMEOUT_MINUTES),
+            + timedelta(seconds=PENDING_CONFIRMATION_TIMEOUT_SECONDS),
         )
         self._pending[pending.pending_id] = pending
         self._sync_pending_followup_trigger()
@@ -6351,7 +6563,7 @@ class ConversationalAssistantManager(NoteManagerMixin):
             source_keys=source_keys,
             created_at=now,
             expires_at=now
-            + timedelta(minutes=PENDING_SELECTION_TIMEOUT_MINUTES),
+            + timedelta(seconds=PENDING_CONFIRMATION_TIMEOUT_SECONDS),
         )
         self._pending_deletions[pending.pending_id] = pending
         self._sync_pending_followup_trigger()
@@ -6377,7 +6589,7 @@ class ConversationalAssistantManager(NoteManagerMixin):
             phase="selection",
             created_at=now,
             expires_at=now
-            + timedelta(minutes=PENDING_SELECTION_TIMEOUT_MINUTES),
+            + timedelta(seconds=PENDING_CONFIRMATION_TIMEOUT_SECONDS),
         )
         self._pending_voice_cameras[pending.pending_id] = pending
         self._sync_pending_followup_trigger()
@@ -7001,7 +7213,7 @@ class ConversationalAssistantManager(NoteManagerMixin):
             available = [camera for camera in selected if camera.available]
             if not available:
                 pending.expires_at = dt_util.now() + timedelta(
-                    minutes=PENDING_SELECTION_TIMEOUT_MINUTES
+                    seconds=PENDING_CONFIRMATION_TIMEOUT_SECONDS
                 )
                 self._sync_pending_followup_trigger()
                 return await self._async_voice_response(
@@ -7014,7 +7226,7 @@ class ConversationalAssistantManager(NoteManagerMixin):
             pending.selected_cameras = available
             pending.phase = "confirmation"
             pending.expires_at = dt_util.now() + timedelta(
-                minutes=PENDING_SELECTION_TIMEOUT_MINUTES
+                seconds=PENDING_CONFIRMATION_TIMEOUT_SECONDS
             )
             self._sync_pending_followup_trigger()
             response = self._voice_camera_confirmation_prompt(
@@ -7034,7 +7246,7 @@ class ConversationalAssistantManager(NoteManagerMixin):
 
         if not self._is_voice_camera_confirmation(user_input.text):
             pending.expires_at = dt_util.now() + timedelta(
-                minutes=PENDING_SELECTION_TIMEOUT_MINUTES
+                seconds=PENDING_CONFIRMATION_TIMEOUT_SECONDS
             )
             self._sync_pending_followup_trigger()
             return await self._async_voice_response(
@@ -7081,7 +7293,7 @@ class ConversationalAssistantManager(NoteManagerMixin):
         )
         if not indexes:
             pending.expires_at = dt_util.now() + timedelta(
-                minutes=PENDING_SELECTION_TIMEOUT_MINUTES
+                seconds=PENDING_CONFIRMATION_TIMEOUT_SECONDS
             )
             self._sync_pending_followup_trigger()
             return await self._async_voice_response(
@@ -7121,7 +7333,7 @@ class ConversationalAssistantManager(NoteManagerMixin):
         indexes = parse_target_selection(selection, labels)
         if not indexes:
             pending.expires_at = dt_util.now() + timedelta(
-                minutes=PENDING_SELECTION_TIMEOUT_MINUTES
+                seconds=PENDING_CONFIRMATION_TIMEOUT_SECONDS
             )
             self._sync_pending_followup_trigger()
             return await self._async_voice_response(
