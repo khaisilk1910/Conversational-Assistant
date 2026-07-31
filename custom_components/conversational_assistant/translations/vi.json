@@ -17,7 +17,8 @@
           "zalo_conversation_agent_id": "Conversation agent dùng cho Zalo",
           "ai_search_agent_id": "AI Agent Search dùng để tìm kiếm Internet",
           "ai_image_task_entity_id": "AI Task Agent dùng để tạo ảnh",
-          "ai_agent_failover_enabled": "Tự động chuyển sang AI agent khác khi agent ưu tiên lỗi"
+          "ai_agent_failover_enabled": "Tự động chuyển sang AI agent khác khi agent ưu tiên lỗi",
+          "ai_camera_task_entity_id": "AI Task agent phân tích camera"
         },
         "data_description": {
           "confirm_targets": "Cả Voice Assist và lệnh Zalo sẽ quét theo yêu cầu rồi liệt kê điện thoại, nơi nhận Zalo và loa, sau đó chờ câu trả lời như: chọn 1 và 3.",
@@ -30,7 +31,8 @@
           "zalo_conversation_agent_id": "Chọn Home Assistant hoặc Conversation agent tùy chỉnh để hiểu lệnh Zalo. Cấu hình expose của Assist vẫn được áp dụng cho lịch và các điều khiển tích hợp sẵn.",
           "ai_search_agent_id": "Chọn Conversation agent có khả năng truy cập Internet. Agent này chỉ xử lý yêu cầu tìm kiếm bằng tiếng Việt hoặc tiếng Anh, tách riêng với agent điều khiển Home Assistant.",
           "ai_image_task_entity_id": "Chọn AI Task entity hỗ trợ action ai_task.generate_image. Khi người dùng yêu cầu tạo ảnh trên Zalo, integration gọi agent này và gửi ảnh hoàn thành trở lại đúng cuộc trò chuyện.",
-          "ai_agent_failover_enabled": "Mặc định bật. Tích hợp luôn thử agent đã chọn trước. Nếu agent lỗi, không trả kết quả hợp lệ hoặc hết thời gian chờ, tích hợp sẽ quét các agent tương thích đang có trong Home Assistant và thử lần lượt. Mỗi agent được tính lại thời gian chờ từ đầu; Zalo sẽ thông báo quá trình chuyển agent và tổng số agent đã thử."
+          "ai_agent_failover_enabled": "Mặc định bật. Tích hợp luôn thử agent đã chọn trước. Nếu agent lỗi, không trả kết quả hợp lệ hoặc hết thời gian chờ, tích hợp sẽ quét các agent tương thích đang có trong Home Assistant và thử lần lượt. Mỗi agent được tính lại thời gian chờ từ đầu; Zalo sẽ thông báo quá trình chuyển agent và tổng số agent đã thử.",
+          "ai_camera_task_entity_id": "Chọn AI Task entity hỗ trợ ai_task.generate_data và tệp đính kèm camera. Agent này phân tích camera được chọn từ Voice Assist và Zalo."
         }
       }
     },
@@ -91,18 +93,20 @@
       },
       "ai": {
         "title": "Cài đặt AI",
-        "description": "Chọn riêng agent trò chuyện Zalo, agent tìm kiếm Internet, AI Task Agent tạo ảnh và cơ chế AI dự phòng.",
+        "description": "Chọn riêng agent cho hội thoại Zalo, tìm kiếm Internet, tạo ảnh AI, phân tích camera và tự động chuyển AI dự phòng.",
         "data": {
           "zalo_conversation_agent_id": "Conversation agent dùng cho Zalo",
           "ai_search_agent_id": "AI Agent Search dùng để tìm kiếm Internet",
           "ai_image_task_entity_id": "AI Task Agent dùng để tạo ảnh",
-          "ai_agent_failover_enabled": "Tự động chuyển sang AI agent khác khi agent ưu tiên lỗi"
+          "ai_agent_failover_enabled": "Tự động chuyển sang AI agent khác khi agent ưu tiên lỗi",
+          "ai_camera_task_entity_id": "AI Task agent phân tích camera"
         },
         "data_description": {
           "zalo_conversation_agent_id": "Agent hiểu lệnh Zalo và điều khiển Home Assistant. Cấu hình expose của Assist vẫn được áp dụng.",
           "ai_search_agent_id": "Agent có khả năng truy cập Internet, xử lý riêng yêu cầu tìm kiếm tiếng Việt hoặc tiếng Anh.",
           "ai_image_task_entity_id": "AI Task entity hỗ trợ ai_task.generate_image. Ảnh tạo thành công được gửi lại đúng cuộc trò chuyện Zalo bằng zalo_bot.send_image.",
-          "ai_agent_failover_enabled": "Mặc định bật. Tích hợp luôn thử agent đã chọn trước. Nếu agent lỗi, không trả kết quả hợp lệ hoặc hết thời gian chờ, tích hợp sẽ quét các agent tương thích đang có trong Home Assistant và thử lần lượt. Mỗi agent được tính lại thời gian chờ từ đầu; Zalo sẽ thông báo quá trình chuyển agent và tổng số agent đã thử."
+          "ai_agent_failover_enabled": "Mặc định bật. Tích hợp luôn thử agent đã chọn trước. Nếu agent lỗi, không trả kết quả hợp lệ hoặc hết thời gian chờ, tích hợp sẽ quét các agent tương thích đang có trong Home Assistant và thử lần lượt. Mỗi agent được tính lại thời gian chờ từ đầu; Zalo sẽ thông báo quá trình chuyển agent và tổng số agent đã thử.",
+          "ai_camera_task_entity_id": "AI Task entity hỗ trợ ai_task.generate_data và tệp đính kèm camera. Tích hợp ưu tiên agent đã chọn, sau đó thử các AI Task tương thích khi bật AI dự phòng."
         }
       },
       "tts": {
