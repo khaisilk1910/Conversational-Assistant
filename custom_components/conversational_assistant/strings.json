@@ -18,7 +18,8 @@
           "ai_search_agent_id": "AI Agent Search for Internet queries",
           "ai_image_task_entity_id": "AI Task agent for image generation",
           "ai_agent_failover_enabled": "Automatically try other AI agents when the preferred agent fails",
-          "ai_camera_task_entity_id": "AI Task agent for camera analysis"
+          "ai_camera_task_entity_id": "AI Task agent for camera analysis",
+          "ai_camera_instructions": "Camera analysis instructions"
         },
         "data_description": {
           "confirm_targets": "Voice Assist and Zalo commands discover phones and speakers on demand, list them with Zalo destinations, then wait for a reply such as: choose 1 and 3.",
@@ -32,7 +33,8 @@
           "ai_search_agent_id": "Choose an Internet-capable Conversation agent. It handles Vietnamese and English search requests separately from the agent used to control Home Assistant.",
           "ai_image_task_entity_id": "Choose an AI Task entity that supports ai_task.generate_image. Image requests received from Zalo are sent to this agent and the completed image is returned to the same conversation.",
           "ai_agent_failover_enabled": "Enabled by default. The integration always tries the selected agent first. If it errors, returns no usable result, or times out, compatible agents available in Home Assistant are tried in sequence. Every agent receives a fresh timeout window, and Zalo reports the switch and total number of attempted agents.",
-          "ai_camera_task_entity_id": "Choose an AI Task entity that supports ai_task.generate_data with camera attachments. It analyzes selected cameras for Voice Assist and Zalo."
+          "ai_camera_task_entity_id": "Choose an AI Task entity that supports ai_task.generate_data with camera attachments. It analyzes selected cameras for Voice Assist and Zalo.",
+          "ai_camera_instructions": "Instructions sent to ai_task.generate_data for every selected camera. The default is the same camera-analysis prompt used in earlier versions; leaving it empty restores that default."
         }
       }
     },
@@ -114,20 +116,22 @@
       },
       "ai": {
         "title": "AI settings",
-        "description": "Select separate agents for Zalo conversation, Internet search, AI image generation, camera analysis, and automatic AI failover.",
+        "description": "Select separate agents for Zalo conversation, Internet search, AI image generation, and camera analysis; edit camera instructions and configure automatic AI failover.",
         "data": {
           "zalo_conversation_agent_id": "Conversation agent used for Zalo",
           "ai_search_agent_id": "AI Agent Search for Internet queries",
           "ai_image_task_entity_id": "AI Task agent for image generation",
           "ai_agent_failover_enabled": "Automatically try other AI agents when the preferred agent fails",
-          "ai_camera_task_entity_id": "AI Task agent for camera analysis"
+          "ai_camera_task_entity_id": "AI Task agent for camera analysis",
+          "ai_camera_instructions": "Camera analysis instructions"
         },
         "data_description": {
           "zalo_conversation_agent_id": "The agent that interprets Zalo commands and controls Home Assistant. Assist exposure settings are still enforced.",
           "ai_search_agent_id": "An Internet-capable agent that separately handles Vietnamese and English search requests.",
           "ai_image_task_entity_id": "An AI Task entity supporting ai_task.generate_image. Completed images are returned to the same Zalo conversation with zalo_bot.send_image.",
           "ai_agent_failover_enabled": "Enabled by default. The integration always tries the selected agent first. If it errors, returns no usable result, or times out, compatible agents available in Home Assistant are tried in sequence. Every agent receives a fresh timeout window, and Zalo reports the switch and total number of attempted agents.",
-          "ai_camera_task_entity_id": "An AI Task entity supporting ai_task.generate_data and camera attachments. The selected agent is tried first; compatible AI Task entities are used as failover when enabled."
+          "ai_camera_task_entity_id": "An AI Task entity supporting ai_task.generate_data and camera attachments. The selected agent is tried first; compatible AI Task entities are used as failover when enabled.",
+          "ai_camera_instructions": "Editable instructions sent to the AI Task for each selected camera. The default is the exact prompt used in earlier versions; leaving it empty restores the default."
         }
       },
       "tts": {

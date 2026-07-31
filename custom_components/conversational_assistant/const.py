@@ -34,6 +34,7 @@ CONF_ZALO_CONVERSATION_AGENT_ID = "zalo_conversation_agent_id"
 CONF_AI_SEARCH_AGENT_ID = "ai_search_agent_id"
 CONF_AI_IMAGE_TASK_ENTITY_ID = "ai_image_task_entity_id"
 CONF_AI_CAMERA_TASK_ENTITY_ID = "ai_camera_task_entity_id"
+CONF_AI_CAMERA_INSTRUCTIONS = "ai_camera_instructions"
 CONF_AI_AGENT_FAILOVER_ENABLED = "ai_agent_failover_enabled"
 
 # Legacy single-Zalo options, retained for automatic migration.
@@ -197,8 +198,10 @@ SEARCH_SENTENCES = [
 
 # Camera analysis uses AI Task generate_data with the selected camera media
 # source attached. Each selected camera is processed independently so one
-# unavailable camera or provider failure does not discard other results.
-CAMERA_ANALYSIS_INSTRUCTIONS = (
+# unavailable camera or provider failure does not discard other results. This
+# exact text remains the default for existing installations and can be edited
+# from AI settings.
+DEFAULT_AI_CAMERA_INSTRUCTIONS = (
     "Phân tích camera nếu có người hãy đếm số người, mô tả giới tính, độ tuổi, "
     "đặc điểm nhận dạng mũ nón đầu tóc trang phục, xe đang ở bên cạnh hoặc điều "
     "khiển là xe gì. Nếu có động vật hãy mô tả loài gì, đặc điểm loài. Bỏ qua các "
@@ -206,6 +209,10 @@ CAMERA_ANALYSIS_INSTRUCTIONS = (
     "người, động vật. Chỉ trả lại nội dung trên một dòng duy nhất ( không ngắt "
     "dòng). Mô tả ngắn gọn đủ ý không thưa gửi dài dòng."
 )
+
+# Backward-compatible alias for third-party imports. Runtime code reads the
+# configurable manager property instead of this constant.
+CAMERA_ANALYSIS_INSTRUCTIONS = DEFAULT_AI_CAMERA_INSTRUCTIONS
 
 CAMERA_ANALYSIS_SENTENCES = [
     "[hãy ]phân tích cam",

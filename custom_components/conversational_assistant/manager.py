@@ -61,12 +61,12 @@ from .const import (
     AI_TASK_DOMAIN,
     AI_TASK_SERVICE_GENERATE_DATA,
     AI_TASK_SERVICE_GENERATE_IMAGE,
-    CAMERA_ANALYSIS_INSTRUCTIONS,
     CAMERA_ANALYSIS_SENTENCES,
     CAMERA_ANALYSIS_TIMEOUT_SECONDS,
     CALENDAR_REFRESH_INTERVAL_MINUTES,
     CAMERA_SENTENCES,
     CONF_AI_AGENT_FAILOVER_ENABLED,
+    CONF_AI_CAMERA_INSTRUCTIONS,
     CONF_AI_CAMERA_TASK_ENTITY_ID,
     CONF_AI_IMAGE_TASK_ENTITY_ID,
     CONF_AI_SEARCH_AGENT_ID,
@@ -99,6 +99,7 @@ from .const import (
     CONF_ZALO_WEBHOOK_ENABLED,
     CREATE_SENTENCES,
     DEFAULT_AI_AGENT_FAILOVER_ENABLED,
+    DEFAULT_AI_CAMERA_INSTRUCTIONS,
     DEFAULT_AI_CAMERA_TASK_ENTITY_ID,
     DEFAULT_AI_IMAGE_TASK_ENTITY_ID,
     DEFAULT_AI_SEARCH_AGENT_ID,
@@ -775,6 +776,18 @@ class ConversationalAssistantManager(NoteManagerMixin):
         return configured or self.ai_image_task_entity_id
 
     @property
+    def ai_camera_instructions(self) -> str:
+        """Return configurable instructions used for every camera analysis."""
+        configured = str(
+            self._option(
+                CONF_AI_CAMERA_INSTRUCTIONS,
+                DEFAULT_AI_CAMERA_INSTRUCTIONS,
+            )
+            or ""
+        ).strip()
+        return configured or DEFAULT_AI_CAMERA_INSTRUCTIONS
+
+    @property
     def ai_agent_failover_enabled(self) -> bool:
         """Return whether failed AI requests rotate through available agents."""
         return bool(
@@ -1212,17 +1225,202 @@ class ConversationalAssistantManager(NoteManagerMixin):
 
     @staticmethod
     def _zalo_emphasize_important_text(text: str) -> str:
-        """Apply safe Zalo Markdown emphasis to every text response.
+        """Apply one idempotent Markdown formatter to every Zalo message.
 
-        Existing ``**...**`` spans are protected first, so the formatter can
-        be called repeatedly without producing nested or broken Markdown.
-        Confirmation words are emphasized on instruction lines across every
-        Zalo workflow, including calendar, reminder, camera, note, and target
-        selection flows.
+        The formatter deliberately distinguishes a confirmation command from
+        the same word used in a normal sentence. For example, ``có`` in
+        ``có thể gửi Tất cả`` is left untouched, while ``Có`` in
+        ``Trả lời Có hoặc Không`` is emphasized. Existing valid Markdown is
+        preserved, stray markers are removed, and wrongly emphasized command
+        words are repaired before the common rules are applied.
         """
         message = str(text or "").replace("\r\n", "\n").strip()
         if not message:
             return message
+
+        confirmation_commands = (
+            "xác nhận xóa",
+            "xác nhận xoá",
+            "xác nhận sửa",
+            "xác nhận cập nhật",
+            "xác nhận lưu",
+            "xác nhận gửi",
+            "xác nhận chụp",
+            "xác nhận tạo",
+            "xac nhan xoa",
+            "xac nhan sua",
+            "xac nhan cap nhat",
+            "xac nhan luu",
+            "xac nhan gui",
+            "xac nhan chup",
+            "xac nhan tao",
+            "không xóa",
+            "không xoá",
+            "không chụp",
+            "không gửi",
+            "không lưu",
+            "không sửa",
+            "không tạo",
+            "khong xoa",
+            "khong chup",
+            "khong gui",
+            "khong luu",
+            "khong sua",
+            "khong tao",
+            "bỏ yêu cầu vừa rồi",
+            "bỏ yêu cầu",
+            "bỏ qua",
+            "bo yeu cau vua roi",
+            "bo yeu cau",
+            "bo qua",
+            "giữ nguyên",
+            "đồng ý",
+            "tất cả",
+            "tiếp tục",
+            "giu nguyen",
+            "dong y",
+            "tat ca",
+            "tiep tuc",
+            "hủy",
+            "huỷ",
+            "huy",
+            "sửa",
+            "xóa",
+            "xoá",
+            "có",
+            "không",
+            "confirm delete",
+            "confirm edit",
+            "confirm update",
+            "confirm save",
+            "confirm send",
+            "confirm capture",
+            "confirm create",
+            "never mind",
+            "cancel request",
+            "cancel",
+            "skip",
+            "yes",
+            "no",
+            "edit",
+            "update",
+            "delete",
+            "remove",
+            "confirm",
+            "continue",
+            "stop",
+            "all",
+        )
+        normalized_commands = {
+            normalize_text(command) for command in confirmation_commands
+        }
+
+        instruction_terms = (
+            "trả lời",
+            "hãy trả lời",
+            "vui lòng trả lời",
+            "phản hồi",
+            "hãy phản hồi",
+            "vui lòng phản hồi",
+            "gửi",
+            "hãy gửi",
+            "vui lòng gửi",
+            "nhập",
+            "hãy nhập",
+            "vui lòng nhập",
+            "nói",
+            "hãy nói",
+            "vui lòng nói",
+            "chọn",
+            "hãy chọn",
+            "vui lòng chọn",
+            "reply",
+            "please reply",
+            "respond",
+            "please respond",
+            "send",
+            "please send",
+            "type",
+            "please type",
+            "say",
+            "please say",
+            "choose",
+            "please choose",
+            "enter",
+            "please enter",
+        )
+        repair_instruction_terms = (
+            *instruction_terms,
+            "để",
+            "như",
+            "ví dụ",
+            "to",
+            "such as",
+            "for example",
+        )
+        instruction_pattern = "|".join(
+            sorted(
+                (re.escape(item) for item in instruction_terms),
+                key=len,
+                reverse=True,
+            )
+        )
+        repair_instruction_pattern = "|".join(
+            sorted(
+                (re.escape(item) for item in repair_instruction_terms),
+                key=len,
+                reverse=True,
+            )
+        )
+        connector_pattern = r"hoặc|hay|và|or|and"
+        prefix_pattern = re.compile(
+            rf"(?:^|(?:{repair_instruction_pattern})\s+|"
+            rf"(?:{connector_pattern})\s+|[,;:/|\(\[\"'“‘]\s*)$",
+            re.IGNORECASE,
+        )
+        suffix_pattern = re.compile(
+            rf"^\s*(?:$|[.,;:!?/|\)\]\"'”’]|"
+            rf"(?:{connector_pattern}|để|nếu|then|if)\b)",
+            re.IGNORECASE,
+        )
+
+        def is_command_context(line: str, start: int, end: int) -> bool:
+            """Return whether one exact command is presented as a choice."""
+            return bool(prefix_pattern.search(line[:start])) and bool(
+                suffix_pattern.search(line[end:])
+            )
+
+        def repair_existing_bold(line: str) -> str:
+            """Keep valid spans, unbold misplaced commands, remove stray **."""
+            protected: list[str] = []
+
+            def replace(match: re.Match[str]) -> str:
+                body = match.group("body").strip()
+                if (
+                    normalize_text(body) in normalized_commands
+                    and not is_command_context(line, match.start(), match.end())
+                ):
+                    return body
+                protected.append(f"**{body}**")
+                return f"\x00CA_BOLD_{len(protected) - 1}\x00"
+
+            working = re.sub(
+                r"\*\*(?P<body>[^*\n]+?)\*\*",
+                replace,
+                line,
+            )
+            # Any markers left here were unmatched or nested incorrectly.
+            working = working.replace("**", "")
+            working = re.sub(r"(?<=\w)\*(?=\s|$|[.,;:!?])", "", working)
+            working = re.sub(r"(?<!\S)\*(?=\S)", "", working)
+            for index, original in enumerate(protected):
+                working = working.replace(
+                    f"\x00CA_BOLD_{index}\x00", original
+                )
+            return working
+
+        lines = [repair_existing_bold(line) for line in message.split("\n")]
+        message = "\n".join(lines)
 
         labels = (
             "Ngày diễn ra",
@@ -1269,144 +1467,29 @@ class ConversationalAssistantManager(NoteManagerMixin):
             message,
         )
 
-        lines = message.split("\n")
-
-        always_commands = (
-            "xác nhận xóa",
-            "xác nhận xoá",
-            "xác nhận sửa",
-            "xác nhận cập nhật",
-            "xác nhận lưu",
-            "xác nhận gửi",
-            "xác nhận chụp",
-            "xác nhận tạo",
-            "xac nhan xoa",
-            "xac nhan sua",
-            "xac nhan cap nhat",
-            "xac nhan luu",
-            "xac nhan gui",
-            "xac nhan chup",
-            "xac nhan tao",
-            "không xóa",
-            "không xoá",
-            "không chụp",
-            "không lưu",
-            "không sửa",
-            "không tạo",
-            "khong xoa",
-            "khong chup",
-            "khong luu",
-            "khong sua",
-            "khong tao",
-            "bỏ yêu cầu vừa rồi",
-            "bỏ yêu cầu",
-            "bỏ qua",
-            "bo yeu cau vua roi",
-            "bo yeu cau",
-            "bo qua",
-            "hủy",
-            "huỷ",
-            "huy",
-            "confirm delete",
-            "confirm edit",
-            "confirm update",
-            "confirm save",
-            "confirm send",
-            "confirm capture",
-            "confirm create",
-            "never mind",
-            "cancel request",
-            "cancel",
-            "skip",
+        command_pattern = "|".join(
+            sorted(
+                (re.escape(item) for item in confirmation_commands),
+                key=len,
+                reverse=True,
+            )
         )
-        instruction_commands = (
-            "giữ nguyên",
-            "đồng ý",
-            "xác nhận",
-            "tất cả",
-            "tiếp tục",
-            "sửa",
-            "xóa",
-            "xoá",
-            "có",
-            "không",
-            "giu nguyen",
-            "dong y",
-            "xac nhan",
-            "tat ca",
-            "tiep tuc",
-            "sua",
-            "xoa",
-            "co",
-            "khong",
-            "yes",
-            "no",
-            "edit",
-            "update",
-            "delete",
-            "remove",
-            "confirm",
-            "continue",
-            "stop",
-            "all",
+        choice_pattern = re.compile(
+            rf"(?P<prefix>^|(?:{instruction_pattern})\s+|"
+            rf"(?:{connector_pattern})\s+|[,;:/|\(\[\"'“‘]\s*)"
+            rf"(?P<command>{command_pattern})"
+            rf"(?P<suffix>(?=\s*(?:$|[.,;:!?/|\)\]\"'”’]|"
+            rf"(?:{connector_pattern}|để|nếu|then|if)\b)))",
+            re.IGNORECASE,
         )
-        # ``normalize_text`` removes Vietnamese accents, so these markers
-        # are deliberately stored in normalized form.
-        instruction_markers = (
-            "tra loi",
-            "hay tra loi",
-            "vui long tra loi",
-            "phan hoi",
-            "hay phan hoi",
-            "vui long phan hoi",
-            "gui ",
-            "hay gui",
-            "vui long gui",
-            "nhap ",
-            "hay nhap",
-            "vui long nhap",
-            "noi ",
-            "hay noi",
-            "vui long noi",
-            "chon ",
-            "hay chon",
-            "vui long chon",
-            "reply",
-            "respond",
-            "send ",
-            "type ",
-            "say ",
-            "choose ",
+        cancel_after_purpose_pattern = re.compile(
+            r"(?P<prefix>\b(?:để|to)\s+)"
+            r"(?P<command>hủy|huỷ|huy|cancel|skip|never mind)"
+            r"(?=\s*(?:$|[.,;:!?]))",
+            re.IGNORECASE,
         )
 
-        first_index = next(
-            (index for index, line in enumerate(lines) if line.strip()), None
-        )
-        if first_index is not None:
-            first = lines[first_index].strip()
-            normalized_first = normalize_text(first)
-            if (
-                "**" not in first
-                and len(first) <= 140
-                and not re.match(r"^\d+[.)-]\s", first)
-                and not any(
-                    marker in normalized_first
-                    for marker in instruction_markers
-                )
-            ):
-                emoji_match = re.match(
-                    r"^(?P<emoji>[^\w\s]{1,4}\s*)(?P<body>.+)$", first
-                )
-                if emoji_match:
-                    first = (
-                        f"{emoji_match.group('emoji')}"
-                        f"**{emoji_match.group('body').strip()}**"
-                    )
-                else:
-                    first = f"**{first}**"
-                lines[first_index] = first
-
-        def emphasize_line(line: str) -> str:
+        def emphasize_choices(line: str) -> str:
             protected: list[str] = []
 
             def protect(match: re.Match[str]) -> str:
@@ -1414,25 +1497,27 @@ class ConversationalAssistantManager(NoteManagerMixin):
                 return f"\x00CA_BOLD_{len(protected) - 1}\x00"
 
             working = re.sub(r"\*\*[^*\n]+?\*\*", protect, line)
-            normalized_line = normalize_text(working)
-            commands = list(always_commands)
-            if any(marker in normalized_line for marker in instruction_markers):
-                commands.extend(instruction_commands)
-            pattern = "|".join(
-                sorted((re.escape(item) for item in commands), key=len, reverse=True)
+            working = choice_pattern.sub(
+                lambda match: (
+                    f"{match.group('prefix')}**{match.group('command')}**"
+                ),
+                working,
             )
-            if pattern:
-                working = re.sub(
-                    rf"(?<![\w*])(?:{pattern})(?![\w*])",
-                    lambda match: f"**{match.group(0)}**",
-                    working,
-                    flags=re.IGNORECASE,
-                )
+            working = cancel_after_purpose_pattern.sub(
+                lambda match: (
+                    f"{match.group('prefix')}**{match.group('command')}**"
+                ),
+                working,
+            )
             for index, original in enumerate(protected):
-                working = working.replace(f"\x00CA_BOLD_{index}\x00", original)
+                working = working.replace(
+                    f"\x00CA_BOLD_{index}\x00", original
+                )
             return working
 
-        return "\n".join(emphasize_line(line) for line in lines)
+        return "\n".join(
+            emphasize_choices(line) for line in message.split("\n")
+        )
 
     def _zalo_owner_has_pending_confirmation(self, owner_key: str) -> bool:
         """Return whether one Zalo chat is waiting for another user turn."""
@@ -2752,41 +2837,51 @@ class ConversationalAssistantManager(NoteManagerMixin):
 
     @staticmethod
     def _integration_help_text() -> str:
-        """Return a compact bilingual guide for Voice Assist and Zalo."""
+        """Return the shared concise guide for Voice Assist and Zalo."""
         return (
-            "HƯỚNG DẪN / CONVERSATIONAL ASSISTANT GUIDE\n"
-            "Có thể dùng tiếng Việt hoặc English trên Voice Assistant và Zalo.\n\n"
-            "1. NHÀ THÔNG MINH / SMART HOME\n"
-            "• Bật đèn phòng khách. / Turn on the living room light.\n"
-            "• Kiểm tra tầng 2. / Check which devices are on upstairs.\n\n"
-            "2. THỜI TIẾT VÀ LỊCH / WEATHER & CALENDAR\n"
-            "• Thời tiết hôm nay thế nào? / What's the weather today?\n"
-            "• Sự kiện trong 15 ngày nữa. / Events in the next 15 days.\n"
-            "• Tạo sự kiện họp nhóm lúc 18h30 ngày mai; sau đó chọn lịch.\n\n"
-            "3. TÌM KIẾM INTERNET / INTERNET SEARCH\n"
-            "• Tìm thông tin giá vàng hôm nay. / Search for today's gold price.\n"
-            "• Tra cứu tin mới về Home Assistant. / Look up the latest Home Assistant news.\n\n"
-            "4. TẠO ẢNH AI TRÊN ZALO / AI IMAGE ON ZALO\n"
-            "• Tạo ảnh một chú mèo phi hành gia.\n"
-            "• Generate an image of a cozy smart home at night.\n\n"
-            "5. CAMERA\n"
-            "• Chụp camera. / Take a camera photo.\n"
-            "• Lấy ảnh camera sân trước. / Capture the front yard camera.\n"
-            "• Phân tích camera; có thể chọn nhiều camera và gửi kết quả kèm ảnh lên Zalo.\n"
-            "• Analyze camera. / Check camera.\n\n"
-            "6. NHẮC HẸN / REMINDERS\n"
-            "• Nhắc tôi 30 phút nữa uống thuốc.\n"
-            "• Remind me to take medicine in 30 minutes.\n"
-            "• Danh sách nhắc hẹn. / Show my reminders.\n\n"
-            "7. GHI CHÚ / NOTES\n"
-            "• Ghi nhớ mã tủ đồ là 2468. / Remember that the locker code is 2468.\n"
-            "• Danh sách ghi chú. / Show my notes.\n\n"
-            "8. BỘ NHỚ CÂU LỆNH / COMMAND MEMORY\n"
-            "• Học câu lệnh xem cổng để chụp ảnh camera.\n"
-            "• Học câu lệnh vẽ giúp tôi để tạo ảnh.\n"
-            "• Learn command check the gate to take a camera photo.\n"
-            "• Xóa câu lệnh xem cổng. / Delete command check the gate.\n\n"
-            "Nói 'hướng dẫn sử dụng tích hợp' hoặc 'how to use the integration' để xem lại."
+            "📘 **HƯỚNG DẪN SỬ DỤNG CONVERSATIONAL ASSISTANT**\n"
+            "🇻🇳 Dùng tiếng Việt hoặc 🇬🇧 English trên Voice Assist và Zalo.\n\n"
+            "1️⃣ **🏠 NHÀ THÔNG MINH**\n"
+            "• Điều khiển thiết bị; kiểm tra trạng thái theo thiết bị, phòng, khu vực hoặc sàn.\n"
+            "• Ví dụ: `Bật đèn phòng khách`; `Kiểm tra thiết bị đang bật ở tầng 2`.\n\n"
+            "2️⃣ **🌦️ THỜI TIẾT**\n"
+            "• Hỏi thời tiết từ các entity đang có trong Home Assistant.\n"
+            "• Ví dụ: `Thời tiết hôm nay thế nào?`; `Will it rain tomorrow?`.\n\n"
+            "3️⃣ **📅 LỊCH VÀ SỰ KIỆN**\n"
+            "• Tra cứu, tạo, sửa hoặc xóa sự kiện; kết quả được nhóm theo từng lịch.\n"
+            "• Ví dụ: `Sự kiện trong 15 ngày tới`; `Tạo sự kiện họp lúc 18h30 ngày mai`.\n"
+            "• Sau tra cứu, phản hồi **Sửa**, **Xóa** hoặc **Bỏ qua** khi được hỏi.\n\n"
+            "4️⃣ **🔔 SENSOR VÀ THÔNG BÁO LỊCH**\n"
+            "• Calendar settings cho phép chọn lịch, số ngày quét, giờ gửi và nơi nhận Mobile/Zalo.\n"
+            "• Ví dụ: chọn 30 ngày, giờ 07:00 và bật thông báo khi có sự kiện.\n\n"
+            "5️⃣ **⏰ NHẮC HẸN**\n"
+            "• Tạo một lần hoặc lặp lại; gửi tới Mobile, Zalo và loa TTS; có thể xem hoặc xóa.\n"
+            "• Ví dụ: `Nhắc tôi uống thuốc sau 30 phút`; `Nhắc tập thể dục mỗi thứ Hai lúc 7 giờ`.\n\n"
+            "6️⃣ **📝 GHI CHÚ BẢO MẬT**\n"
+            "• Thêm, xem, sửa, xóa; chọn Mức 1 bảo mật bằng pass hoặc Mức 2 công khai.\n"
+            "• Ví dụ: `Ghi nhớ mã tủ đồ là 2468`; `Danh sách ghi chú`; `Sửa ghi chú`.\n\n"
+            "7️⃣ **📸 CHỤP ẢNH CAMERA**\n"
+            "• Chọn một hoặc nhiều camera rồi gửi ảnh lên Zalo.\n"
+            "• Ví dụ: `Chụp camera`; sau đó trả lời `1 3 10` hoặc **Tất cả**.\n\n"
+            "8️⃣ **🧠 PHÂN TÍCH CAMERA BẰNG AI**\n"
+            "• Chụp và phân tích nhiều camera; instructions có thể sửa tại AI settings.\n"
+            "• Ví dụ: `Phân tích camera`; `Analyze camera`; sau đó chọn camera cần xem.\n\n"
+            "9️⃣ **🔎 TÌM KIẾM INTERNET**\n"
+            "• Dùng AI Agent Search riêng để tìm và tổng hợp thông tin Việt/Anh.\n"
+            "• Ví dụ: `Tìm thông tin giá vàng hôm nay`; `Search for the latest Home Assistant news`.\n\n"
+            "🔟 **🎨 TẠO ẢNH AI TRÊN ZALO**\n"
+            "• Tạo ảnh từ mô tả và gửi lại đúng cuộc trò chuyện Zalo.\n"
+            "• Ví dụ: `Tạo ảnh một chú mèo phi hành gia`; `Generate an image of a smart home`.\n\n"
+            "1️⃣1️⃣ **🧩 BỘ NHỚ CÂU LỆNH**\n"
+            "• Dạy alias mới, xem danh sách hoặc xóa câu lệnh đã học.\n"
+            "• Ví dụ: `Học câu lệnh xem cổng để chụp ảnh camera`; `Xóa câu lệnh xem cổng`.\n\n"
+            "1️⃣2️⃣ **🤖 AI DỰ PHÒNG VÀ TRẠNG THÁI XỬ LÝ**\n"
+            "• Agent đã chọn luôn được thử trước; khi lỗi có thể tự chuyển agent khác.\n"
+            "• Yêu cầu lâu sẽ báo: ⏳ **Đang xử lý thông tin yêu cầu. Hãy chờ phản hồi.**\n\n"
+            "1️⃣3️⃣ **✅ CHỌN VÀ XÁC NHẬN**\n"
+            "• Có thể chọn nhiều mục bằng `1 3 10`, tên mục hoặc **Tất cả**.\n"
+            "• Dùng đúng từ khóa bôi đậm như **Có**, **Không**, **Hủy**, **Bỏ qua**; mỗi bước có hiệu lực 120 giây.\n\n"
+            "💡 Gửi `Hướng dẫn sử dụng tích hợp` để xem lại nội dung này."
         )
 
     def _zalo_upcoming_reminders(
@@ -3571,7 +3666,7 @@ class ConversationalAssistantManager(NoteManagerMixin):
                             "task_name": f"Phân tích cam - {camera.display_name}",
                             "entity_id": entity_id,
                             "attachments": self._camera_ai_attachment(camera),
-                            "instructions": CAMERA_ANALYSIS_INSTRUCTIONS,
+                            "instructions": self.ai_camera_instructions,
                         },
                         blocking=True,
                         context=service_context,
@@ -3864,7 +3959,9 @@ class ConversationalAssistantManager(NoteManagerMixin):
                         "type": context.thread_type,
                         "ttl": 0,
                         "image_path": image_path,
-                        "message": f"Đã chụp ảnh {camera_name}",
+                        "message": self._zalo_emphasize_important_text(
+                            f"📷 **Đã chụp ảnh:** {camera_name}"
+                        ),
                         "thread_id": context.thread_id,
                         "account_selection": account_selection,
                     },
@@ -3964,7 +4061,9 @@ class ConversationalAssistantManager(NoteManagerMixin):
                             "type": thread_type,
                             "ttl": 0,
                             "image_path": image_path,
-                            "message": f"Đã chụp ảnh {camera_name}",
+                            "message": self._zalo_emphasize_important_text(
+                            f"📷 **Đã chụp ảnh:** {camera_name}"
+                        ),
                             "thread_id": thread_id,
                             "account_selection": account_selection,
                         },
@@ -4019,7 +4118,9 @@ class ConversationalAssistantManager(NoteManagerMixin):
                         "type": context.thread_type,
                         "ttl": 0,
                         "image_path": item.image_path,
-                        "message": self._camera_analysis_zalo_message(item),
+                        "message": self._zalo_emphasize_important_text(
+                            self._camera_analysis_zalo_message(item)
+                        ),
                         "thread_id": context.thread_id,
                         "account_selection": account_selection,
                     },
@@ -4080,7 +4181,9 @@ class ConversationalAssistantManager(NoteManagerMixin):
                             "type": thread_type,
                             "ttl": 0,
                             "image_path": item.image_path,
-                            "message": self._camera_analysis_zalo_message(item),
+                            "message": self._zalo_emphasize_important_text(
+                                self._camera_analysis_zalo_message(item)
+                            ),
                             "thread_id": thread_id,
                             "account_selection": account_selection,
                         },
@@ -4922,7 +5025,7 @@ class ConversationalAssistantManager(NoteManagerMixin):
                     "type": context.thread_type,
                     "ttl": 0,
                     "image_path": image_path,
-                    "message": message,
+                    "message": self._zalo_emphasize_important_text(message),
                     "thread_id": context.thread_id,
                     "account_selection": account_selection,
                 },
@@ -6881,8 +6984,8 @@ class ConversationalAssistantManager(NoteManagerMixin):
     def _zalo_processing_text(language: str) -> str:
         """Return the immediate acknowledgement for a slow request."""
         if language == "en":
-            return "⏳ Processing your request. Please wait for the response."
-        return "⏳ Đang xử lý thông tin yêu cầu. Hãy chờ phản hồi."
+            return "⏳ **Processing your request. Please wait for the response.**"
+        return "⏳ **Đang xử lý thông tin yêu cầu. Hãy chờ phản hồi.**"
 
     @staticmethod
     def _zalo_timeout_text(action: str, language: str) -> str:
@@ -7447,8 +7550,8 @@ class ConversationalAssistantManager(NoteManagerMixin):
                     {
                         "type": zalo_type,
                         "ttl": 0,
-                        "message": (
-                            "⏰ Nhắc nhở:\n"
+                        "message": self._zalo_emphasize_important_text(
+                            "⏰ **Nhắc nhở**\n"
                             f"📝 **{reminder.message.strip()}**"
                         ),
                         "thread_id": thread_id,

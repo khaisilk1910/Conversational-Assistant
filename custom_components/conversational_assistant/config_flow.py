@@ -20,6 +20,7 @@ from homeassistant.helpers import selector
 from .const import (
     AI_TASK_DOMAIN,
     CONF_AI_AGENT_FAILOVER_ENABLED,
+    CONF_AI_CAMERA_INSTRUCTIONS,
     CONF_AI_CAMERA_TASK_ENTITY_ID,
     CONF_AI_IMAGE_TASK_ENTITY_ID,
     CONF_AI_SEARCH_AGENT_ID,
@@ -47,6 +48,7 @@ from .const import (
     CONF_ZALO_WEBHOOK_BOT_ACCOUNT_ID,
     CONF_ZALO_WEBHOOK_ENABLED,
     DEFAULT_AI_AGENT_FAILOVER_ENABLED,
+    DEFAULT_AI_CAMERA_INSTRUCTIONS,
     DEFAULT_AI_CAMERA_TASK_ENTITY_ID,
     DEFAULT_AI_IMAGE_TASK_ENTITY_ID,
     DEFAULT_AI_SEARCH_AGENT_ID,
@@ -133,6 +135,7 @@ def _ai_settings_schema(
     ai_search_agent_id: str,
     ai_image_task_entity_id: str,
     ai_camera_task_entity_id: str,
+    ai_camera_instructions: str,
     ai_agent_failover_enabled: bool,
 ) -> vol.Schema:
     """Build AI agent selectors."""
@@ -198,6 +201,18 @@ def _ai_settings_schema(
         fields[vol.Optional(CONF_AI_CAMERA_TASK_ENTITY_ID)] = (
             camera_task_selector
         )
+
+    fields[
+        vol.Optional(
+            CONF_AI_CAMERA_INSTRUCTIONS,
+            default=ai_camera_instructions,
+        )
+    ] = selector.TextSelector(
+        selector.TextSelectorConfig(
+            type=selector.TextSelectorType.TEXT,
+            multiline=True,
+        )
+    )
     return vol.Schema(fields)
 
 
@@ -455,6 +470,7 @@ def _initial_schema(
     ai_search_agent_id: str,
     ai_image_task_entity_id: str,
     ai_camera_task_entity_id: str,
+    ai_camera_instructions: str,
     ai_agent_failover_enabled: bool,
 ) -> vol.Schema:
     """Build the initial installation form with all setting groups."""
@@ -471,6 +487,7 @@ def _initial_schema(
             ai_search_agent_id,
             ai_image_task_entity_id,
             ai_camera_task_entity_id,
+            ai_camera_instructions,
             ai_agent_failover_enabled,
         ),
         _tts_settings_schema(speaker_enabled, tts_entity_id),
@@ -523,6 +540,16 @@ def _normalize_ai_settings(user_input: dict[str, Any]) -> dict[str, Any]:
     normalized[CONF_AI_CAMERA_TASK_ENTITY_ID] = str(
         normalized.get(CONF_AI_CAMERA_TASK_ENTITY_ID, "") or ""
     ).strip()
+    normalized[CONF_AI_CAMERA_INSTRUCTIONS] = (
+        str(
+            normalized.get(
+                CONF_AI_CAMERA_INSTRUCTIONS,
+                DEFAULT_AI_CAMERA_INSTRUCTIONS,
+            )
+            or ""
+        ).strip()
+        or DEFAULT_AI_CAMERA_INSTRUCTIONS
+    )
     normalized[CONF_AI_AGENT_FAILOVER_ENABLED] = bool(
         normalized.get(
             CONF_AI_AGENT_FAILOVER_ENABLED,
@@ -713,6 +740,13 @@ class ConversationalAssistantConfigFlow(config_entries.ConfigFlow, domain=DOMAIN
                     )
                     or ""
                 ).strip(),
+                str(
+                    values.get(
+                        CONF_AI_CAMERA_INSTRUCTIONS,
+                        DEFAULT_AI_CAMERA_INSTRUCTIONS,
+                    )
+                    or DEFAULT_AI_CAMERA_INSTRUCTIONS
+                ).strip(),
                 bool(
                     values.get(
                         CONF_AI_AGENT_FAILOVER_ENABLED,
@@ -892,6 +926,13 @@ class ConversationalAssistantOptionsFlow(config_entries.OptionsFlow):
             self.config_entry.data.get(
                 CONF_AI_CAMERA_TASK_ENTITY_ID,
                 DEFAULT_AI_CAMERA_TASK_ENTITY_ID,
+            ),
+        )
+        options.setdefault(
+            CONF_AI_CAMERA_INSTRUCTIONS,
+            self.config_entry.data.get(
+                CONF_AI_CAMERA_INSTRUCTIONS,
+                DEFAULT_AI_CAMERA_INSTRUCTIONS,
             ),
         )
         options.setdefault(
@@ -1101,6 +1142,13 @@ class ConversationalAssistantOptionsFlow(config_entries.OptionsFlow):
                         DEFAULT_AI_CAMERA_TASK_ENTITY_ID,
                     )
                     or ""
+                ).strip(),
+                str(
+                    values.get(
+                        CONF_AI_CAMERA_INSTRUCTIONS,
+                        DEFAULT_AI_CAMERA_INSTRUCTIONS,
+                    )
+                    or DEFAULT_AI_CAMERA_INSTRUCTIONS
                 ).strip(),
                 bool(
                     values.get(
