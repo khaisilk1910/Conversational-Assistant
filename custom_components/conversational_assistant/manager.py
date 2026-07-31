@@ -128,6 +128,7 @@ from .const import (
     PENDING_FOLLOWUP_SENTENCES,
     PENDING_CONFIRMATION_TIMEOUT_SECONDS,
     SEARCH_SENTENCES,
+    WEATHER_SENTENCES,
     SIGNAL_UPDATE,
     STORAGE_KEY_PREFIX,
     STORAGE_VERSION,
@@ -163,6 +164,7 @@ from .command_memory import (
     ACTION_REMINDER_DELETE,
     ACTION_REMINDER_LIST,
     ACTION_SEARCH,
+    ACTION_WEATHER,
     CommandMemoryError,
     LearnedCommand,
     MAX_LEARNED_COMMANDS,
@@ -204,6 +206,7 @@ from .zalo_home_assistant import (
     extract_calendar_events,
     format_calendar_create_request,
     format_calendar_events,
+    weather_search_request,
 )
 
 _LOGGER = logging.getLogger(__name__)
@@ -1777,6 +1780,7 @@ class ConversationalAssistantManager(NoteManagerMixin):
                 "conversation": "conversation",
                 "calendar": "calendar analysis",
                 "camera": "camera analysis",
+                "weather": "weather lookup",
             }.get(feature, "search")
             message = (
                 f"🔄 **Switching AI for {feature_name}**\n\n"
@@ -1790,6 +1794,7 @@ class ConversationalAssistantManager(NoteManagerMixin):
                 "conversation": "hội thoại",
                 "calendar": "phân tích lịch",
                 "camera": "phân tích camera",
+                "weather": "tra cứu thời tiết",
             }.get(feature, "tìm kiếm")
             message = (
                 f"🔄 **Đang chuyển AI dự phòng cho {feature_name}**\n\n"
@@ -1964,6 +1969,9 @@ class ConversationalAssistantManager(NoteManagerMixin):
                     CAMERA_SENTENCES, self._async_camera_from_voice
                 ),
                 agent_manager.register_trigger(
+                    WEATHER_SENTENCES, self._async_weather_from_voice
+                ),
+                agent_manager.register_trigger(
                     SEARCH_SENTENCES, self._async_search_from_voice
                 ),
                 agent_manager.register_trigger(
@@ -2019,6 +2027,7 @@ class ConversationalAssistantManager(NoteManagerMixin):
         for unsub in self._unsubs:
             unsub()
         self._zalo_ha_conversation_ids.clear()
+        self._zalo_search_conversation_ids.clear()
         self._unsubs.clear()
         self._pending.clear()
         self._pending_deletions.clear()
@@ -2152,6 +2161,7 @@ class ConversationalAssistantManager(NoteManagerMixin):
             ACTION_REMINDER_DELETE,
             ACTION_HELP,
             ACTION_SEARCH,
+            ACTION_WEATHER,
             ACTION_IMAGE_GENERATION,
         }:
             return builtin
@@ -2163,6 +2173,8 @@ class ConversationalAssistantManager(NoteManagerMixin):
             return ACTION_CAMERA
         if ha_kind == "calendar":
             return ACTION_CALENDAR
+        if ha_kind == "weather":
+            return ACTION_WEATHER
         if ha_kind == "conversation":
             return ACTION_HOME_ASSISTANT
         return None
@@ -2712,6 +2724,8 @@ class ConversationalAssistantManager(NoteManagerMixin):
             return "help"
         if _image_generation_request(text) is not None:
             return ACTION_IMAGE_GENERATION
+        if weather_search_request(text) is not None:
+            return ACTION_WEATHER
         if _search_request(text) is not None:
             return ACTION_SEARCH
 
@@ -2878,9 +2892,9 @@ class ConversationalAssistantManager(NoteManagerMixin):
             "1️⃣ **🏠 NHÀ THÔNG MINH**\n"
             "• Điều khiển thiết bị; kiểm tra trạng thái theo thiết bị, phòng, khu vực hoặc sàn.\n"
             "• Ví dụ: `Bật đèn phòng khách`; `Kiểm tra thiết bị đang bật ở tầng 2`.\n\n"
-            "2️⃣ **🌦️ THỜI TIẾT**\n"
-            "• Hỏi thời tiết từ các entity đang có trong Home Assistant.\n"
-            "• Ví dụ: `Thời tiết hôm nay thế nào?`; `Will it rain tomorrow?`.\n\n"
+            "2️⃣ **🌦️ THỜI TIẾT BẰNG AI SEARCH**\n"
+            "• AI Search tự hiểu đúng địa điểm và mốc thời gian, rồi tra cứu dự báo Internet mới nhất.\n"
+            "• Ví dụ: `Thời tiết Hà Nội chiều mai`; `Will it rain in Bangkok this weekend?`.\n\n"
             "3️⃣ **📅 LỊCH VÀ SỰ KIỆN**\n"
             "• Tra cứu, tạo, sửa hoặc xóa sự kiện; kết quả được nhóm theo từng lịch.\n"
             "• Ví dụ: `Sự kiện trong 15 ngày tới`; `Tạo sự kiện họp lúc 18h30 ngày mai`.\n"
@@ -4684,6 +4698,84 @@ class ConversationalAssistantManager(NoteManagerMixin):
             f"SEARCH REQUEST: {query}"
         )
 
+    def _weather_default_location(self) -> str:
+        """Return Home Assistant's configured location for weather fallback."""
+        config = getattr(self.hass, "config", None)
+        if config is None:
+            return ""
+        name = str(getattr(config, "location_name", "") or "").strip()
+        latitude = getattr(config, "latitude", None)
+        longitude = getattr(config, "longitude", None)
+        try:
+            coordinates = f"{float(latitude):.5f}, {float(longitude):.5f}"
+        except (TypeError, ValueError):
+            coordinates = ""
+        if name and coordinates:
+            return f"{name} ({coordinates})"
+        return name or coordinates
+
+    @staticmethod
+    def _weather_search_prompt(
+        query: str,
+        *,
+        zalo: bool,
+        language: str,
+        reference_time: datetime,
+        default_location: str,
+    ) -> str:
+        """Build strict, concise instructions for an Internet weather lookup."""
+        language_name = "English" if language == "en" else "Vietnamese"
+        reference_label = reference_time.isoformat(timespec="minutes")
+        timezone_label = reference_time.tzname() or "Home Assistant local time"
+        location_rule = (
+            "The Home Assistant default location is "
+            f"{default_location}. Use it only when the user does not name another "
+            "location. "
+            if default_location
+            else "No Home Assistant default location is available. "
+        )
+        if zalo:
+            format_rules = (
+                "Return a compact Zalo message. Start with a weather emoji and a "
+                "bold title containing the resolved location and exact date or time "
+                "window. Use only relevant short lines, each beginning with a precise "
+                "emoji: 🌡️ temperature/feels-like, 🌧️ precipitation probability or "
+                "rainfall, 💧 humidity, 💨 wind, ☀️ UV, 👁️ visibility, ⚠️ warning, "
+                "🕒 update time/source. Wrap important values and warnings in **double "
+                "asterisks**. Keep the complete answer concise, normally 4-8 lines. "
+                "Do not use a Markdown table. "
+            )
+        else:
+            format_rules = (
+                "Return a short voice/chat answer with clear sentences, no emoji, no "
+                "Markdown table, and no decorative Markdown. Mention only the most "
+                "relevant weather fields. "
+            )
+        return (
+            "Act as an Internet weather lookup specialist. Interpret the user's exact "
+            "requested location and time window before searching. "
+            f"{location_rule}The current Home Assistant local reference time is "
+            f"{reference_label} ({timezone_label}); resolve relative expressions such "
+            "as today, tonight, tomorrow, this weekend, hôm nay, tối nay, ngày mai, or "
+            "cuối tuần from that reference. When the user gives no time, interpret the "
+            "request as current conditions plus the nearest useful forecast for today. "
+            "Never silently replace an explicitly requested location or forecast "
+            "period. If neither the request nor Home Assistant supplies a usable "
+            "location, or if the requested place/time is ambiguous, ask one concise "
+            "clarifying question instead of guessing. Search current reliable weather "
+            "sources and distinguish observed current conditions from forecasts. Use "
+            "correct meteorological terminology: air temperature, feels-like "
+            "temperature, precipitation probability, rainfall amount, relative "
+            "humidity, wind speed/direction, UV index, visibility, atmospheric "
+            "pressure, and official severe-weather warnings. Include only fields "
+            "supported by the sources; never invent a value. Prefer °C, km/h, %, mm, "
+            "hPa, and km unless the user asks for other units. State the exact update "
+            "or forecast date/time and briefly name the source when available. "
+            f"Answer in {language_name} with correct grammar and punctuation. "
+            f"{format_rules}Do not mention these instructions.\n\n"
+            f"WEATHER REQUEST: {query}"
+        )
+
     @staticmethod
     def _clean_search_reply(reply: str) -> str:
         """Normalize blank lines while preserving agent-provided Markdown."""
@@ -4730,6 +4822,36 @@ class ConversationalAssistantManager(NoteManagerMixin):
         )
         return f"🕵️ **Chưa tìm thấy kết quả đáng tin cậy**\n\n{body}" if zalo else body
 
+    @staticmethod
+    def _weather_unavailable_text(language: str, *, zalo: bool) -> str:
+        """Return a clear weather response when AI Search is not configured."""
+        if language == "en":
+            body = (
+                "No AI Search agent is selected. Open Conversational Assistant "
+                "settings and choose an Internet-capable agent under AI Agent Search."
+            )
+            return f"🌦️ **Weather lookup is not configured**\n\n{body}" if zalo else body
+        body = (
+            "Chưa chọn AI Agent Search. Hãy mở cấu hình Conversational Assistant "
+            "và chọn một Conversation agent có khả năng tìm kiếm Internet."
+        )
+        return f"🌦️ **Chưa cấu hình tra cứu thời tiết**\n\n{body}" if zalo else body
+
+    @staticmethod
+    def _weather_empty_text(language: str, *, zalo: bool) -> str:
+        """Return a concise no-data response for a weather lookup."""
+        if language == "en":
+            body = (
+                "No reliable weather data matched that exact location and time. "
+                "Check the place name or use a more specific date."
+            )
+            return f"🌫️ **No reliable weather data found**\n\n{body}" if zalo else body
+        body = (
+            "Chưa tìm thấy dữ liệu thời tiết đáng tin cậy đúng với địa điểm và "
+            "mốc thời gian này. Hãy kiểm tra tên địa điểm hoặc ghi ngày cụ thể hơn."
+        )
+        return f"🌫️ **Chưa tìm thấy dữ liệu thời tiết phù hợp**\n\n{body}" if zalo else body
+
     async def _async_ai_search(
         self,
         query: str,
@@ -4739,9 +4861,11 @@ class ConversationalAssistantManager(NoteManagerMixin):
         zalo: bool,
         language_hint: str | None = None,
         zalo_context: ZaloWebhookContext | None = None,
+        feature: str = "search",
     ) -> tuple[str, str | None]:
         """Run one Internet query with per-agent timeout and automatic failover."""
         language = language_hint or _request_language(query)
+        is_weather = feature == "weather"
         if not query.strip():
             prompt = (
                 "Please tell me what you want to search for."
@@ -4760,14 +4884,27 @@ class ConversationalAssistantManager(NoteManagerMixin):
 
         candidates = self._conversation_agent_candidates(self.ai_search_agent_id)
         if not candidates:
-            return self._search_unavailable_text(language, zalo=zalo), None
+            unavailable = (
+                self._weather_unavailable_text(language, zalo=zalo)
+                if is_weather
+                else self._search_unavailable_text(language, zalo=zalo)
+            )
+            return unavailable, None
 
         attempted_agents: list[str] = []
         had_empty_response = False
         primary_agent_id = self.ai_search_agent_id
         total_attempts = len(candidates)
-        prompt_text = self._search_prompt(
-            query, zalo=zalo, language=language
+        prompt_text = (
+            self._weather_search_prompt(
+                query,
+                zalo=zalo,
+                language=language,
+                reference_time=dt_util.now(),
+                default_location=self._weather_default_location(),
+            )
+            if is_weather
+            else self._search_prompt(query, zalo=zalo, language=language)
         )
 
         for index, (agent_id, agent_name) in enumerate(candidates):
@@ -4786,14 +4923,18 @@ class ConversationalAssistantManager(NoteManagerMixin):
                     )
             except TimeoutError:
                 _LOGGER.warning(
-                    "AI Search agent %s timed out after %s seconds for query %s",
+                    "AI Search agent %s timed out after %s seconds for %s query %s",
                     agent_id,
                     ZALO_SEARCH_TIMEOUT_SECONDS,
+                    feature,
                     query,
                 )
             except Exception:  # noqa: BLE001 - rotate instead of failing silently
                 _LOGGER.exception(
-                    "AI Search agent %s failed for query %s", agent_id, query
+                    "AI Search agent %s failed for %s query %s",
+                    agent_id,
+                    feature,
+                    query,
                 )
             else:
                 error_code = self._conversation_result_error_code(result)
@@ -4805,17 +4946,26 @@ class ConversationalAssistantManager(NoteManagerMixin):
                         getattr(result, "conversation_id", "") or ""
                     ).strip() or None
                     if zalo:
-                        heading = (
-                            "🔎 **Search results**"
-                            if language == "en"
-                            else "🔎 **Kết quả tìm kiếm**"
-                        )
-                        if (
-                            "**" not in reply
-                            or not reply.startswith(
-                                ("🔎", "🌐", "📰", "📌", "💡", "🧭")
+                        if is_weather:
+                            heading = (
+                                "🌦️ **Weather lookup**"
+                                if language == "en"
+                                else "🌦️ **Kết quả tra cứu thời tiết**"
                             )
-                        ):
+                            allowed_headings = (
+                                "🌦️", "☀️", "🌤️", "⛅", "☁️", "🌧️",
+                                "⛈️", "🌩️", "🌨️", "❄️", "🌫️", "🌪️",
+                            )
+                        else:
+                            heading = (
+                                "🔎 **Search results**"
+                                if language == "en"
+                                else "🔎 **Kết quả tìm kiếm**"
+                            )
+                            allowed_headings = (
+                                "🔎", "🌐", "📰", "📌", "💡", "🧭"
+                            )
+                        if "**" not in reply or not reply.startswith(allowed_headings):
                             reply = f"{heading}\n\n{reply}"
                     reply = self._append_ai_attempt_summary(
                         reply,
@@ -4840,7 +4990,7 @@ class ConversationalAssistantManager(NoteManagerMixin):
                 await self._async_send_ai_failover_notice(
                     zalo_context,
                     service_context,
-                    feature="search",
+                    feature=feature,
                     failed_agent=agent_name,
                     next_agent=candidates[index + 1][1],
                     next_attempt=index + 2,
@@ -4849,7 +4999,11 @@ class ConversationalAssistantManager(NoteManagerMixin):
                 )
 
         if had_empty_response:
-            message = self._search_empty_text(language, zalo=zalo)
+            message = (
+                self._weather_empty_text(language, zalo=zalo)
+                if is_weather
+                else self._search_empty_text(language, zalo=zalo)
+            )
         else:
             message = (
                 "All available search agents failed or timed out. Check the AI "
@@ -4859,11 +5013,18 @@ class ConversationalAssistantManager(NoteManagerMixin):
                 "chờ. Hãy kiểm tra các AI agent trong Home Assistant rồi thử lại."
             )
             if zalo:
-                message = (
-                    f"⚠️ **Search agents unavailable**\n\n{message}"
-                    if language == "en"
-                    else f"⚠️ **Các AI tìm kiếm đều chưa phản hồi**\n\n{message}"
-                )
+                if is_weather:
+                    message = (
+                        f"⚠️ **Weather agents unavailable**\n\n{message}"
+                        if language == "en"
+                        else f"⚠️ **AI tra cứu thời tiết chưa phản hồi**\n\n{message}"
+                    )
+                else:
+                    message = (
+                        f"⚠️ **Search agents unavailable**\n\n{message}"
+                        if language == "en"
+                        else f"⚠️ **Các AI tìm kiếm đều chưa phản hồi**\n\n{message}"
+                    )
         return (
             self._append_ai_attempt_summary(
                 message,
@@ -4893,6 +5054,24 @@ class ConversationalAssistantManager(NoteManagerMixin):
         )
         if conversation_id:
             self._zalo_search_conversation_ids[context.owner_key] = conversation_id
+        return reply
+
+    async def _async_weather_from_zalo(
+        self,
+        context: ZaloWebhookContext,
+        service_context: Context | None,
+    ) -> str:
+        """Look up weather through the configured Internet AI Search agent."""
+        query = weather_search_request(context.text) or context.text
+        reply, _conversation_id = await self._async_ai_search(
+            query,
+            conversation_id=None,
+            service_context=service_context,
+            zalo=True,
+            language_hint=_request_language(context.text),
+            zalo_context=context,
+            feature="weather",
+        )
         return reply
 
     @staticmethod
@@ -6868,6 +7047,10 @@ class ConversationalAssistantManager(NoteManagerMixin):
             return await self._async_calendar_from_zalo(
                 context, service_context
             )
+        if request_kind == "weather":
+            return await self._async_weather_from_zalo(
+                context, service_context
+            )
         return await self._async_home_assistant_conversation_from_zalo(
             context, service_context
         )
@@ -6978,6 +7161,11 @@ class ConversationalAssistantManager(NoteManagerMixin):
             return await self._async_search_from_zalo(
                 context, service_context
             )
+        if command == ACTION_WEATHER:
+            self._clear_zalo_pending_for_owner(context.owner_key)
+            return await self._async_weather_from_zalo(
+                context, service_context
+            )
         if command == ACTION_IMAGE_GENERATION:
             self._clear_zalo_pending_for_owner(context.owner_key)
             return await self._async_generate_image_from_zalo(
@@ -7063,6 +7251,9 @@ class ConversationalAssistantManager(NoteManagerMixin):
         if command == ACTION_SEARCH:
             query = _search_request(effective_text)
             return ACTION_SEARCH if query and query.strip() else None
+        if command == ACTION_WEATHER:
+            query = weather_search_request(effective_text)
+            return ACTION_WEATHER if query and query.strip() else None
         if command == ACTION_IMAGE_GENERATION:
             instructions = _image_generation_request(effective_text)
             return (
@@ -7104,6 +7295,8 @@ class ConversationalAssistantManager(NoteManagerMixin):
                 if action == ACTION_CAMERA_ANALYSIS
                 else "calendar analysis"
                 if action == ACTION_CALENDAR
+                else "weather lookup"
+                if action == ACTION_WEATHER
                 else "search"
             )
             return (
@@ -7117,6 +7310,8 @@ class ConversationalAssistantManager(NoteManagerMixin):
             if action == ACTION_CAMERA_ANALYSIS
             else "phân tích lịch"
             if action == ACTION_CALENDAR
+            else "tra cứu thời tiết"
+            if action == ACTION_WEATHER
             else "tìm kiếm"
         )
         return (
@@ -8363,6 +8558,8 @@ class ConversationalAssistantManager(NoteManagerMixin):
         self, user_input: ConversationInput, result: RecognizeResult
     ) -> str:
         """Search the Internet through the configured AI Search agent."""
+        if weather_search_request(user_input.text) is not None:
+            return await self._async_weather_from_voice(user_input, result)
         self._clear_pending_for_source(self._source_keys(user_input))
         self._sync_pending_followup_trigger()
         query = self._request_slot(user_input, result)
@@ -8375,6 +8572,29 @@ class ConversationalAssistantManager(NoteManagerMixin):
             service_context=user_input.context,
             zalo=False,
             language_hint=_request_language(user_input.text),
+        )
+        return await self._async_voice_response(
+            user_input, reply, ai_generated=True
+        )
+
+    async def _async_weather_from_voice(
+        self, user_input: ConversationInput, _result: RecognizeResult
+    ) -> str:
+        """Look up weather through the configured Internet AI Search agent."""
+        self._clear_pending_for_source(self._source_keys(user_input))
+        self._sync_pending_followup_trigger()
+        query = weather_search_request(user_input.text)
+        if query is None:
+            return await self._async_home_assistant_conversation_from_voice(
+                user_input, user_input.text
+            )
+        reply, _conversation_id = await self._async_ai_search(
+            query,
+            conversation_id=None,
+            service_context=user_input.context,
+            zalo=False,
+            language_hint=_request_language(user_input.text),
+            feature="weather",
         )
         return await self._async_voice_response(
             user_input, reply, ai_generated=True
@@ -8497,7 +8717,22 @@ class ConversationalAssistantManager(NoteManagerMixin):
                 zalo=False,
                 language_hint=_request_language(request or user_input.text),
             )
-            return await self._async_voice_response(user_input, reply)
+            return await self._async_voice_response(
+                user_input, reply, ai_generated=True
+            )
+        if command.action == ACTION_WEATHER:
+            query = weather_search_request(transformed_text) or transformed_text
+            reply, _conversation_id = await self._async_ai_search(
+                query,
+                conversation_id=None,
+                service_context=user_input.context,
+                zalo=False,
+                language_hint=_request_language(request or user_input.text),
+                feature="weather",
+            )
+            return await self._async_voice_response(
+                user_input, reply, ai_generated=True
+            )
         if command.action == ACTION_IMAGE_GENERATION:
             return await self._async_voice_response(
                 user_input,
@@ -8522,6 +8757,8 @@ class ConversationalAssistantManager(NoteManagerMixin):
         if _is_integration_help_request(text):
             return True
         if _search_request(text) is not None:
+            return True
+        if weather_search_request(text) is not None:
             return True
         if management_command_kind(text) is not None:
             return True

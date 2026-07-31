@@ -201,6 +201,47 @@ SEARCH_SENTENCES = [
     "[please ]find information about {request}",
 ]
 
+# Weather requests use the Internet-capable AI Search agent rather than the
+# Home Assistant control agent. Keeping dedicated triggers makes natural
+# weather questions work consistently in Voice Assist as well as Zalo.
+WEATHER_SENTENCES = [
+    "thời tiết",
+    "thời tiết {request}",
+    "[hãy ]xem thời tiết",
+    "[hãy ]xem thời tiết {request}",
+    "[hãy ]kiểm tra thời tiết",
+    "[hãy ]kiểm tra thời tiết {request}",
+    "[hãy ]tra cứu thời tiết",
+    "[hãy ]tra cứu thời tiết {request}",
+    "[hãy ]dự báo thời tiết",
+    "[hãy ]dự báo thời tiết {request}",
+    "weather",
+    "weather {request}",
+    "weather forecast",
+    "weather forecast {request}",
+    "[please ]check weather",
+    "[please ]check weather {request}",
+    "[please ]show weather",
+    "[please ]show weather {request}",
+    "what is the weather",
+    "what is the weather {request}",
+    "có mưa không",
+    "{request} có mưa không",
+    "khả năng mưa {request}",
+    "xác suất mưa {request}",
+    "lượng mưa {request}",
+    "chỉ số uv {request}",
+    "nhiệt độ {request}",
+    "độ ẩm {request}",
+    "will it rain",
+    "will it rain {request}",
+    "chance of rain {request}",
+    "rainfall {request}",
+    "uv index {request}",
+    "temperature {request}",
+    "humidity {request}",
+]
+
 
 # Camera analysis uses AI Task generate_data with the selected camera media
 # source attached. Each selected camera is processed independently so one

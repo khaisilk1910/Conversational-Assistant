@@ -137,6 +137,102 @@ def _fold_calendar_text(value: str) -> str:
     return re.sub(r"\s+", " ", value).strip()
 
 
+def weather_search_request(text: str) -> str | None:
+    """Return the original request when it explicitly asks about weather.
+
+    Weather is intentionally classified separately from Home Assistant device
+    control so it can be resolved by the configured Internet-capable AI Search
+    agent. Strong weather wording is required to avoid redirecting indoor
+    temperature or humidity entity questions away from Home Assistant.
+    """
+    raw = str(text or "").strip()
+    normalized = normalize_text(raw)
+    if not normalized:
+        return None
+    if normalized.startswith("hay "):
+        normalized = normalized[4:].strip()
+    elif normalized.startswith("please "):
+        normalized = normalized[7:].strip()
+
+    weather_phrases = (
+        "thoi tiet",
+        "du bao thoi tiet",
+        "weather",
+        "weather forecast",
+        "forecast weather",
+        "co mua",
+        "kha nang mua",
+        "xac suat mua",
+        "luong mua",
+        "mua bao",
+        "mua da",
+        "giong set",
+        "chi so uv",
+        "canh bao thoi tiet",
+        "will it rain",
+        "chance of rain",
+        "rain probability",
+        "rainfall",
+        "uv index",
+        "weather warning",
+        "severe weather",
+    )
+    if any(
+        normalized == phrase
+        or normalized.startswith(f"{phrase} ")
+        or f" {phrase} " in f" {normalized} "
+        for phrase in weather_phrases
+    ):
+        return raw
+
+    # Temperature and humidity can also refer to Home Assistant sensors. Treat
+    # them as Internet weather only when the wording includes additional place
+    # or time context and does not name a clear in-home control/entity target.
+    home_cues = (
+        "phong ",
+        "trong nha",
+        "cam bien",
+        "dieu hoa",
+        "may lanh",
+        "thermostat",
+        "air conditioner",
+        "living room",
+        "bedroom",
+        "kitchen",
+        "sensor",
+        "set temperature",
+        "dat nhiet do",
+    )
+    weather_metrics = (
+        "nhiet do",
+        "do am",
+        "nhiet do cam nhan",
+        "toc do gio",
+        "huong gio",
+        "ap suat khi quyen",
+        "tam nhin xa",
+        "temperature",
+        "humidity",
+        "feels like",
+        "wind speed",
+        "wind direction",
+        "atmospheric pressure",
+        "visibility",
+    )
+    has_metric = any(
+        normalized == metric
+        or normalized.startswith(f"{metric} ")
+        or f" {metric} " in f" {normalized} "
+        for metric in weather_metrics
+    )
+    has_home_cue = any(cue in normalized for cue in home_cues)
+    if has_metric and not has_home_cue:
+        metric_only = normalized in weather_metrics
+        if not metric_only:
+            return raw
+    return None
+
+
 def explicit_home_assistant_request_kind(text: str) -> str | None:
     """Classify explicit Home Assistant commands without catching free chat."""
     normalized = normalize_text(text)
@@ -151,6 +247,9 @@ def explicit_home_assistant_request_kind(text: str) -> str | None:
 
     if _is_calendar_query(normalized):
         return "calendar"
+
+    if weather_search_request(text) is not None:
+        return "weather"
 
     command_prefixes = (
         "turn on ",

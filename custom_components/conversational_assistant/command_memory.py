@@ -29,6 +29,7 @@ ACTION_HELP = "help"
 ACTION_HOME_ASSISTANT = "home_assistant"
 ACTION_CALENDAR = "calendar"
 ACTION_SEARCH = "search"
+ACTION_WEATHER = "weather"
 ACTION_IMAGE_GENERATION = "image_generation"
 
 SUPPORTED_ACTIONS = {
@@ -46,6 +47,7 @@ SUPPORTED_ACTIONS = {
     ACTION_HOME_ASSISTANT,
     ACTION_CALENDAR,
     ACTION_SEARCH,
+    ACTION_WEATHER,
     ACTION_IMAGE_GENERATION,
 }
 
@@ -58,6 +60,7 @@ REQUEST_ACTIONS = {
     ACTION_NOTE_CREATE,
     ACTION_NOTE_VIEW,
     ACTION_SEARCH,
+    ACTION_WEATHER,
     ACTION_IMAGE_GENERATION,
 }
 
@@ -76,6 +79,7 @@ ACTION_LABELS = {
     ACTION_HOME_ASSISTANT: "thực hiện lệnh Home Assistant",
     ACTION_CALENDAR: "xem lịch Home Assistant",
     ACTION_SEARCH: "tìm kiếm thông tin trên Internet",
+    ACTION_WEATHER: "tra cứu thời tiết bằng AI Search",
     ACTION_IMAGE_GENERATION: "tạo ảnh bằng AI và gửi về Zalo",
 }
 
@@ -124,6 +128,9 @@ _TARGET_LABELS = {
     "search the internet": ACTION_SEARCH,
     "search for information": ACTION_SEARCH,
     "look up information": ACTION_SEARCH,
+    "weather": ACTION_WEATHER,
+    "weather forecast": ACTION_WEATHER,
+    "check weather": ACTION_WEATHER,
     "generate image": ACTION_IMAGE_GENERATION,
     "generate an image": ACTION_IMAGE_GENERATION,
     "create image": ACTION_IMAGE_GENERATION,
@@ -174,6 +181,11 @@ _TARGET_LABELS = {
     "tim kiem": ACTION_SEARCH,
     "tim kiem tren mang": ACTION_SEARCH,
     "tra cuu thong tin": ACTION_SEARCH,
+    "thoi tiet": ACTION_WEATHER,
+    "xem thoi tiet": ACTION_WEATHER,
+    "kiem tra thoi tiet": ACTION_WEATHER,
+    "tra cuu thoi tiet": ACTION_WEATHER,
+    "du bao thoi tiet": ACTION_WEATHER,
     "tao anh": ACTION_IMAGE_GENERATION,
     "tao mot anh": ACTION_IMAGE_GENERATION,
     "tao buc anh": ACTION_IMAGE_GENERATION,
@@ -598,6 +610,7 @@ def canonical_text(
         ACTION_NOTE_CREATE: "ghi chú",
         ACTION_NOTE_VIEW: "mở ghi chú",
         ACTION_SEARCH: "tìm thông tin",
+        ACTION_WEATHER: "thời tiết",
         ACTION_IMAGE_GENERATION: "tạo ảnh",
         ACTION_CAMERA_ANALYSIS: "phân tích camera",
     }
