@@ -9,6 +9,7 @@ import re
 import unicodedata
 from typing import Any
 
+from homeassistant.components.calendar.const import CalendarEntityFeature
 from homeassistant.util import dt as dt_util
 
 from .targeting import normalize_text
@@ -35,6 +36,11 @@ class CalendarDisplayEvent:
     location: str
     description: str
     all_day: bool
+    uid: str = ""
+    recurrence_id: str = ""
+    rrule: str = ""
+    can_update: bool = False
+    can_delete: bool = False
 
 
 @dataclass(slots=True, frozen=True)
@@ -351,6 +357,16 @@ def calendar_has_time_reference(text: str) -> bool:
         normalized,
     ):
         return True
+    # Keep a dedicated digit path for long natural horizons such as
+    # "sự kiện 75 ngày nữa" or "sự kiện 115 ngày nữa". This intentionally
+    # accepts up to four digits and does not depend on the more complex
+    # number-word expression above.
+    if re.search(
+        r"\b\d{1,4}\s*(?:ngay|hom|days?)\s*"
+        r"(?:nua|sau|toi|sap toi|from now|from today|ahead)?\b",
+        normalized,
+    ):
+        return True
     # Broader hints let the configured AI parser handle less deterministic
     # expressions such as "nửa tháng nữa" or "đến cuối quý sau" without
     # treating a truly generic "kiểm tra lịch" request as time-bounded.
@@ -414,6 +430,24 @@ def calendar_window_from_text(text: str, now: datetime) -> CalendarWindow | None
         return datetime.combine(
             target_date + timedelta(days=1), time.min, tzinfo=tzinfo
         )
+
+    # Parse long digit-based day horizons before the generic grammar. This
+    # makes requests such as "75 ngày nữa" and "115 ngày nữa" deterministic
+    # even when an AI parser is unavailable or returns an unusable answer.
+    long_day_horizon = re.search(
+        r"\b(?P<n>\d{1,4})\s*(?:ngay|hom|days?)\s*"
+        r"(?P<suffix>nua|sau|toi|sap toi|from now|from today|ahead)\b",
+        normalized,
+    )
+    if long_day_horizon:
+        amount = int(long_day_horizon.group("n"))
+        if 0 < amount <= 3650:
+            target = local_now + timedelta(days=amount)
+            return CalendarWindow(
+                local_now,
+                end_of_day(target.date()),
+                f"trong {amount} ngày tới",
+            )
 
     duration_hint = bool(
         re.search(
@@ -698,6 +732,7 @@ def extract_calendar_events(
     response: Any,
     entity_id: str,
     calendar_name: str,
+    supported_features: int = 0,
 ) -> list[CalendarDisplayEvent]:
     """Normalize calendar.get_events response shapes across HA releases."""
     payload = response
@@ -714,7 +749,12 @@ def extract_calendar_events(
     for item in raw_events:
         if not isinstance(item, dict):
             continue
-        event = _normalize_calendar_event(item, entity_id, calendar_name)
+        event = _normalize_calendar_event(
+            item,
+            entity_id,
+            calendar_name,
+            supported_features=supported_features,
+        )
         if event is not None:
             result.append(event)
     return result
@@ -740,14 +780,15 @@ def event_from_calendar_state(
     )
 
 
-def format_calendar_events(
+def calendar_events_for_display(
     events: list[CalendarDisplayEvent],
     window: CalendarWindow,
-    now: datetime,
     limit: int = 50,
-) -> str:
-    """Format events by calendar with dates, contents, and days remaining."""
-    unique: dict[tuple[str, datetime, str], CalendarDisplayEvent] = {}
+) -> tuple[list[CalendarDisplayEvent], int]:
+    """Return the exact ordered events shown to the user and skip count."""
+    unique: dict[
+        tuple[str, datetime, str, str, str], CalendarDisplayEvent
+    ] = {}
     skipped_lunar = 0
     for event in events:
         if event.start >= window.end:
@@ -759,11 +800,36 @@ def format_calendar_events(
         if _should_skip_lunar_event(event):
             skipped_lunar += 1
             continue
-        unique[(event.calendar_entity_id, event.start, event.summary)] = event
+        unique[
+            (
+                event.calendar_entity_id,
+                event.start,
+                event.summary,
+                event.uid,
+                event.recurrence_id,
+            )
+        ] = event
 
     ordered = sorted(
         unique.values(),
-        key=lambda event: (event.calendar_name.casefold(), event.start),
+        key=lambda event: (
+            event.calendar_name.casefold(),
+            event.start,
+            event.summary.casefold(),
+        ),
+    )
+    return ordered[:limit], skipped_lunar
+
+
+def format_calendar_events(
+    events: list[CalendarDisplayEvent],
+    window: CalendarWindow,
+    now: datetime,
+    limit: int = 50,
+) -> str:
+    """Format events by calendar with dates, contents, and days remaining."""
+    ordered, skipped_lunar = calendar_events_for_display(
+        events, window, limit=limit
     )
     if not ordered:
         message = f"📭 Không có sự kiện phù hợp {window.label}."
@@ -776,7 +842,7 @@ def format_calendar_events(
 
     local_now = dt_util.as_local(now)
     grouped: dict[str, list[CalendarDisplayEvent]] = {}
-    for event in ordered[:limit]:
+    for event in ordered:
         grouped.setdefault(event.calendar_name or "Lịch không tên", []).append(event)
 
     lines = [f"📅 **Kết quả lịch {window.label}**"]
@@ -796,9 +862,6 @@ def format_calendar_events(
             if event.description and normalize_text(event.description) != normalize_text(content):
                 lines.append(f"   **Chi tiết:** {event.description}")
 
-    remaining = len(ordered) - limit
-    if remaining > 0:
-        lines.append(f"\nCòn {remaining} sự kiện khác chưa hiển thị.")
     return "\n".join(lines)
 
 
@@ -1380,16 +1443,40 @@ def _parse_event_datetime(value: Any) -> tuple[datetime | None, bool]:
 
 
 def _normalize_calendar_event(
-    item: dict[str, Any], entity_id: str, calendar_name: str
+    item: dict[str, Any],
+    entity_id: str,
+    calendar_name: str,
+    *,
+    supported_features: int = 0,
 ) -> CalendarDisplayEvent | None:
     """Normalize one raw calendar event."""
-    start, inferred_all_day = _parse_event_datetime(item.get("start"))
+    start, inferred_start_all_day = _parse_event_datetime(item.get("start"))
     if start is None:
         return None
-    end, _ = _parse_event_datetime(item.get("end"))
+    end, inferred_end_all_day = _parse_event_datetime(item.get("end"))
     summary = str(
         item.get("summary") or item.get("message") or "Sự kiện không có tên"
     ).strip()
+    explicit_all_day = bool(item.get("all_day"))
+    midnight_span = bool(
+        end is not None
+        and start.time() == time.min
+        and end.time() == time.min
+        and end > start
+        and (end - start).total_seconds() % 86400 == 0
+    )
+    lunar_name = normalize_text(f"{calendar_name} {entity_id}")
+    lunar_midnight = bool(
+        start.time() == time.min
+        and any(term in lunar_name for term in ("lich am", "am lich", "lunar"))
+    )
+    all_day = bool(
+        explicit_all_day
+        or inferred_start_all_day
+        or inferred_end_all_day
+        or midnight_span
+        or lunar_midnight
+    )
     return CalendarDisplayEvent(
         start=start,
         end=end,
@@ -1398,7 +1485,12 @@ def _normalize_calendar_event(
         calendar_entity_id=entity_id,
         location=str(item.get("location") or "").strip(),
         description=str(item.get("description") or "").strip(),
-        all_day=bool(item.get("all_day", inferred_all_day)),
+        all_day=all_day,
+        uid=str(item.get("uid") or "").strip(),
+        recurrence_id=str(item.get("recurrence_id") or "").strip(),
+        rrule=str(item.get("rrule") or "").strip(),
+        can_update=bool(supported_features & int(CalendarEntityFeature.UPDATE_EVENT)),
+        can_delete=bool(supported_features & int(CalendarEntityFeature.DELETE_EVENT)),
     )
 
 

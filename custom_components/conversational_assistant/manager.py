@@ -8,7 +8,7 @@ import json
 from collections import deque
 from collections.abc import Callable
 from dataclasses import dataclass, replace
-from datetime import datetime, time, timedelta
+from datetime import date, datetime, time, timedelta
 from functools import partial
 import logging
 import os
@@ -21,7 +21,10 @@ import uuid
 from hassil.recognize import RecognizeResult
 
 from homeassistant.components import media_source, persistent_notification
-from homeassistant.components.calendar.const import CalendarEntityFeature
+from homeassistant.components.calendar.const import (
+    DATA_COMPONENT as CALENDAR_DATA_COMPONENT,
+    CalendarEntityFeature,
+)
 from homeassistant.components.mobile_app.const import ATTR_WEBHOOK_ID
 from homeassistant.components.mobile_app.util import get_notify_service
 from homeassistant.components.media_player.const import MediaPlayerEntityFeature
@@ -162,8 +165,10 @@ from .parser import (
 from .targeting import normalize_text, parse_target_selection
 from .zalo_home_assistant import (
     CalendarCreateRequest,
+    CalendarDisplayEvent,
     CalendarWindow,
     calendar_create_request_from_ai_payload,
+    calendar_events_for_display,
     calendar_has_time_reference,
     calendar_matches_query,
     calendar_request_action,
@@ -447,6 +452,17 @@ class PendingZaloCalendarEvent:
 
 
 @dataclass(slots=True)
+class PendingZaloCalendarManagement:
+    """Calendar events waiting for a safe edit/delete conversation."""
+
+    events: list[CalendarDisplayEvent]
+    expires_at: datetime
+    phase: str = "action"
+    selected_event: CalendarDisplayEvent | None = None
+    ai_attempted_agents: list[str] | None = None
+
+
+@dataclass(slots=True)
 class PendingVoiceCamera:
     """Voice camera request waiting for selection or final confirmation."""
 
@@ -593,6 +609,9 @@ class ConversationalAssistantManager(NoteManagerMixin):
         self._zalo_pending_cameras: dict[str, PendingZaloCamera] = {}
         self._zalo_pending_calendar_events: dict[
             str, PendingZaloCalendarEvent
+        ] = {}
+        self._zalo_pending_calendar_managements: dict[
+            str, PendingZaloCalendarManagement
         ] = {}
         self._zalo_seen_message_ids: deque[str] = deque()
         self._zalo_seen_message_id_set: set[str] = set()
@@ -867,6 +886,206 @@ class ConversationalAssistantManager(NoteManagerMixin):
         separator = "\n\n" if zalo else " "
         return f"{text.rstrip()}{separator}{summary}"
 
+    @staticmethod
+    def _zalo_emphasize_important_text(text: str) -> str:
+        """Apply safe Zalo Markdown emphasis to every text response."""
+        message = str(text or "").replace("\r\n", "\n").strip()
+        if not message:
+            return message
+
+        labels = (
+            "Ngày diễn ra",
+            "Nội dung",
+            "Còn",
+            "Địa điểm",
+            "Chi tiết",
+            "Lịch",
+            "Sự kiện",
+            "Đã thêm vào",
+            "Không thêm được vào",
+            "Đã sửa",
+            "Đã xóa",
+            "Cần xác nhận",
+            "Lưu ý",
+            "Kết quả",
+            "Trạng thái",
+            "Thời gian",
+            "Nơi nhận",
+            "Camera",
+            "Ghi chú",
+            "Nhắc hẹn",
+            "Calendar",
+            "Event",
+            "Date",
+            "Content",
+            "Remaining",
+            "Location",
+            "Details",
+            "Warning",
+            "Result",
+            "Status",
+        )
+        label_pattern = "|".join(
+            sorted((re.escape(label) for label in labels), key=len, reverse=True)
+        )
+        message = re.sub(
+            rf"(?mi)^(?P<prefix>\s*(?:[-•]\s*|\d+[.)]\s*)?)"
+            rf"(?P<label>{label_pattern})(?P<colon>\s*:)",
+            lambda match: (
+                f"{match.group('prefix')}**{match.group('label')}**"
+                f"{match.group('colon')}"
+            ),
+            message,
+        )
+
+        lines = message.split("\n")
+        first_index = next(
+            (index for index, line in enumerate(lines) if line.strip()), None
+        )
+        if first_index is not None:
+            first = lines[first_index].strip()
+            if (
+                "**" not in first
+                and len(first) <= 140
+                and not re.match(r"^\d+[.)-]\s", first)
+            ):
+                emoji_match = re.match(
+                    r"^(?P<emoji>[^\w\s]{1,4}\s*)(?P<body>.+)$", first
+                )
+                if emoji_match:
+                    first = (
+                        f"{emoji_match.group('emoji')}"
+                        f"**{emoji_match.group('body').strip()}**"
+                    )
+                else:
+                    first = f"**{first}**"
+                lines[first_index] = first
+        return "\n".join(lines)
+
+    @staticmethod
+    def _response_integrity_tokens(text: str) -> set[str]:
+        """Return factual tokens that an AI rewrite must preserve verbatim."""
+        value = str(text or "")
+        patterns = (
+            r"\b\d{1,2}[/-]\d{1,2}(?:[/-]\d{2,4})?\b",
+            r"\b(?:[01]?\d|2[0-3]):[0-5]\d\b",
+            r"\b[a-z_]+\.[a-z0-9_]+\b",
+            r"(?m)^\s*\d+[.)]",
+        )
+        tokens: set[str] = set()
+        for pattern in patterns:
+            tokens.update(match.group(0).strip() for match in re.finditer(pattern, value))
+        return tokens
+
+    async def _async_ai_polish_response(
+        self,
+        request_text: str,
+        draft: str,
+        *,
+        language: str,
+        zalo: bool,
+        service_context: Context | None,
+    ) -> tuple[str, list[str]]:
+        """Use configured external AI to improve wording without changing facts."""
+        original = str(draft or "").strip()
+        primary = self.zalo_conversation_agent_id
+        if not original or primary == HOME_ASSISTANT_AGENT:
+            return original, []
+
+        candidates = [
+            candidate
+            for candidate in self._conversation_agent_candidates(primary)
+            if candidate[0] != HOME_ASSISTANT_AGENT
+        ]
+        if not candidates:
+            return original, []
+
+        channel_rules = (
+            "Use Zalo-friendly Markdown. Put ** before and after important "
+            "headings, warnings, dates, times, choices, and results. "
+            "Do not remove existing numbering or selection instructions."
+            if zalo
+            else
+            "Return plain natural speech suitable for Home Assistant TTS. "
+            "Do not use Markdown symbols, tables, or emoji-only wording."
+        )
+        prompt = (
+            "You are a response editor, not an action agent. Rewrite the draft "
+            "to be clear, natural, friendly, and professional. Preserve every "
+            "fact, date, time, number, entity name, calendar name, event name, "
+            "status, warning, and requested next step exactly. Never invent, "
+            "omit, reorder numbered choices, or claim an action not present in "
+            "the draft. Keep the same language as the draft. Return only the "
+            f"rewritten response. {channel_rules}\n\n"
+            f"User request: {request_text!r}\n\nDraft response:\n{original}"
+        )
+        required_tokens = self._response_integrity_tokens(original)
+        attempted: list[str] = []
+        for agent_id, agent_name in candidates:
+            attempted.append(agent_name)
+            try:
+                async with asyncio.timeout(15):
+                    result = await async_converse(
+                        hass=self.hass,
+                        text=prompt,
+                        conversation_id=None,
+                        context=service_context or Context(),
+                        language=language,
+                        agent_id=agent_id,
+                    )
+            except TimeoutError:
+                _LOGGER.warning("AI response editor %s timed out", agent_id)
+                continue
+            except Exception:  # noqa: BLE001 - retain the deterministic draft
+                _LOGGER.exception("AI response editor %s failed", agent_id)
+                continue
+
+            if self._conversation_result_error_code(result):
+                continue
+            candidate = self._conversation_reply_text(result).strip()
+            if not candidate or candidate.startswith("```"):
+                continue
+            if any(token not in candidate for token in required_tokens):
+                _LOGGER.warning(
+                    "Rejected AI response rewrite from %s because facts changed",
+                    agent_id,
+                )
+                continue
+            lower_bound = max(12, int(len(original) * 0.45))
+            upper_bound = max(500, int(len(original) * 2.5))
+            if not lower_bound <= len(candidate) <= upper_bound:
+                continue
+            if not zalo:
+                candidate = candidate.replace("**", "").replace("__", "")
+            return candidate, attempted
+        return original, attempted
+
+    async def _async_prepare_zalo_reply(
+        self,
+        context: ZaloWebhookContext,
+        reply: str,
+        service_context: Context | None,
+        *,
+        ai_generated: bool = False,
+    ) -> str:
+        """Optionally enrich a deterministic Zalo response with configured AI."""
+        text = str(reply or "").strip()
+        if ai_generated:
+            return text
+        polished, attempted = await self._async_ai_polish_response(
+            context.text,
+            text,
+            language=_request_language(context.text),
+            zalo=True,
+            service_context=service_context,
+        )
+        return self._append_ai_attempt_summary(
+            polished,
+            attempted,
+            language=_request_language(context.text),
+            zalo=True,
+        )
+
     async def _async_send_ai_failover_notice(
         self,
         context: ZaloWebhookContext | None,
@@ -1116,6 +1335,7 @@ class ConversationalAssistantManager(NoteManagerMixin):
         self._zalo_pending_deletions.clear()
         self._zalo_pending_cameras.clear()
         self._zalo_pending_calendar_events.clear()
+        self._zalo_pending_calendar_managements.clear()
         self._clear_discovery_caches()
         self._clear_all_note_pending()
         background_tasks = tuple(self._zalo_background_tasks)
@@ -2084,6 +2304,18 @@ class ConversationalAssistantManager(NoteManagerMixin):
             return None
         return pending
 
+    def _zalo_pending_calendar_management(
+        self, owner_key: str
+    ) -> PendingZaloCalendarManagement | None:
+        """Return a non-expired calendar edit/delete flow."""
+        pending = self._zalo_pending_calendar_managements.get(owner_key)
+        if pending is None:
+            return None
+        if pending.expires_at <= dt_util.now():
+            self._zalo_pending_calendar_managements.pop(owner_key, None)
+            return None
+        return pending
+
     def _zalo_target_for_context(
         self, context: ZaloWebhookContext, account_selection: str
     ) -> dict[str, Any]:
@@ -2170,6 +2402,7 @@ class ConversationalAssistantManager(NoteManagerMixin):
         self, context: ZaloWebhookContext, message: str
     ) -> bool:
         """Reply to the exact user/group that sent a webhook command."""
+        message = self._zalo_emphasize_important_text(message)
         if not self.hass.services.has_service(
             ZALO_DOMAIN, ZALO_SERVICE_SEND_MESSAGE
         ):
@@ -3161,6 +3394,7 @@ class ConversationalAssistantManager(NoteManagerMixin):
         self._zalo_pending_deletions.pop(owner_key, None)
         self._zalo_pending_cameras.pop(owner_key, None)
         self._zalo_pending_calendar_events.pop(owner_key, None)
+        self._zalo_pending_calendar_managements.pop(owner_key, None)
 
     @staticmethod
     def _conversation_reply_text(result: Any) -> str:
@@ -3856,7 +4090,9 @@ class ConversationalAssistantManager(NoteManagerMixin):
                         language=language,
                         zalo=False,
                     )
-                    return await self._async_voice_response(user_input, reply)
+                    return await self._async_voice_response(
+                        user_input, reply, ai_generated=True
+                    )
 
                 if not error_code and reply:
                     reply = self._append_ai_attempt_summary(
@@ -3865,7 +4101,9 @@ class ConversationalAssistantManager(NoteManagerMixin):
                         language=language,
                         zalo=False,
                     )
-                    return await self._async_voice_response(user_input, reply)
+                    return await self._async_voice_response(
+                        user_input, reply, ai_generated=True
+                    )
 
                 _LOGGER.warning(
                     "Conversation agent %s returned no usable answer for learned "
@@ -3888,7 +4126,9 @@ class ConversationalAssistantManager(NoteManagerMixin):
             language=language,
             zalo=False,
         )
-        return await self._async_voice_response(user_input, reply)
+        return await self._async_voice_response(
+                        user_input, reply, ai_generated=True
+                    )
 
     def _zalo_exposed_calendar_states(self, text: str) -> list[Any]:
         """Return calendar entities exposed to Home Assistant Assist."""
@@ -3942,6 +4182,94 @@ class ConversationalAssistantManager(NoteManagerMixin):
             targets,
             key=lambda target: (target.display_name.casefold(), target.entity_id),
         )
+
+    def _calendar_entity(self, entity_id: str) -> Any | None:
+        """Return the loaded CalendarEntity behind an entity ID."""
+        component = self.hass.data.get(CALENDAR_DATA_COMPONENT)
+        if component is None:
+            return None
+        try:
+            return component.get_entity(entity_id)
+        except Exception:  # noqa: BLE001 - internal API varies by HA release
+            _LOGGER.exception("Failed resolving calendar entity %s", entity_id)
+            return None
+
+    async def _async_calendar_events_for_state(
+        self,
+        state: Any,
+        window: CalendarWindow,
+        service_context: Context | None,
+    ) -> list[CalendarDisplayEvent]:
+        """Fetch events, preserving UID data needed for safe mutations."""
+        calendar_name = str(state.name or state.entity_id)
+        try:
+            supported_features = int(
+                state.attributes.get(ATTR_SUPPORTED_FEATURES, 0) or 0
+            )
+        except (TypeError, ValueError):
+            supported_features = 0
+
+        entity = self._calendar_entity(state.entity_id)
+        if entity is not None and hasattr(entity, "async_get_events"):
+            try:
+                raw_events = await entity.async_get_events(
+                    self.hass, window.start, window.end
+                )
+                payload = []
+                for raw_event in raw_events:
+                    if hasattr(raw_event, "as_dict"):
+                        item = raw_event.as_dict()
+                    elif hasattr(raw_event, "__dict__"):
+                        item = dict(raw_event.__dict__)
+                    else:
+                        continue
+                    if isinstance(item, dict):
+                        payload.append(item)
+                events = extract_calendar_events(
+                    payload,
+                    state.entity_id,
+                    calendar_name,
+                    supported_features=supported_features,
+                )
+                if events:
+                    return events
+            except Exception:  # noqa: BLE001 - use service fallback below
+                _LOGGER.exception(
+                    "Direct calendar event fetch failed for %s",
+                    state.entity_id,
+                )
+
+        if self.hass.services.has_service("calendar", "get_events"):
+            try:
+                response = await self.hass.services.async_call(
+                    "calendar",
+                    "get_events",
+                    {
+                        "entity_id": state.entity_id,
+                        "start_date_time": window.start.isoformat(),
+                        "end_date_time": window.end.isoformat(),
+                    },
+                    blocking=True,
+                    context=service_context,
+                    return_response=True,
+                )
+                events = extract_calendar_events(
+                    response,
+                    state.entity_id,
+                    calendar_name,
+                    supported_features=supported_features,
+                )
+                if events:
+                    return events
+            except Exception:  # noqa: BLE001 - state fallback below
+                _LOGGER.exception(
+                    "Failed reading events from %s", state.entity_id
+                )
+
+        fallback = event_from_calendar_state(
+            dict(state.attributes), state.entity_id, calendar_name
+        )
+        return [fallback] if fallback is not None else []
 
     @staticmethod
     def _calendar_json_object(reply: str) -> dict[str, Any] | None:
@@ -4552,7 +4880,7 @@ class ConversationalAssistantManager(NoteManagerMixin):
         context: ZaloWebhookContext,
         service_context: Context | None,
     ) -> str:
-        """Read all exposed calendar events from now to an explicit horizon."""
+        """Read exposed calendars and retain exact mutable events for follow-up."""
         states = self._zalo_exposed_calendar_states(context.text)
         if not states:
             return (
@@ -4569,72 +4897,291 @@ class ConversationalAssistantManager(NoteManagerMixin):
                 context.text, now, context, service_context
             )
         if window is None:
-            if has_time_reference:
-                heading = (
-                    "🕒 **Mốc thời gian chưa hợp lệ, đã qua hoặc chưa đủ rõ.**"
-                )
-            else:
-                heading = (
-                    "🕒 **Bạn chưa nêu mốc thời gian cụ thể để tra lịch.**"
-                )
+            heading = (
+                "🕒 **Mốc thời gian chưa hợp lệ, đã qua hoặc chưa đủ rõ.**"
+                if has_time_reference
+                else "🕒 **Bạn chưa nêu mốc thời gian cụ thể để tra lịch.**"
+            )
             message = (
                 f"{heading}\n\n"
                 "Hãy thêm mốc như **hôm nay**, **ngày mai**, **ngày kia**, "
-                "**2 hôm nữa**, **15 ngày nữa**, **1 tuần nữa**, "
-                "**1 tháng nữa** hoặc một ngày cụ thể như **15/08/2026**.\n\n"
-                "Ví dụ: **sự kiện trong 15 ngày nữa**."
+                "**2 hôm nữa**, **15 ngày nữa**, **75 ngày nữa**, "
+                "**115 ngày nữa**, **1 tuần nữa**, **1 tháng nữa** hoặc "
+                "một ngày cụ thể như **15/08/2026**.\n\n"
+                "Ví dụ: **sự kiện 115 ngày nữa**."
             )
             return self._append_ai_attempt_summary(
-                message,
-                attempted_agents,
-                language=_request_language(context.text),
-                zalo=True,
+                message, attempted_agents,
+                language=_request_language(context.text), zalo=True
             )
 
-        events = []
-        service_available = self.hass.services.has_service(
-            "calendar", "get_events"
-        )
+        events: list[CalendarDisplayEvent] = []
         for state in states:
-            calendar_name = str(state.name or state.entity_id)
-            calendar_events = []
-            if service_available:
-                try:
-                    response = await self.hass.services.async_call(
-                        "calendar",
-                        "get_events",
-                        {
-                            "entity_id": state.entity_id,
-                            "start_date_time": window.start.isoformat(),
-                            "end_date_time": window.end.isoformat(),
-                        },
-                        blocking=True,
-                        context=service_context,
-                        return_response=True,
-                    )
-                    calendar_events = extract_calendar_events(
-                        response, state.entity_id, calendar_name
-                    )
-                except Exception:  # noqa: BLE001 - continue other calendars
-                    _LOGGER.exception(
-                        "Failed reading events from %s", state.entity_id
-                    )
-
-            if not calendar_events:
-                fallback = event_from_calendar_state(
-                    dict(state.attributes), state.entity_id, calendar_name
+            events.extend(
+                await self._async_calendar_events_for_state(
+                    state, window, service_context
                 )
-                if fallback is not None:
-                    calendar_events.append(fallback)
-            events.extend(calendar_events)
+            )
 
+        displayed, _skipped = calendar_events_for_display(events, window)
         reply = format_calendar_events(events, window, now)
+        manageable = [
+            event for event in displayed
+            if event.uid and (event.can_update or event.can_delete)
+        ]
+        if manageable:
+            self._zalo_pending_calendar_managements[context.owner_key] = (
+                PendingZaloCalendarManagement(
+                    events=manageable,
+                    expires_at=dt_util.now() + timedelta(
+                        minutes=PENDING_SELECTION_TIMEOUT_MINUTES
+                    ),
+                    ai_attempted_agents=attempted_agents,
+                )
+            )
+            reply += (
+                "\n\n🛠️ **Bạn có muốn quản lý sự kiện vừa tra cứu không?**\n"
+                "Trả lời **Sửa**, **Xóa** hoặc **Bỏ qua**."
+            )
+        else:
+            self._zalo_pending_calendar_managements.pop(context.owner_key, None)
+
         return self._append_ai_attempt_summary(
-            reply,
-            attempted_agents,
-            language=_request_language(context.text),
-            zalo=True,
+            reply, attempted_agents,
+            language=_request_language(context.text), zalo=True
         )
+
+    @staticmethod
+    def _calendar_management_event_prompt(
+        events: list[CalendarDisplayEvent], action: str, *, invalid: bool = False
+    ) -> str:
+        """List only events that support the selected safe mutation."""
+        title = "sửa" if action == "update" else "xóa"
+        lines = []
+        if invalid:
+            lines.append("⚠️ **Lựa chọn chưa hợp lệ.**\n")
+        lines.append(f"Chọn **sự kiện muốn {title}** bằng số:")
+        for index, event in enumerate(events, 1):
+            when = dt_util.as_local(event.start)
+            time_text = when.strftime("%d/%m/%Y")
+            if not event.all_day:
+                time_text += when.strftime(" lúc %H:%M")
+            lines.append(
+                f"{index}. **{event.summary}** — {time_text} "
+                f"({event.calendar_name})"
+            )
+        lines.append("\nTrả lời **Hủy** để dừng.")
+        return "\n".join(lines)
+
+    @staticmethod
+    def _calendar_event_update_payload(
+        request: CalendarCreateRequest, event: CalendarDisplayEvent
+    ) -> dict[str, Any]:
+        """Build RFC5545-compatible event fields for CalendarEntity update."""
+        payload: dict[str, Any] = {
+            "summary": request.summary,
+            "description": request.description,
+            "location": request.location,
+        }
+        if request.all_day:
+            payload["start"] = dt_util.as_local(request.start).date()
+            payload["end"] = dt_util.as_local(request.end).date()
+        else:
+            payload["start"] = request.start
+            payload["end"] = request.end
+        if event.rrule:
+            payload["rrule"] = event.rrule
+        return payload
+
+    async def _async_ai_calendar_update_request(
+        self,
+        text: str,
+        event: CalendarDisplayEvent,
+        context: ZaloWebhookContext,
+        service_context: Context | None,
+    ) -> tuple[CalendarCreateRequest | None, list[str]]:
+        """Use configured AI to merge natural edits with the current event."""
+        if self.zalo_conversation_agent_id == HOME_ASSISTANT_AGENT:
+            return None, []
+        current_start = dt_util.as_local(event.start)
+        current_end = dt_util.as_local(event.end) if event.end else current_start + timedelta(hours=1)
+        prompt = (
+            "You are a strict calendar event update parser. Return one JSON "
+            "object only. Merge the user's requested changes into the current "
+            "event and preserve every field not explicitly changed. Current "
+            f"local datetime: {dt_util.as_local(dt_util.now()).isoformat()}. "
+            f"Current event: summary={event.summary!r}, all_day={event.all_day}, "
+            f"start={current_start.isoformat()}, end={current_end.isoformat()}, "
+            f"description={event.description!r}, location={event.location!r}. "
+            f"User edit: {text!r}. Fields: summary, all_day, start_date and "
+            "end_date for all-day, or start_date_time and end_date_time for "
+            "timed events, description, location. End is exclusive. Never "
+            "invent unrelated details. If the request is ambiguous return "
+            "{\"error\":\"missing_information\"}."
+        )
+        attempted: list[str] = []
+        candidates = [c for c in self._conversation_agent_candidates(
+            self.zalo_conversation_agent_id
+        ) if c[0] != HOME_ASSISTANT_AGENT]
+        for agent_id, agent_name in candidates:
+            attempted.append(agent_name)
+            try:
+                async with asyncio.timeout(min(30, ZALO_SEARCH_TIMEOUT_SECONDS)):
+                    result = await async_converse(
+                        hass=self.hass, text=prompt, conversation_id=None,
+                        context=service_context or Context(),
+                        language=_request_language(text), agent_id=agent_id,
+                    )
+            except Exception:  # noqa: BLE001 - fail over and retain safe flow
+                _LOGGER.exception("Calendar update parser %s failed", agent_id)
+                continue
+            if self._conversation_result_error_code(result):
+                continue
+            payload = self._calendar_json_object(
+                self._conversation_reply_text(result)
+            )
+            if payload and not payload.get("error"):
+                parsed = calendar_create_request_from_ai_payload(
+                    payload, dt_util.now()
+                )
+                if parsed is not None:
+                    return parsed, attempted
+        return None, attempted
+
+    async def _async_zalo_pending_calendar_management_reply(
+        self,
+        context: ZaloWebhookContext,
+        pending: PendingZaloCalendarManagement,
+        service_context: Context | None,
+    ) -> str:
+        """Safely select, confirm, update, or delete an exact calendar event."""
+        text = normalize_text(context.text)
+        if self._is_cancel_pending_text(context.text) or text in {
+            "bo qua", "khong", "no", "skip"
+        }:
+            self._zalo_pending_calendar_managements.pop(context.owner_key, None)
+            return "Đã đóng phần quản lý sự kiện."
+
+        pending.expires_at = dt_util.now() + timedelta(
+            minutes=PENDING_SELECTION_TIMEOUT_MINUTES
+        )
+        if pending.phase == "action":
+            if any(word in text for word in ("sua", "chinh sua", "edit", "update")):
+                candidates = [event for event in pending.events if event.can_update]
+                if not candidates:
+                    return "Lịch của các sự kiện này không hỗ trợ sửa."
+                pending.events = candidates
+                pending.phase = "select_update"
+                return self._calendar_management_event_prompt(candidates, "update")
+            if any(word in text for word in ("xoa", "delete", "remove")):
+                candidates = [event for event in pending.events if event.can_delete]
+                if not candidates:
+                    return "Lịch của các sự kiện này không hỗ trợ xóa."
+                pending.events = candidates
+                pending.phase = "select_delete"
+                return self._calendar_management_event_prompt(candidates, "delete")
+            return (
+                "Hãy trả lời **Sửa**, **Xóa** hoặc **Bỏ qua** để tôi thao tác "
+                "đúng sự kiện."
+            )
+
+        if pending.phase in {"select_update", "select_delete"}:
+            indexes = parse_target_selection(
+                context.text, [event.summary for event in pending.events]
+            )
+            if len(indexes) != 1:
+                action = "update" if pending.phase == "select_update" else "delete"
+                return self._calendar_management_event_prompt(
+                    pending.events, action, invalid=True
+                )
+            event = pending.events[indexes[0]]
+            pending.selected_event = event
+            if pending.phase == "select_delete":
+                pending.phase = "confirm_delete"
+                return (
+                    f"⚠️ **Xác nhận xóa sự kiện**\n"
+                    f"**Nội dung:** {event.summary}\n"
+                    f"**Lịch:** {event.calendar_name}\n\n"
+                    "Trả lời **Xác nhận xóa** để thực hiện hoặc **Hủy**."
+                )
+            pending.phase = "edit_details"
+            return (
+                f"✏️ **Đang sửa:** {event.summary}\n"
+                "Hãy nhập nội dung muốn thay đổi bằng ngôn ngữ tự nhiên. "
+                "Ví dụ: **đổi tên thành Họp dự án và chuyển sang 19h ngày mai**. "
+                "Thông tin không nhắc tới sẽ được giữ nguyên."
+            )
+
+        event = pending.selected_event
+        if event is None or not event.uid:
+            self._zalo_pending_calendar_managements.pop(context.owner_key, None)
+            return "Không còn đủ dữ liệu định danh sự kiện. Hãy tra cứu lại lịch."
+        entity = self._calendar_entity(event.calendar_entity_id)
+        if entity is None:
+            self._zalo_pending_calendar_managements.pop(context.owner_key, None)
+            return "Không tìm thấy calendar entity đang quản lý sự kiện này."
+
+        if pending.phase == "confirm_delete":
+            if text not in {"xac nhan xoa", "dong y xoa", "yes delete", "confirm delete"}:
+                return "Hãy trả lời **Xác nhận xóa** hoặc **Hủy**."
+            try:
+                await entity.async_delete_event(
+                    event.uid, event.recurrence_id or None, None
+                )
+                if hasattr(entity, "async_update_event_listeners"):
+                    listener_result = entity.async_update_event_listeners()
+                    if asyncio.iscoroutine(listener_result):
+                        await listener_result
+            except Exception:  # noqa: BLE001 - never claim success on failure
+                _LOGGER.exception("Failed deleting calendar event %s", event.uid)
+                return "⚠️ **Xóa sự kiện thất bại.** Hãy kiểm tra quyền của lịch."
+            self._zalo_pending_calendar_managements.pop(context.owner_key, None)
+            return (
+                "✅ **Đã xóa sự kiện**\n"
+                f"**Nội dung:** {event.summary}\n"
+                f"**Lịch:** {event.calendar_name}"
+            )
+
+        if pending.phase == "edit_details":
+            request, attempted = await self._async_ai_calendar_update_request(
+                context.text, event, context, service_context
+            )
+            if request is None:
+                try:
+                    request = self._deterministic_calendar_create_request(
+                        "tạo sự kiện " + context.text, dt_util.now()
+                    )
+                except ReminderParseError:
+                    return self._append_ai_attempt_summary(
+                        "Tôi chưa hiểu đủ thay đổi. Hãy nêu **nội dung mới** và "
+                        "**mốc thời gian mới** rõ hơn, hoặc trả lời **Hủy**.",
+                        attempted, language=_request_language(context.text),
+                        zalo=True,
+                    )
+            try:
+                await entity.async_update_event(
+                    event.uid,
+                    self._calendar_event_update_payload(request, event),
+                    event.recurrence_id or None,
+                    None,
+                )
+                if hasattr(entity, "async_update_event_listeners"):
+                    listener_result = entity.async_update_event_listeners()
+                    if asyncio.iscoroutine(listener_result):
+                        await listener_result
+            except Exception:  # noqa: BLE001 - preserve exact failure state
+                _LOGGER.exception("Failed updating calendar event %s", event.uid)
+                return "⚠️ **Sửa sự kiện thất bại.** Hãy kiểm tra quyền của lịch."
+            self._zalo_pending_calendar_managements.pop(context.owner_key, None)
+            return self._append_ai_attempt_summary(
+                "✅ **Đã sửa sự kiện thành công**\n"
+                f"**Lịch:** {event.calendar_name}\n"
+                f"{format_calendar_create_request(request)}",
+                attempted, language=_request_language(context.text), zalo=True,
+            )
+
+        self._zalo_pending_calendar_managements.pop(context.owner_key, None)
+        return "Phiên quản lý sự kiện không còn hợp lệ. Hãy tra cứu lại lịch."
 
     async def _async_calendar_from_zalo(
         self,
@@ -4699,6 +5246,17 @@ class ConversationalAssistantManager(NoteManagerMixin):
         pending_deletion = self._zalo_pending_deletion(context.owner_key)
         pending_camera = self._zalo_pending_camera(context.owner_key)
         pending_calendar = self._zalo_pending_calendar_event(context.owner_key)
+        pending_calendar_management = self._zalo_pending_calendar_management(
+            context.owner_key
+        )
+        if (
+            pending_calendar_management is not None
+            and command is None
+            and explicit_ha_kind is None
+        ):
+            return await self._async_zalo_pending_calendar_management_reply(
+                context, pending_calendar_management, service_context
+            )
         if (
             pending_calendar is not None
             and command is None
@@ -4945,6 +5503,9 @@ class ConversationalAssistantManager(NoteManagerMixin):
                         context, self._zalo_background_error_text(language)
                     )
                     return
+                reply = await self._async_prepare_zalo_reply(
+                    context, reply, service_context
+                )
                 await self._async_send_zalo_webhook_reply(context, reply)
         except TimeoutError:
             _LOGGER.error(
@@ -5056,6 +5617,9 @@ class ConversationalAssistantManager(NoteManagerMixin):
                     "reason": "not_a_command",
                 }
 
+            reply = await self._async_prepare_zalo_reply(
+                context, reply, service_context
+            )
             reply_sent = await self._async_send_zalo_webhook_reply(
                 context, reply
             )
@@ -5957,19 +6521,40 @@ class ConversationalAssistantManager(NoteManagerMixin):
         )
 
     async def _async_voice_response(
-        self, user_input: ConversationInput, text: str
+        self,
+        user_input: ConversationInput,
+        text: str,
+        *,
+        ai_generated: bool = False,
     ) -> str:
-        """Return response text to the Home Assistant Assist pipeline.
+        """Return complete speech to Assist and optionally enrich deterministic text.
 
-        Sentence-trigger callbacks are converted by Home Assistant into the
-        ``speech`` field of the conversation response. The Assist pipeline then
-        sends that speech through its configured TTS engine while also showing
-        the same text in the Assist conversation UI. Returning an empty string
-        suppresses pipeline TTS, so every voice feature must return its actual
-        response here.
+        Sentence-trigger callbacks become the ``speech`` field of the
+        conversation response, so returning the real text keeps both the Assist
+        chat transcript and pipeline TTS working for every feature.
         """
-        del user_input  # Kept in the signature for every voice workflow.
-        return str(text or "").strip()
+        response = str(text or "").strip()
+        if not response or ai_generated:
+            return response
+        language_code = str(getattr(user_input, "language", "vi") or "vi")
+        language = (
+            "en"
+            if language_code.casefold().startswith("en")
+            else _request_language(str(getattr(user_input, "text", "") or ""))
+        )
+        polished, attempted = await self._async_ai_polish_response(
+            str(getattr(user_input, "text", "") or ""),
+            response,
+            language=language,
+            zalo=False,
+            service_context=getattr(user_input, "context", None),
+        )
+        return self._append_ai_attempt_summary(
+            polished,
+            attempted,
+            language=language,
+            zalo=False,
+        )
 
     @staticmethod
     def _reminder_from_targets(
@@ -6066,7 +6651,9 @@ class ConversationalAssistantManager(NoteManagerMixin):
             zalo=False,
             language_hint=_request_language(user_input.text),
         )
-        return await self._async_voice_response(user_input, reply)
+        return await self._async_voice_response(
+            user_input, reply, ai_generated=True
+        )
 
     async def _async_help_from_voice(
         self, user_input: ConversationInput, _result: RecognizeResult
