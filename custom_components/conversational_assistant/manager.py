@@ -521,7 +521,7 @@ class PendingZaloCalendarManagement:
 
 @dataclass(slots=True)
 class PendingVoiceCamera:
-    """Voice camera request waiting for selection or final confirmation."""
+    """Voice camera request waiting for camera, destination, or confirmation."""
 
     pending_id: str
     cameras: list[CameraTarget]
@@ -632,6 +632,41 @@ def _sanitize_spoken_text(value: str) -> str:
         else:
             characters.append(" ")
     return " ".join("".join(characters).split())
+
+
+def _assist_speech_text(value: str) -> str:
+    """Return complete plain speech for the Home Assistant Assist pipeline.
+
+    Every Voice Assist callback returns this text as the conversation speech
+    field. Removing only presentation markup and decorative emoji keeps dates,
+    times, punctuation, entity names, and numbered choices understandable to
+    both the user and the TTS engine.
+    """
+    text = unicodedata.normalize("NFC", str(value or "").strip())
+    text = re.sub(r"\[([^\]]+)\]\([^\)]+\)", r"\1", text)
+    text = re.sub(r"<[^>]+>", "", text)
+    text = re.sub(r"(?m)^\s{0,3}#{1,6}\s*", "", text)
+    text = re.sub(r"\*\*(.*?)\*\*", r"\1", text, flags=re.DOTALL)
+    text = re.sub(r"__(.*?)__", r"\1", text, flags=re.DOTALL)
+    text = text.replace("`", "")
+    text = re.sub(r"(?m)^\s*(?:[•▪◦]|[-*+]\s+)\s*", "", text)
+
+    characters: list[str] = []
+    for character in text:
+        codepoint = ord(character)
+        if character in {"\ufe0f", "\u200d", "\u20e3"}:
+            continue
+        if (
+            0x1F000 <= codepoint <= 0x1FAFF
+            or 0x2600 <= codepoint <= 0x27BF
+        ):
+            continue
+        characters.append(character)
+
+    text = "".join(characters)
+    text = re.sub(r"[ \t]+\n", "\n", text)
+    text = re.sub(r"\n{3,}", "\n\n", text)
+    return text.strip()
 
 
 class _ConversationInputTextProxy:
@@ -2909,8 +2944,8 @@ class ConversationalAssistantManager(NoteManagerMixin):
             "• Thêm, xem, sửa, xóa; chọn Mức 1 bảo mật bằng pass hoặc Mức 2 công khai.\n"
             "• Ví dụ: `Ghi nhớ mã tủ đồ là 2468`; `Danh sách ghi chú`; `Sửa ghi chú`.\n\n"
             "7️⃣ **📸 CHỤP ẢNH CAMERA**\n"
-            "• Chọn một hoặc nhiều camera rồi gửi ảnh lên Zalo.\n"
-            "• Ví dụ: `Chụp camera`; sau đó trả lời `1 3 10` hoặc **Tất cả**.\n\n"
+            "• Chọn một hoặc nhiều camera, chọn đúng Zalo nhận ảnh, rồi xác nhận chụp và gửi.\n"
+            "• Ví dụ: `Chụp camera`; chọn `1 3`, chọn Zalo `2`, rồi nói **Đồng ý**.\n\n"
             "8️⃣ **🧠 PHÂN TÍCH CAMERA BẰNG AI**\n"
             "• Chụp và phân tích nhiều camera; instructions có thể sửa tại AI settings.\n"
             "• Ví dụ: `Phân tích camera`; `Analyze camera`; sau đó chọn camera cần xem.\n\n"
@@ -3548,6 +3583,35 @@ class ConversationalAssistantManager(NoteManagerMixin):
             f"Ảnh sẽ được gửi lên Zalo đến {destination_names}. "
             "Hãy nói **đồng ý** để chụp và gửi, hoặc nói "
             "**không chụp** để **hủy**."
+        )
+
+    @staticmethod
+    def _voice_camera_destination_prompt(
+        cameras: list[CameraTarget],
+        targets: list[dict[str, Any]],
+        invalid: bool = False,
+    ) -> str:
+        """Ask which configured Zalo destinations should receive snapshots."""
+        camera_names = ", ".join(
+            camera.display_name for camera in cameras
+        )
+        lines: list[str] = []
+        for index, target in enumerate(targets, start=1):
+            name = (
+                str(target.get(CONF_ZALO_TARGET_NAME, "")).strip()
+                or str(target.get(CONF_ZALO_THREAD_ID, "")).strip()
+                or "Zalo"
+            )
+            lines.append(f"{index} - {name}")
+        prefix = (
+            "Lựa chọn nơi gửi chưa hợp lệ. " if invalid else ""
+        )
+        return (
+            f"{prefix}Bạn đã chọn camera {camera_names}.\n"
+            "Hãy chọn Zalo sẽ nhận ảnh:\n"
+            f"{chr(10).join(lines)}\n"
+            "Hãy nói một hoặc nhiều số hoặc tên nơi nhận, nói **tất cả** "
+            "để chọn mọi nơi, hoặc nói **không gửi** hay **hủy** để dừng."
         )
 
     async def _async_camera_from_zalo(
@@ -8454,8 +8518,10 @@ class ConversationalAssistantManager(NoteManagerMixin):
         chat transcript and pipeline TTS working for every feature.
         """
         response = str(text or "").strip()
-        if not response or ai_generated:
+        if not response:
             return response
+        if ai_generated:
+            return _assist_speech_text(response)
         language_code = str(getattr(user_input, "language", "vi") or "vi")
         language = (
             "en"
@@ -8469,11 +8535,13 @@ class ConversationalAssistantManager(NoteManagerMixin):
             zalo=False,
             service_context=getattr(user_input, "context", None),
         )
-        return self._append_ai_attempt_summary(
-            polished,
-            attempted,
-            language=language,
-            zalo=False,
+        return _assist_speech_text(
+            self._append_ai_attempt_summary(
+                polished,
+                attempted,
+                language=language,
+                zalo=False,
+            )
         )
 
     @staticmethod
@@ -8975,7 +9043,7 @@ class ConversationalAssistantManager(NoteManagerMixin):
         result: RecognizeResult,
         pending: PendingVoiceCamera,
     ) -> str:
-        """Handle camera selection and final voice confirmation."""
+        """Select cameras, select Zalo destinations, then confirm capture."""
         if pending.mode == "analysis":
             return await self._async_confirm_camera_analysis_from_voice(
                 user_input, result, pending
@@ -9002,13 +9070,25 @@ class ConversationalAssistantManager(NoteManagerMixin):
                 )
 
             pending.selected_cameras = available
-            pending.phase = "confirmation"
+            current_targets = self._current_voice_camera_zalo_targets(pending)
+            if not current_targets:
+                self._pending_voice_cameras.pop(pending.pending_id, None)
+                self._sync_pending_followup_trigger()
+                return await self._async_voice_response(
+                    user_input,
+                    "Các Zalo destination đã bị xóa hoặc tắt. Hãy mở cấu "
+                    "hình Conversational Assistant, thêm hoặc bật lại nơi "
+                    "nhận, sau đó thực hiện lại yêu cầu.",
+                )
+
+            pending.zalo_targets = [dict(target) for target in current_targets]
+            pending.phase = "destination"
             pending.expires_at = dt_util.now() + timedelta(
                 seconds=PENDING_CONFIRMATION_TIMEOUT_SECONDS
             )
             self._sync_pending_followup_trigger()
-            response = self._voice_camera_confirmation_prompt(
-                available, pending.zalo_targets
+            response = self._voice_camera_destination_prompt(
+                available, current_targets
             )
             unavailable = [
                 camera.display_name for camera in selected if not camera.available
@@ -9021,6 +9101,67 @@ class ConversationalAssistantManager(NoteManagerMixin):
                     + response
                 )
             return await self._async_voice_response(user_input, response)
+
+        if pending.phase == "destination":
+            current_targets = self._current_voice_camera_zalo_targets(pending)
+            if not current_targets:
+                self._pending_voice_cameras.pop(pending.pending_id, None)
+                self._sync_pending_followup_trigger()
+                return await self._async_voice_response(
+                    user_input,
+                    "Các Zalo destination đã bị xóa hoặc tắt trước khi chọn "
+                    "nơi gửi. Hãy cấu hình lại rồi thực hiện lại yêu cầu.",
+                )
+
+            selection = self._selection_slot(user_input, result)
+            target_names = [
+                str(target.get(CONF_ZALO_TARGET_NAME, "")).strip()
+                or str(target.get(CONF_ZALO_THREAD_ID, "")).strip()
+                or "Zalo"
+                for target in current_targets
+            ]
+            indexes = parse_target_selection(selection, target_names)
+            if not indexes:
+                pending.zalo_targets = [
+                    dict(target) for target in current_targets
+                ]
+                pending.expires_at = dt_util.now() + timedelta(
+                    seconds=PENDING_CONFIRMATION_TIMEOUT_SECONDS
+                )
+                self._sync_pending_followup_trigger()
+                return await self._async_voice_response(
+                    user_input,
+                    self._voice_camera_destination_prompt(
+                        pending.selected_cameras,
+                        current_targets,
+                        invalid=True,
+                    ),
+                )
+
+            selected_targets = [current_targets[index] for index in indexes]
+            pending.zalo_targets = [
+                dict(target) for target in selected_targets
+            ]
+            pending.phase = "confirmation"
+            pending.expires_at = dt_util.now() + timedelta(
+                seconds=PENDING_CONFIRMATION_TIMEOUT_SECONDS
+            )
+            self._sync_pending_followup_trigger()
+            return await self._async_voice_response(
+                user_input,
+                self._voice_camera_confirmation_prompt(
+                    pending.selected_cameras,
+                    selected_targets,
+                ),
+            )
+
+        if pending.phase != "confirmation":
+            self._pending_voice_cameras.pop(pending.pending_id, None)
+            self._sync_pending_followup_trigger()
+            return await self._async_voice_response(
+                user_input,
+                "Phiên chụp ảnh camera không còn hợp lệ. Hãy yêu cầu lại.",
+            )
 
         if not self._is_voice_camera_confirmation(user_input.text):
             pending.expires_at = dt_util.now() + timedelta(
