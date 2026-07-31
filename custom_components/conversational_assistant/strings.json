@@ -47,6 +47,7 @@
         "description": "Settings are organized by feature. Currently configured Zalo destinations: {zalo_count}.",
         "menu_options": {
           "general": "General settings",
+          "calendar": "Calendar settings",
           "zalo": "Zalo settings",
           "ai": "AI settings",
           "tts": "TTS settings",
@@ -62,6 +63,24 @@
         },
         "data_description": {
           "confirm_targets": "When enabled, both Voice Assist and Zalo reminders are saved only after you reply with destination numbers or names."
+        }
+      },
+      "calendar": {
+        "title": "Calendar settings",
+        "description": "The sensor scans every available calendar. Found {mobile_count} Mobile App devices and {zalo_count} enabled Zalo destinations for fixed daily notifications.",
+        "data": {
+          "calendar_lookahead_days": "Number of upcoming days to scan",
+          "calendar_notification_enabled": "Send a daily calendar notification when events exist",
+          "calendar_notification_time": "Daily notification time",
+          "calendar_notification_mobile_devices": "Fixed Mobile App recipients",
+          "calendar_notification_zalo_targets": "Fixed Zalo recipients"
+        },
+        "data_description": {
+          "calendar_lookahead_days": "Default: 30 days. The sensor state is the total event count; its attributes contain the normalized event list from all available calendar entities.",
+          "calendar_notification_enabled": "When enabled, the integration refreshes the sensor at the selected time and sends a summary only when the event count is greater than zero.",
+          "calendar_notification_time": "Local Home Assistant time. Default: 07:00 every day.",
+          "calendar_notification_mobile_devices": "Select one or more Mobile App devices that always receive the calendar summary.",
+          "calendar_notification_zalo_targets": "Select one or more enabled Zalo destinations already configured in Zalo settings."
         }
       },
       "zalo": {

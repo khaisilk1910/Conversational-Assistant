@@ -553,7 +553,10 @@ class NoteManagerMixin:
         content = ""
         if pending.security_level == NOTE_SECURITY_PUBLIC and pending.content:
             content = f" Nội dung: {pending.content}."
-        return f"Xác nhận {verb} ở {label}?{content} Trả lời có hoặc không."
+        return (
+            f"Xác nhận {verb} ở {label}?{content} "
+            "Trả lời **có** hoặc **không**."
+        )
 
     @staticmethod
     def _selection_index(text: str, notes: list[Note]) -> int | None:
@@ -748,7 +751,7 @@ class NoteManagerMixin:
             current = self.notes.get(pending.selected_note_id or "")
             current_hint = (
                 f" Mức hiện tại là {security_label(current.security_level)}; "
-                "có thể trả lời giữ nguyên."
+                "có thể trả lời **giữ nguyên**."
                 if current
                 else ""
             )
@@ -806,7 +809,10 @@ class NoteManagerMixin:
                     "delete": "Đã hủy xóa ghi chú.",
                 }.get(action, "Đã hủy yêu cầu.")
             if not is_affirmative(text):
-                return "Hãy trả lời có để xác nhận hoặc không để hủy."
+                return (
+                    "Hãy trả lời **có** để xác nhận hoặc **không** "
+                    "để **hủy**."
+                )
 
             now = dt_util.now()
             if pending.action == "create":

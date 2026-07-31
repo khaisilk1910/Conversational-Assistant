@@ -26,6 +26,7 @@ async def async_setup_entry(
         [
             ConversationalAssistantCountSensor(manager, entry),
             ConversationalAssistantNextSensor(manager, entry),
+            ConversationalAssistantCalendarEventCountSensor(manager, entry),
             ConversationalAssistantNoteCountSensor(manager, entry),
             ConversationalAssistantLearnedCommandCountSensor(manager, entry),
         ]
@@ -158,6 +159,65 @@ class ConversationalAssistantNextSensor(ConversationalAssistantSensorBase):
             "message": reminder.message,
             "recurrence": reminder.recurrence.kind,
             "snoozed": reminder.snooze_until is not None,
+        }
+
+
+class ConversationalAssistantCalendarEventCountSensor(
+    ConversationalAssistantSensorBase
+):
+    """Upcoming calendar event count across every available calendar."""
+
+    _attr_name = "Số sự kiện sắp diễn ra"
+    _attr_icon = "mdi:calendar-multiple-check"
+
+    def __init__(
+        self,
+        manager: ConversationalAssistantManager,
+        entry: ConfigEntry,
+    ) -> None:
+        """Initialize calendar event count sensor."""
+        super().__init__(manager, entry)
+        self._attr_unique_id = f"{entry.entry_id}_calendar_event_count"
+
+    @property
+    def native_value(self) -> int:
+        """Return the number of events in the configured look-ahead window."""
+        return self.manager.calendar_event_count
+
+    @property
+    def extra_state_attributes(self) -> dict[str, Any]:
+        """Return normalized event details and calendar monitor metadata."""
+        rows = self.manager.calendar_event_sensor_rows
+        return {
+            "so_ngay_tra_cuu": self.manager.calendar_lookahead_days,
+            "tu_thoi_gian": (
+                self.manager.calendar_window_start.isoformat()
+                if self.manager.calendar_window_start is not None
+                else None
+            ),
+            "den_thoi_gian": (
+                self.manager.calendar_window_end.isoformat()
+                if self.manager.calendar_window_end is not None
+                else None
+            ),
+            "cap_nhat_luc": (
+                self.manager.calendar_last_update.isoformat()
+                if self.manager.calendar_last_update is not None
+                else None
+            ),
+            "list_su_kien": self.manager.calendar_event_list_text,
+            "su_kien_sap_toi": rows,
+            "thong_bao_bat": self.manager.calendar_notification_enabled,
+            "gio_thong_bao": (
+                self.manager.calendar_notification_time.strftime("%H:%M:%S")
+            ),
+            "mobile_da_chon": (
+                self.manager.calendar_notification_mobile_device_ids
+            ),
+            "zalo_da_chon": (
+                self.manager.calendar_notification_zalo_target_ids
+            ),
+            "loi_cap_nhat": self.manager.calendar_refresh_error,
         }
 
 

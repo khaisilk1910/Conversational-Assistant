@@ -13,6 +13,17 @@ CONF_ZALO_TARGETS = "zalo_targets"
 CONF_SPEAKER_ENABLED = "speaker_enabled"
 CONF_TTS_ENTITY_ID = "tts_entity_id"
 
+# Calendar event sensor and scheduled notification settings.
+CONF_CALENDAR_LOOKAHEAD_DAYS = "calendar_lookahead_days"
+CONF_CALENDAR_NOTIFICATION_ENABLED = "calendar_notification_enabled"
+CONF_CALENDAR_NOTIFICATION_TIME = "calendar_notification_time"
+CONF_CALENDAR_NOTIFICATION_MOBILE_DEVICES = (
+    "calendar_notification_mobile_devices"
+)
+CONF_CALENDAR_NOTIFICATION_ZALO_TARGETS = (
+    "calendar_notification_zalo_targets"
+)
+
 # Incoming Zalo messages (zca-js compatible webhook payloads).
 CONF_ZALO_WEBHOOK_ENABLED = "zalo_webhook_enabled"
 CONF_ZALO_WEBHOOK_BOT_ACCOUNT_ID = "zalo_webhook_bot_account_id"
@@ -40,6 +51,11 @@ DEFAULT_SNOOZE_MINUTES = 10
 DEFAULT_ZALO_ENABLED = False
 DEFAULT_ZALO_TYPE = "1"
 DEFAULT_SPEAKER_ENABLED = True
+DEFAULT_CALENDAR_LOOKAHEAD_DAYS = 30
+DEFAULT_CALENDAR_NOTIFICATION_ENABLED = False
+DEFAULT_CALENDAR_NOTIFICATION_TIME = "07:00:00"
+MAX_CALENDAR_LOOKAHEAD_DAYS = 365
+CALENDAR_REFRESH_INTERVAL_MINUTES = 15
 DEFAULT_ZALO_WEBHOOK_ENABLED = True
 # Deliberately blank. Each installation must provide its own Zalo bot
 # account ID instead of inheriting a developer-specific value.

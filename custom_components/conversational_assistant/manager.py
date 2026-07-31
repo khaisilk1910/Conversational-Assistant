@@ -46,7 +46,10 @@ from homeassistant.const import (
 from homeassistant.core import Context, CoreState, Event, HomeAssistant, callback
 from homeassistant.helpers import device_registry as dr
 from homeassistant.helpers.dispatcher import async_dispatcher_send
-from homeassistant.helpers.event import async_track_point_in_time
+from homeassistant.helpers.event import (
+    async_track_point_in_time,
+    async_track_time_interval,
+)
 from homeassistant.helpers.start import async_at_started
 from homeassistant.helpers.storage import Store
 from homeassistant.util import dt as dt_util
@@ -60,6 +63,7 @@ from .const import (
     CAMERA_ANALYSIS_INSTRUCTIONS,
     CAMERA_ANALYSIS_SENTENCES,
     CAMERA_ANALYSIS_TIMEOUT_SECONDS,
+    CALENDAR_REFRESH_INTERVAL_MINUTES,
     CAMERA_SENTENCES,
     CONF_AI_AGENT_FAILOVER_ENABLED,
     CONF_AI_CAMERA_TASK_ENTITY_ID,
@@ -69,6 +73,11 @@ from .const import (
     COMMAND_DELETE_SENTENCES,
     COMMAND_LEARN_SENTENCES,
     COMMAND_LIST_SENTENCES,
+    CONF_CALENDAR_LOOKAHEAD_DAYS,
+    CONF_CALENDAR_NOTIFICATION_ENABLED,
+    CONF_CALENDAR_NOTIFICATION_MOBILE_DEVICES,
+    CONF_CALENDAR_NOTIFICATION_TIME,
+    CONF_CALENDAR_NOTIFICATION_ZALO_TARGETS,
     CONF_CONFIRM_TARGETS,
     CONF_DISMISS_ON_CLEAR,
     CONF_SPEAKER_ENABLED,
@@ -91,6 +100,9 @@ from .const import (
     DEFAULT_AI_CAMERA_TASK_ENTITY_ID,
     DEFAULT_AI_IMAGE_TASK_ENTITY_ID,
     DEFAULT_AI_SEARCH_AGENT_ID,
+    DEFAULT_CALENDAR_LOOKAHEAD_DAYS,
+    DEFAULT_CALENDAR_NOTIFICATION_ENABLED,
+    DEFAULT_CALENDAR_NOTIFICATION_TIME,
     DEFAULT_CONFIRM_TARGETS,
     DEFAULT_DISMISS_ON_CLEAR,
     DEFAULT_SPEAKER_ENABLED,
@@ -108,6 +120,7 @@ from .const import (
     HELP_SENTENCES,
     IMAGE_GENERATION_PREFIXES,
     LIST_SENTENCES,
+    MAX_CALENDAR_LOOKAHEAD_DAYS,
     MEDIA_PLAYER_DOMAIN,
     PENDING_FOLLOWUP_SENTENCES,
     PENDING_CONFIRMATION_TIMEOUT_SECONDS,
@@ -646,6 +659,15 @@ class ConversationalAssistantManager(NoteManagerMixin):
         self._unsub_timer: Callable[[], None] | None = None
         self._unsub_pending_trigger: Callable[[], None] | None = None
         self._unsub_pending_expiry_timer: Callable[[], None] | None = None
+        self._unsub_calendar_refresh_interval: Callable[[], None] | None = None
+        self._unsub_calendar_notification_timer: Callable[[], None] | None = None
+        self._calendar_refresh_task: asyncio.Task[Any] | None = None
+        self._calendar_refresh_lock = asyncio.Lock()
+        self._calendar_events: list[CalendarDisplayEvent] = []
+        self._calendar_window_start: datetime | None = None
+        self._calendar_window_end: datetime | None = None
+        self._calendar_last_update: datetime | None = None
+        self._calendar_refresh_error: str | None = None
         self._unsubs: list[Callable[[], None]] = []
         self._learned_trigger_unsubs: list[Callable[[], None]] = []
         # Optional targets are discovered only when a command actually needs
@@ -754,6 +776,188 @@ class ConversationalAssistantManager(NoteManagerMixin):
                 DEFAULT_AI_AGENT_FAILOVER_ENABLED,
             )
         )
+
+    @property
+    def calendar_lookahead_days(self) -> int:
+        """Return the configured number of future calendar days to scan."""
+        try:
+            days = int(
+                float(
+                    self._option(
+                        CONF_CALENDAR_LOOKAHEAD_DAYS,
+                        DEFAULT_CALENDAR_LOOKAHEAD_DAYS,
+                    )
+                )
+            )
+        except (TypeError, ValueError):
+            days = DEFAULT_CALENDAR_LOOKAHEAD_DAYS
+        return max(1, min(MAX_CALENDAR_LOOKAHEAD_DAYS, days))
+
+    @property
+    def calendar_notification_enabled(self) -> bool:
+        """Return whether the daily calendar summary is enabled."""
+        return bool(
+            self._option(
+                CONF_CALENDAR_NOTIFICATION_ENABLED,
+                DEFAULT_CALENDAR_NOTIFICATION_ENABLED,
+            )
+        )
+
+    @property
+    def calendar_notification_time(self) -> time:
+        """Return the configured local daily calendar notification time."""
+        raw_value = self._option(
+            CONF_CALENDAR_NOTIFICATION_TIME,
+            DEFAULT_CALENDAR_NOTIFICATION_TIME,
+        )
+        if isinstance(raw_value, time):
+            return raw_value.replace(tzinfo=None)
+        parsed = dt_util.parse_time(str(raw_value or ""))
+        return parsed or time(7, 0)
+
+    @staticmethod
+    def _normalized_option_list(value: Any) -> list[str]:
+        """Return a de-duplicated list of non-empty option identifiers."""
+        if isinstance(value, str):
+            raw_values = [value]
+        elif isinstance(value, (list, tuple, set)):
+            raw_values = list(value)
+        else:
+            raw_values = []
+        result: list[str] = []
+        for item in raw_values:
+            normalized = str(item or "").strip()
+            if normalized and normalized not in result:
+                result.append(normalized)
+        return result
+
+    @property
+    def calendar_notification_mobile_device_ids(self) -> list[str]:
+        """Return fixed Mobile App device IDs for calendar summaries."""
+        return self._normalized_option_list(
+            self._option(CONF_CALENDAR_NOTIFICATION_MOBILE_DEVICES, [])
+        )
+
+    @property
+    def calendar_notification_zalo_target_ids(self) -> list[str]:
+        """Return fixed configured Zalo target IDs for calendar summaries."""
+        return self._normalized_option_list(
+            self._option(CONF_CALENDAR_NOTIFICATION_ZALO_TARGETS, [])
+        )
+
+    @property
+    def calendar_event_count(self) -> int:
+        """Return events currently cached in the configured future window."""
+        return len(self._calendar_events)
+
+    @property
+    def calendar_window_start(self) -> datetime | None:
+        """Return the start of the latest successful calendar scan."""
+        return self._calendar_window_start
+
+    @property
+    def calendar_window_end(self) -> datetime | None:
+        """Return the exclusive end of the latest calendar scan."""
+        return self._calendar_window_end
+
+    @property
+    def calendar_last_update(self) -> datetime | None:
+        """Return when calendar data was most recently refreshed."""
+        return self._calendar_last_update
+
+    @property
+    def calendar_refresh_error(self) -> str | None:
+        """Return the last calendar refresh error, if any."""
+        return self._calendar_refresh_error
+
+    @property
+    def calendar_upcoming_events(self) -> list[CalendarDisplayEvent]:
+        """Return a copy of the cached, chronologically ordered events."""
+        return list(self._calendar_events)
+
+    @staticmethod
+    def _calendar_event_time_text(event: CalendarDisplayEvent) -> str:
+        """Format one normalized calendar event for sensors and messages."""
+        start = dt_util.as_local(event.start)
+        end = dt_util.as_local(event.end) if event.end is not None else None
+        if event.all_day:
+            if end is not None and end.date() > start.date() + timedelta(days=1):
+                inclusive_end = end.date() - timedelta(days=1)
+                return (
+                    f"Cả ngày từ {start.strftime('%d/%m/%Y')} đến "
+                    f"{inclusive_end.strftime('%d/%m/%Y')}"
+                )
+            return f"Cả ngày {start.strftime('%d/%m/%Y')}"
+        if end is not None:
+            if end.date() == start.date():
+                return (
+                    f"{start.strftime('%H:%M')} - {end.strftime('%H:%M')} "
+                    f"ngày {start.strftime('%d/%m/%Y')}"
+                )
+            return (
+                f"{start.strftime('%H:%M %d/%m/%Y')} - "
+                f"{end.strftime('%H:%M %d/%m/%Y')}"
+            )
+        return start.strftime("%H:%M ngày %d/%m/%Y")
+
+    @staticmethod
+    def _calendar_days_remaining(event: CalendarDisplayEvent) -> int:
+        """Return whole local days until an event starts."""
+        local_start = dt_util.as_local(event.start)
+        local_now = dt_util.now()
+        return max(0, (local_start.date() - local_now.date()).days)
+
+    @property
+    def calendar_event_sensor_rows(self) -> list[dict[str, Any]]:
+        """Return normalized event attributes for the calendar count sensor."""
+        rows: list[dict[str, Any]] = []
+        for index, event in enumerate(self._calendar_events, start=1):
+            local_start = dt_util.as_local(event.start)
+            local_end = (
+                dt_util.as_local(event.end)
+                if event.end is not None
+                else None
+            )
+            rows.append(
+                {
+                    "stt": index,
+                    "lich": event.calendar_name,
+                    "calendar_entity_id": event.calendar_entity_id,
+                    "noi_dung": event.summary,
+                    "bat_dau": local_start.isoformat(),
+                    "ket_thuc": local_end.isoformat() if local_end else None,
+                    "ca_ngay": event.all_day,
+                    "thoi_gian_hien_thi": self._calendar_event_time_text(event),
+                    "con_lai_ngay": self._calendar_days_remaining(event),
+                    "dia_diem": event.location or None,
+                    "chi_tiet": event.description or None,
+                    "uid": event.uid or None,
+                }
+            )
+        return rows
+
+    @property
+    def calendar_event_list_text(self) -> str:
+        """Return a readable one-attribute list of cached calendar events."""
+        grouped: dict[str, list[dict[str, Any]]] = {}
+        for row in self.calendar_event_sensor_rows:
+            calendar_name = str(row["lich"] or "Lịch không tên")
+            grouped.setdefault(calendar_name, []).append(row)
+
+        lines: list[str] = []
+        item_index = 0
+        for calendar_name, rows in grouped.items():
+            if lines:
+                lines.append("")
+            lines.append(f"🗓️ {calendar_name}")
+            for row in rows:
+                item_index += 1
+                lines.append(
+                    f"{item_index}. 📌 {row['noi_dung']} — "
+                    f"🕒 {row['thoi_gian_hien_thi']} — "
+                    f"⏳ còn {row['con_lai_ngay']} ngày"
+                )
+        return "\n".join(lines)
 
     def _conversation_agent_display_name(self, agent_id: str) -> str:
         """Return a stable, user-facing name for a Conversation agent."""
@@ -1028,51 +1232,52 @@ class ConversationalAssistantManager(NoteManagerMixin):
         )
 
         lines = message.split("\n")
-        first_index = next(
-            (index for index, line in enumerate(lines) if line.strip()), None
-        )
-        if first_index is not None:
-            first = lines[first_index].strip()
-            if (
-                "**" not in first
-                and len(first) <= 140
-                and not re.match(r"^\d+[.)-]\s", first)
-            ):
-                emoji_match = re.match(
-                    r"^(?P<emoji>[^\w\s]{1,4}\s*)(?P<body>.+)$", first
-                )
-                if emoji_match:
-                    first = (
-                        f"{emoji_match.group('emoji')}"
-                        f"**{emoji_match.group('body').strip()}**"
-                    )
-                else:
-                    first = f"**{first}**"
-                lines[first_index] = first
 
         always_commands = (
             "xác nhận xóa",
             "xác nhận xoá",
             "xác nhận sửa",
+            "xác nhận cập nhật",
             "xác nhận lưu",
             "xác nhận gửi",
             "xác nhận chụp",
+            "xác nhận tạo",
+            "xac nhan xoa",
+            "xac nhan sua",
+            "xac nhan cap nhat",
+            "xac nhan luu",
+            "xac nhan gui",
+            "xac nhan chup",
+            "xac nhan tao",
             "không xóa",
             "không xoá",
             "không chụp",
             "không lưu",
             "không sửa",
+            "không tạo",
+            "khong xoa",
+            "khong chup",
+            "khong luu",
+            "khong sua",
+            "khong tao",
             "bỏ yêu cầu vừa rồi",
             "bỏ yêu cầu",
             "bỏ qua",
+            "bo yeu cau vua roi",
+            "bo yeu cau",
+            "bo qua",
             "hủy",
             "huỷ",
+            "huy",
             "confirm delete",
             "confirm edit",
             "confirm update",
             "confirm save",
             "confirm send",
+            "confirm capture",
+            "confirm create",
             "never mind",
+            "cancel request",
             "cancel",
             "skip",
         )
@@ -1087,6 +1292,15 @@ class ConversationalAssistantManager(NoteManagerMixin):
             "xoá",
             "có",
             "không",
+            "giu nguyen",
+            "dong y",
+            "xac nhan",
+            "tat ca",
+            "tiep tuc",
+            "sua",
+            "xoa",
+            "co",
+            "khong",
             "yes",
             "no",
             "edit",
@@ -1103,20 +1317,56 @@ class ConversationalAssistantManager(NoteManagerMixin):
         instruction_markers = (
             "tra loi",
             "hay tra loi",
+            "vui long tra loi",
+            "phan hoi",
+            "hay phan hoi",
+            "vui long phan hoi",
             "gui ",
             "hay gui",
+            "vui long gui",
             "nhap ",
             "hay nhap",
+            "vui long nhap",
             "noi ",
             "hay noi",
+            "vui long noi",
             "chon ",
             "hay chon",
+            "vui long chon",
             "reply",
+            "respond",
             "send ",
             "type ",
             "say ",
             "choose ",
         )
+
+        first_index = next(
+            (index for index, line in enumerate(lines) if line.strip()), None
+        )
+        if first_index is not None:
+            first = lines[first_index].strip()
+            normalized_first = normalize_text(first)
+            if (
+                "**" not in first
+                and len(first) <= 140
+                and not re.match(r"^\d+[.)-]\s", first)
+                and not any(
+                    marker in normalized_first
+                    for marker in instruction_markers
+                )
+            ):
+                emoji_match = re.match(
+                    r"^(?P<emoji>[^\w\s]{1,4}\s*)(?P<body>.+)$", first
+                )
+                if emoji_match:
+                    first = (
+                        f"{emoji_match.group('emoji')}"
+                        f"**{emoji_match.group('body').strip()}**"
+                    )
+                else:
+                    first = f"**{first}**"
+                lines[first_index] = first
 
         def emphasize_line(line: str) -> str:
             protected: list[str] = []
@@ -1582,8 +1832,9 @@ class ConversationalAssistantManager(NoteManagerMixin):
 
     @callback
     def _async_home_assistant_started(self, _hass: HomeAssistant) -> None:
-        """Start reminder scheduling only after Home Assistant is ready."""
+        """Start reminder and calendar scheduling after Home Assistant is ready."""
         self._schedule_next()
+        self._start_calendar_monitoring()
 
     async def async_unload(self) -> None:
         """Unload listeners and timer."""
@@ -1596,6 +1847,17 @@ class ConversationalAssistantManager(NoteManagerMixin):
         if self._unsub_pending_trigger is not None:
             self._unsub_pending_trigger()
             self._unsub_pending_trigger = None
+        if self._unsub_calendar_refresh_interval is not None:
+            self._unsub_calendar_refresh_interval()
+            self._unsub_calendar_refresh_interval = None
+        if self._unsub_calendar_notification_timer is not None:
+            self._unsub_calendar_notification_timer()
+            self._unsub_calendar_notification_timer = None
+        calendar_refresh_task = self._calendar_refresh_task
+        if calendar_refresh_task is not None:
+            calendar_refresh_task.cancel()
+            await asyncio.gather(calendar_refresh_task, return_exceptions=True)
+            self._calendar_refresh_task = None
         self._clear_learned_command_triggers()
         for unsub in self._unsubs:
             unsub()
@@ -2529,8 +2791,8 @@ class ConversationalAssistantManager(NoteManagerMixin):
         )
         return (
             f"{prefix}{chr(10).join(lines)}\n"
-            "Trả lời số cần xóa, ví dụ 1, 1 và 3, hoặc tất cả. "
-            "Gửi 'không xóa' để hủy."
+            "Trả lời số cần xóa, ví dụ 1, 1 và 3, hoặc **tất cả**. "
+            "Gửi **không xóa** để **hủy**."
         )
 
     def _zalo_pending_creation(
@@ -2986,8 +3248,8 @@ class ConversationalAssistantManager(NoteManagerMixin):
         return (
             f"{prefix}{chr(10).join(lines)}\n"
             "Trả lời một hoặc nhiều số/tên camera để xác nhận, ví dụ: "
-            "1 3 10. Có thể gửi 'tất cả' để chụp mọi camera khả dụng. "
-            "Gửi 'không chụp' để hủy."
+            "1 3 10. Có thể gửi **tất cả** để chụp mọi camera khả dụng. "
+            "Gửi **không chụp** để **hủy**."
         )
 
     @staticmethod
@@ -3007,7 +3269,8 @@ class ConversationalAssistantManager(NoteManagerMixin):
         return (
             f"{prefix}{chr(10).join(lines)}\n"
             "Hãy nói một hoặc nhiều số hoặc tên camera, ví dụ 1 và 3. "
-            "Bạn cũng có thể nói tất cả, hoặc nói không chụp để hủy."
+            "Bạn cũng có thể nói **tất cả**, hoặc nói **không chụp** "
+            "để **hủy**."
         )
 
     @staticmethod
@@ -3031,7 +3294,8 @@ class ConversationalAssistantManager(NoteManagerMixin):
         return (
             f"{prefix}Bạn đã chọn {camera_names}. "
             f"Ảnh sẽ được gửi lên Zalo đến {destination_names}. "
-            "Hãy nói đồng ý để chụp và gửi, hoặc nói không chụp để hủy."
+            "Hãy nói **đồng ý** để chụp và gửi, hoặc nói "
+            "**không chụp** để **hủy**."
         )
 
     async def _async_camera_from_zalo(
@@ -3118,7 +3382,7 @@ class ConversationalAssistantManager(NoteManagerMixin):
         return (
             f"{prefix}{chr(10).join(lines)}\n"
             "Hãy nói một hoặc nhiều số hoặc tên camera, ví dụ 1 và 3. "
-            "Bạn cũng có thể nói tất cả, hoặc nói hủy."
+            "Bạn cũng có thể nói **tất cả**, hoặc nói **hủy**."
         )
 
     @staticmethod
@@ -3138,8 +3402,8 @@ class ConversationalAssistantManager(NoteManagerMixin):
         return (
             f"{prefix}Bạn có muốn gửi ảnh và nội dung phân tích lên Zalo không?\n"
             f"{chr(10).join(lines)}\n"
-            "Hãy nói một hoặc nhiều số hoặc tên nơi nhận, nói tất cả để gửi "
-            "mọi nơi, hoặc nói không gửi để kết thúc."
+            "Hãy nói một hoặc nhiều số hoặc tên nơi nhận, nói **tất cả** "
+            "để gửi mọi nơi, hoặc nói **không gửi** để kết thúc."
         )
 
     def _camera_analysis_unavailable_text(self) -> str:
@@ -4861,6 +5125,351 @@ class ConversationalAssistantManager(NoteManagerMixin):
         return await self._async_voice_response(
                         user_input, reply, ai_generated=True
                     )
+
+    def _all_calendar_states(self) -> list[Any]:
+        """Return every available calendar entity, regardless of Assist exposure."""
+        return sorted(
+            (
+                state
+                for state in self.hass.states.async_all("calendar")
+                if state.state not in (STATE_UNAVAILABLE, STATE_UNKNOWN)
+            ),
+            key=lambda state: (
+                str(state.name or state.entity_id).casefold(),
+                state.entity_id,
+            ),
+        )
+
+    @staticmethod
+    def _calendar_event_in_window(
+        event: CalendarDisplayEvent, window: CalendarWindow
+    ) -> bool:
+        """Return whether an event overlaps the configured future window."""
+        if event.start >= window.end:
+            return False
+        if event.end is not None:
+            return event.end > window.start
+        return event.start >= window.start
+
+    @staticmethod
+    def _calendar_event_key(
+        event: CalendarDisplayEvent,
+    ) -> tuple[str, datetime, datetime | None, str, str, str]:
+        """Return a stable de-duplication key for normalized events."""
+        return (
+            event.calendar_entity_id,
+            event.start,
+            event.end,
+            event.summary.casefold(),
+            event.uid,
+            event.recurrence_id,
+        )
+
+    async def async_refresh_calendar_events(self) -> None:
+        """Refresh the upcoming-event cache used by the sensor and alerts."""
+        async with self._calendar_refresh_lock:
+            now = dt_util.now()
+            window = CalendarWindow(
+                start=now,
+                end=now + timedelta(days=self.calendar_lookahead_days),
+                label=f"trong {self.calendar_lookahead_days} ngày tới",
+            )
+            events: list[CalendarDisplayEvent] = []
+            failed_calendars: list[str] = []
+            for state in self._all_calendar_states():
+                try:
+                    events.extend(
+                        await self._async_calendar_events_for_state(
+                            state, window, None
+                        )
+                    )
+                except Exception:  # noqa: BLE001 - keep other calendars working
+                    failed_calendars.append(str(state.name or state.entity_id))
+                    _LOGGER.exception(
+                        "Failed refreshing calendar sensor from %s",
+                        state.entity_id,
+                    )
+
+            unique: dict[
+                tuple[str, datetime, datetime | None, str, str, str],
+                CalendarDisplayEvent,
+            ] = {}
+            for event in events:
+                event_start = event.start
+                if event_start.tzinfo is None:
+                    event_start = event_start.replace(tzinfo=now.tzinfo)
+                event_end = event.end
+                if event_end is not None and event_end.tzinfo is None:
+                    event_end = event_end.replace(tzinfo=now.tzinfo)
+                normalized = replace(
+                    event,
+                    start=dt_util.as_local(event_start),
+                    end=dt_util.as_local(event_end) if event_end else None,
+                )
+                if self._calendar_event_in_window(normalized, window):
+                    unique[self._calendar_event_key(normalized)] = normalized
+
+            self._calendar_events = sorted(
+                unique.values(),
+                key=lambda event: (
+                    event.start,
+                    event.calendar_name.casefold(),
+                    event.summary.casefold(),
+                ),
+            )
+            self._calendar_window_start = window.start
+            self._calendar_window_end = window.end
+            self._calendar_last_update = dt_util.now()
+            self._calendar_refresh_error = (
+                "Không đọc được: " + ", ".join(failed_calendars)
+                if failed_calendars
+                else None
+            )
+            self._notify_update()
+
+    async def _async_calendar_refresh_interval(self, _now: datetime) -> None:
+        """Periodically refresh the calendar count sensor."""
+        try:
+            await self.async_refresh_calendar_events()
+        except asyncio.CancelledError:
+            raise
+        except Exception as err:  # noqa: BLE001 - keep future refreshes alive
+            self._calendar_refresh_error = str(err) or err.__class__.__name__
+            self._calendar_last_update = dt_util.now()
+            self._notify_update()
+            _LOGGER.exception("Unexpected calendar sensor refresh failure")
+
+    @callback
+    def _start_calendar_monitoring(self) -> None:
+        """Start calendar refresh and daily notification scheduling."""
+        if self._unsub_calendar_refresh_interval is None:
+            self._unsub_calendar_refresh_interval = async_track_time_interval(
+                self.hass,
+                self._async_calendar_refresh_interval,
+                timedelta(minutes=CALENDAR_REFRESH_INTERVAL_MINUTES),
+            )
+        if (
+            self._calendar_refresh_task is None
+            or self._calendar_refresh_task.done()
+        ):
+            task = self.hass.async_create_task(
+                self._async_calendar_refresh_interval(dt_util.now())
+            )
+            self._calendar_refresh_task = task
+            task.add_done_callback(self._calendar_refresh_task_finished)
+        self._schedule_calendar_notification()
+
+    @callback
+    def _calendar_refresh_task_finished(
+        self, task: asyncio.Task[Any]
+    ) -> None:
+        """Release the tracked startup calendar refresh task."""
+        if self._calendar_refresh_task is task:
+            self._calendar_refresh_task = None
+        if task.cancelled():
+            return
+        try:
+            task.exception()
+        except asyncio.CancelledError:
+            return
+
+    @callback
+    def _schedule_calendar_notification(self) -> None:
+        """Schedule the next configured daily calendar summary."""
+        if self._unsub_calendar_notification_timer is not None:
+            self._unsub_calendar_notification_timer()
+            self._unsub_calendar_notification_timer = None
+        if not self.calendar_notification_enabled:
+            return
+
+        local_now = dt_util.now()
+        target = datetime.combine(
+            local_now.date(),
+            self.calendar_notification_time,
+            tzinfo=local_now.tzinfo,
+        )
+        if target <= local_now:
+            target += timedelta(days=1)
+        self._unsub_calendar_notification_timer = async_track_point_in_time(
+            self.hass,
+            self._async_calendar_notification_due,
+            target,
+        )
+
+    async def _async_calendar_notification_due(self, _now: datetime) -> None:
+        """Refresh calendars and send the daily summary when events exist."""
+        self._unsub_calendar_notification_timer = None
+        try:
+            await self._async_calendar_refresh_interval(dt_util.now())
+            if (
+                self.calendar_notification_enabled
+                and self.calendar_event_count > 0
+                and self._calendar_refresh_error is None
+            ):
+                await self._async_send_calendar_notifications()
+        finally:
+            self._schedule_calendar_notification()
+
+    @staticmethod
+    def _calendar_remaining_text(days: int) -> str:
+        """Return a natural Vietnamese remaining-days label."""
+        if days <= 0:
+            return "Hôm nay"
+        if days == 1:
+            return "1 ngày"
+        return f"{days} ngày"
+
+    def _format_calendar_notification(self, *, markdown: bool) -> str:
+        """Format the current event cache for Mobile App or Zalo."""
+        def label(value: str) -> str:
+            return f"**{value}**" if markdown else value
+
+        lines = [
+            (
+                f"📅 {label(f'{self.calendar_event_count} sự kiện sắp diễn ra')} "
+                f"trong {label(f'{self.calendar_lookahead_days} ngày tới')}"
+            )
+        ]
+        grouped: dict[str, list[CalendarDisplayEvent]] = {}
+        for event in self._calendar_events:
+            grouped.setdefault(event.calendar_name or "Lịch không tên", []).append(
+                event
+            )
+
+        item_index = 0
+        for calendar_name in sorted(grouped, key=str.casefold):
+            lines.append("")
+            lines.append(f"🗓️ {label(calendar_name)}")
+            for event in grouped[calendar_name]:
+                item_index += 1
+                summary = event.summary.strip() or "Sự kiện không tên"
+                lines.append(f"{item_index}. 📌 {label('Nội dung:')} {summary}")
+                lines.append(
+                    f"   🕒 {label('Thời gian:')} "
+                    f"{self._calendar_event_time_text(event)}"
+                )
+                lines.append(
+                    f"   ⏳ {label('Còn:')} "
+                    f"{self._calendar_remaining_text(self._calendar_days_remaining(event))}"
+                )
+                if event.location:
+                    lines.append(f"   📍 {label('Địa điểm:')} {event.location}")
+                if (
+                    event.description
+                    and normalize_text(event.description)
+                    != normalize_text(summary)
+                ):
+                    lines.append(f"   📝 {label('Chi tiết:')} {event.description}")
+        return "\n".join(lines)
+
+    async def _async_send_calendar_mobile_notification(
+        self, message: str
+    ) -> bool:
+        """Send the daily calendar summary to fixed Mobile App devices."""
+        device_ids = self.calendar_notification_mobile_device_ids
+        if not device_ids:
+            return False
+        services = self._notification_services_for_device_ids(device_ids)
+        sent = False
+        for service in services:
+            try:
+                await self.hass.services.async_call(
+                    "notify",
+                    service,
+                    {
+                        "title": "📅 Sự kiện sắp diễn ra",
+                        "message": message,
+                        "data": {
+                            "conversational_assistant_entry_id": self.entry.entry_id,
+                            "calendar_event_count": self.calendar_event_count,
+                            "calendar_lookahead_days": self.calendar_lookahead_days,
+                        },
+                    },
+                    blocking=True,
+                )
+                sent = True
+            except Exception:  # noqa: BLE001 - keep other devices working
+                _LOGGER.exception(
+                    "Failed sending calendar summary via notify.%s", service
+                )
+        return sent
+
+    def _calendar_notification_zalo_targets(self) -> list[dict[str, Any]]:
+        """Resolve fixed calendar Zalo IDs against current enabled targets."""
+        selected = set(self.calendar_notification_zalo_target_ids)
+        if not selected:
+            return []
+        return [
+            target
+            for target in self._configured_zalo_targets()
+            if str(target.get(CONF_ZALO_TARGET_ID, "")) in selected
+        ]
+
+    async def _async_send_calendar_zalo_notification(self, message: str) -> bool:
+        """Send the daily calendar summary to fixed Zalo destinations."""
+        targets = self._calendar_notification_zalo_targets()
+        if not targets:
+            return False
+        if not self.hass.services.has_service(
+            ZALO_DOMAIN, ZALO_SERVICE_SEND_MESSAGE
+        ):
+            _LOGGER.error(
+                "Service %s.%s is unavailable for calendar notifications",
+                ZALO_DOMAIN,
+                ZALO_SERVICE_SEND_MESSAGE,
+            )
+            return False
+
+        message = self._zalo_emphasize_important_text(message)
+        sent = False
+        for target in targets:
+            thread_id = str(target.get(CONF_ZALO_THREAD_ID, "") or "").strip()
+            account_selection = str(
+                target.get(CONF_ZALO_ACCOUNT_SELECTION, "") or ""
+            ).strip()
+            zalo_type = str(
+                target.get(CONF_ZALO_TYPE, DEFAULT_ZALO_TYPE)
+            ).strip()
+            if not thread_id or not account_selection:
+                continue
+            try:
+                await self._async_send_zalo_typing_to_target(
+                    thread_id, account_selection
+                )
+                await self.hass.services.async_call(
+                    ZALO_DOMAIN,
+                    ZALO_SERVICE_SEND_MESSAGE,
+                    {
+                        "type": zalo_type,
+                        "ttl": 0,
+                        "message": message,
+                        "thread_id": thread_id,
+                        "account_selection": account_selection,
+                    },
+                    blocking=True,
+                )
+                sent = True
+            except Exception:  # noqa: BLE001 - keep other targets working
+                _LOGGER.exception(
+                    "Failed sending calendar summary to Zalo thread %s",
+                    thread_id,
+                )
+        return sent
+
+    async def _async_send_calendar_notifications(self) -> None:
+        """Send one refreshed calendar summary to all fixed destinations."""
+        mobile_sent = await self._async_send_calendar_mobile_notification(
+            self._format_calendar_notification(markdown=False)
+        )
+        zalo_sent = await self._async_send_calendar_zalo_notification(
+            self._format_calendar_notification(markdown=True)
+        )
+        if not mobile_sent and not zalo_sent:
+            _LOGGER.warning(
+                "Calendar notification is enabled and %s event(s) exist, but no "
+                "configured Mobile App or Zalo destination was available",
+                self.calendar_event_count,
+            )
 
     def _zalo_exposed_calendar_states(self, text: str) -> list[Any]:
         """Return calendar entities exposed to Home Assistant Assist."""
@@ -7279,8 +7888,9 @@ class ConversationalAssistantManager(NoteManagerMixin):
 
         return (
             f"{prefix}Các nơi nhận là:\n{options}\n"
-            "Bạn có thể trả lời 1 và 3, 1 phẩy 3, chọn 1 và 3, "
-            "chọn tất cả loa, chọn tất cả, hoặc bỏ yêu cầu vừa rồi."
+            "Bạn có thể trả lời **1 và 3**, **1 phẩy 3**, "
+            "**chọn 1 và 3**, **chọn tất cả loa**, **chọn tất cả**, "
+            "hoặc **bỏ yêu cầu vừa rồi**."
         )
 
     @staticmethod
@@ -7316,8 +7926,9 @@ class ConversationalAssistantManager(NoteManagerMixin):
         )
         return (
             f"{prefix}{chr(10).join(lines)}\n"
-            "Hãy trả lời số cần xóa, ví dụ 1, 1 và 3, hoặc tất cả. "
-            "Nói bỏ yêu cầu vừa rồi để không xóa."
+            "Hãy trả lời số cần xóa, ví dụ **1**, **1 và 3**, "
+            "hoặc **tất cả**. Nói **bỏ yêu cầu vừa rồi** "
+            "để **không xóa**."
         )
 
     async def _async_voice_response(

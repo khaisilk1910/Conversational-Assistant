@@ -3,14 +3,18 @@
 from __future__ import annotations
 
 from copy import deepcopy
+from datetime import time
 from typing import Any
 import uuid
 
 import voluptuous as vol
 
 from homeassistant import config_entries
+from homeassistant.components.mobile_app.const import ATTR_WEBHOOK_ID
+from homeassistant.components.mobile_app.util import get_notify_service
 from homeassistant.config_entries import ConfigFlowResult
-from homeassistant.core import callback
+from homeassistant.core import HomeAssistant, callback
+from homeassistant.helpers import device_registry as dr
 from homeassistant.helpers import selector
 
 from .const import (
@@ -19,6 +23,11 @@ from .const import (
     CONF_AI_CAMERA_TASK_ENTITY_ID,
     CONF_AI_IMAGE_TASK_ENTITY_ID,
     CONF_AI_SEARCH_AGENT_ID,
+    CONF_CALENDAR_LOOKAHEAD_DAYS,
+    CONF_CALENDAR_NOTIFICATION_ENABLED,
+    CONF_CALENDAR_NOTIFICATION_MOBILE_DEVICES,
+    CONF_CALENDAR_NOTIFICATION_TIME,
+    CONF_CALENDAR_NOTIFICATION_ZALO_TARGETS,
     CONF_CONFIRM_TARGETS,
     CONF_DISMISS_ON_CLEAR,
     CONF_SPEAKER_ENABLED,
@@ -40,6 +49,9 @@ from .const import (
     DEFAULT_AI_CAMERA_TASK_ENTITY_ID,
     DEFAULT_AI_IMAGE_TASK_ENTITY_ID,
     DEFAULT_AI_SEARCH_AGENT_ID,
+    DEFAULT_CALENDAR_LOOKAHEAD_DAYS,
+    DEFAULT_CALENDAR_NOTIFICATION_ENABLED,
+    DEFAULT_CALENDAR_NOTIFICATION_TIME,
     DEFAULT_CONFIRM_TARGETS,
     DEFAULT_DISMISS_ON_CLEAR,
     DEFAULT_SPEAKER_ENABLED,
@@ -51,6 +63,7 @@ from .const import (
     DEFAULT_ZALO_WEBHOOK_ENABLED,
     DOMAIN,
     INTEGRATION_NAME,
+    MAX_CALENDAR_LOOKAHEAD_DAYS,
     ZALO_TYPE_GROUP,
     ZALO_TYPE_USER,
 )
@@ -208,6 +221,189 @@ def _tts_settings_schema(
     else:
         fields[vol.Optional(CONF_TTS_ENTITY_ID)] = tts_selector
     return vol.Schema(fields)
+
+
+def _select_multiple_schema(
+    options: dict[str, str],
+) -> selector.SelectSelector:
+    """Build a stable multi-select field from dynamic Home Assistant data."""
+    return selector.SelectSelector(
+        selector.SelectSelectorConfig(
+            options=[
+                {"value": value, "label": label}
+                for value, label in options.items()
+            ],
+            multiple=True,
+            mode=selector.SelectSelectorMode.DROPDOWN,
+        )
+    )
+
+
+def _mobile_device_choices(hass: HomeAssistant) -> dict[str, str]:
+    """Return Mobile App devices that can be selected for calendar alerts."""
+    mobile_entry_ids: set[str] = set()
+    for entry in hass.config_entries.async_entries("mobile_app"):
+        webhook_id = entry.data.get(ATTR_WEBHOOK_ID)
+        if not webhook_id:
+            continue
+        try:
+            service = get_notify_service(hass, webhook_id)
+        except (KeyError, TypeError):
+            service = None
+        if service and hass.services.has_service("notify", service):
+            mobile_entry_ids.add(entry.entry_id)
+    if not mobile_entry_ids:
+        return {}
+    registry = dr.async_get(hass)
+    devices = sorted(
+        (
+            device
+            for device in registry.devices.values()
+            if mobile_entry_ids.intersection(device.config_entries)
+        ),
+        key=lambda device: (
+            str(device.name_by_user or device.name or device.id).casefold(),
+            device.id,
+        ),
+    )
+    return {
+        device.id: str(device.name_by_user or device.name or device.id)
+        for device in devices
+    }
+
+
+def _zalo_target_choices(
+    targets: list[dict[str, Any]],
+) -> dict[str, str]:
+    """Return configured enabled Zalo destinations for calendar alerts."""
+    choices: dict[str, str] = {}
+    for target in targets:
+        if not bool(target.get(CONF_ZALO_TARGET_ENABLED, True)):
+            continue
+        target_id = str(target.get(CONF_ZALO_TARGET_ID, "") or "").strip()
+        thread_id = str(target.get(CONF_ZALO_THREAD_ID, "") or "").strip()
+        account_selection = str(
+            target.get(CONF_ZALO_ACCOUNT_SELECTION, "") or ""
+        ).strip()
+        if not target_id or not thread_id or not account_selection:
+            continue
+        name = str(
+            target.get(CONF_ZALO_TARGET_NAME) or thread_id or target_id
+        ).strip()
+        recipient_type = (
+            "Nhóm"
+            if str(target.get(CONF_ZALO_TYPE, DEFAULT_ZALO_TYPE))
+            == ZALO_TYPE_GROUP
+            else "Người dùng"
+        )
+        choices[target_id] = f"{recipient_type}: {name}"
+    return choices
+
+
+def _calendar_settings_schema(
+    lookahead_days: int,
+    notification_enabled: bool,
+    notification_time: str,
+    selected_mobile_devices: list[str],
+    selected_zalo_targets: list[str],
+    mobile_choices: dict[str, str],
+    zalo_choices: dict[str, str],
+) -> vol.Schema:
+    """Build calendar sensor and scheduled notification settings."""
+    valid_mobile = [
+        value for value in selected_mobile_devices if value in mobile_choices
+    ]
+    valid_zalo = [
+        value for value in selected_zalo_targets if value in zalo_choices
+    ]
+    return vol.Schema(
+        {
+            vol.Optional(
+                CONF_CALENDAR_LOOKAHEAD_DAYS,
+                default=max(
+                    1, min(MAX_CALENDAR_LOOKAHEAD_DAYS, int(lookahead_days))
+                ),
+            ): selector.NumberSelector(
+                selector.NumberSelectorConfig(
+                    min=1,
+                    max=MAX_CALENDAR_LOOKAHEAD_DAYS,
+                    step=1,
+                    mode=selector.NumberSelectorMode.BOX,
+                    unit_of_measurement="ngày",
+                )
+            ),
+            vol.Optional(
+                CONF_CALENDAR_NOTIFICATION_ENABLED,
+                default=notification_enabled,
+            ): selector.BooleanSelector(),
+            vol.Optional(
+                CONF_CALENDAR_NOTIFICATION_TIME,
+                default=notification_time,
+            ): selector.TimeSelector(),
+            vol.Optional(
+                CONF_CALENDAR_NOTIFICATION_MOBILE_DEVICES,
+                default=valid_mobile,
+            ): _select_multiple_schema(mobile_choices),
+            vol.Optional(
+                CONF_CALENDAR_NOTIFICATION_ZALO_TARGETS,
+                default=valid_zalo,
+            ): _select_multiple_schema(zalo_choices),
+        }
+    )
+
+
+def _normalize_calendar_settings(
+    user_input: dict[str, Any],
+) -> dict[str, Any]:
+    """Normalize calendar options to JSON-safe values."""
+    normalized = dict(user_input)
+    try:
+        days = int(
+            float(
+                normalized.get(
+                    CONF_CALENDAR_LOOKAHEAD_DAYS,
+                    DEFAULT_CALENDAR_LOOKAHEAD_DAYS,
+                )
+            )
+        )
+    except (TypeError, ValueError):
+        days = DEFAULT_CALENDAR_LOOKAHEAD_DAYS
+    normalized[CONF_CALENDAR_LOOKAHEAD_DAYS] = max(
+        1, min(MAX_CALENDAR_LOOKAHEAD_DAYS, days)
+    )
+    normalized[CONF_CALENDAR_NOTIFICATION_ENABLED] = bool(
+        normalized.get(
+            CONF_CALENDAR_NOTIFICATION_ENABLED,
+            DEFAULT_CALENDAR_NOTIFICATION_ENABLED,
+        )
+    )
+    raw_time = normalized.get(
+        CONF_CALENDAR_NOTIFICATION_TIME,
+        DEFAULT_CALENDAR_NOTIFICATION_TIME,
+    )
+    if isinstance(raw_time, time):
+        normalized[CONF_CALENDAR_NOTIFICATION_TIME] = raw_time.strftime(
+            "%H:%M:%S"
+        )
+    else:
+        value = str(raw_time or DEFAULT_CALENDAR_NOTIFICATION_TIME).strip()
+        normalized[CONF_CALENDAR_NOTIFICATION_TIME] = value or (
+            DEFAULT_CALENDAR_NOTIFICATION_TIME
+        )
+    for key in (
+        CONF_CALENDAR_NOTIFICATION_MOBILE_DEVICES,
+        CONF_CALENDAR_NOTIFICATION_ZALO_TARGETS,
+    ):
+        value = normalized.get(key, [])
+        if isinstance(value, (list, tuple, set)):
+            normalized[key] = [
+                str(item).strip() for item in value if str(item).strip()
+            ]
+        elif value:
+            normalized[key] = [str(value).strip()]
+        else:
+            normalized[key] = []
+    return normalized
 
 
 def _merge_schemas(*schemas: vol.Schema) -> vol.Schema:
@@ -572,6 +768,39 @@ class ConversationalAssistantOptionsFlow(config_entries.OptionsFlow):
             ),
         )
         options.setdefault(
+            CONF_CALENDAR_LOOKAHEAD_DAYS,
+            self.config_entry.data.get(
+                CONF_CALENDAR_LOOKAHEAD_DAYS,
+                DEFAULT_CALENDAR_LOOKAHEAD_DAYS,
+            ),
+        )
+        options.setdefault(
+            CONF_CALENDAR_NOTIFICATION_ENABLED,
+            self.config_entry.data.get(
+                CONF_CALENDAR_NOTIFICATION_ENABLED,
+                DEFAULT_CALENDAR_NOTIFICATION_ENABLED,
+            ),
+        )
+        options.setdefault(
+            CONF_CALENDAR_NOTIFICATION_TIME,
+            self.config_entry.data.get(
+                CONF_CALENDAR_NOTIFICATION_TIME,
+                DEFAULT_CALENDAR_NOTIFICATION_TIME,
+            ),
+        )
+        options.setdefault(
+            CONF_CALENDAR_NOTIFICATION_MOBILE_DEVICES,
+            self.config_entry.data.get(
+                CONF_CALENDAR_NOTIFICATION_MOBILE_DEVICES, []
+            ),
+        )
+        options.setdefault(
+            CONF_CALENDAR_NOTIFICATION_ZALO_TARGETS,
+            self.config_entry.data.get(
+                CONF_CALENDAR_NOTIFICATION_ZALO_TARGETS, []
+            ),
+        )
+        options.setdefault(
             CONF_TTS_ENTITY_ID,
             self.config_entry.data.get(
                 CONF_TTS_ENTITY_ID, _first_tts_entity_id(self.hass)
@@ -663,7 +892,7 @@ class ConversationalAssistantOptionsFlow(config_entries.OptionsFlow):
         """Show the options navigation menu."""
         return self.async_show_menu(
             step_id="init",
-            menu_options=["general", "zalo", "ai", "tts", "finish"],
+            menu_options=["general", "calendar", "zalo", "ai", "tts", "finish"],
             description_placeholders={
                 "zalo_count": str(len(self._zalo_targets()))
             },
@@ -692,6 +921,35 @@ class ConversationalAssistantOptionsFlow(config_entries.OptionsFlow):
                     values.get(CONF_CONFIRM_TARGETS, DEFAULT_CONFIRM_TARGETS)
                 ),
             ),
+        )
+
+    async def async_step_calendar(
+        self, user_input: dict[str, Any] | None = None
+    ) -> ConfigFlowResult:
+        """Edit calendar sensor horizon and scheduled alert destinations."""
+        options = self._ensure_options()
+        if user_input is not None:
+            options.update(_normalize_calendar_settings(user_input))
+            return await self.async_step_init()
+
+        mobile_choices = _mobile_device_choices(self.hass)
+        zalo_choices = _zalo_target_choices(self._zalo_targets())
+        values = _normalize_calendar_settings(options)
+        return self.async_show_form(
+            step_id="calendar",
+            data_schema=_calendar_settings_schema(
+                int(values[CONF_CALENDAR_LOOKAHEAD_DAYS]),
+                bool(values[CONF_CALENDAR_NOTIFICATION_ENABLED]),
+                str(values[CONF_CALENDAR_NOTIFICATION_TIME]),
+                list(values[CONF_CALENDAR_NOTIFICATION_MOBILE_DEVICES]),
+                list(values[CONF_CALENDAR_NOTIFICATION_ZALO_TARGETS]),
+                mobile_choices,
+                zalo_choices,
+            ),
+            description_placeholders={
+                "mobile_count": str(len(mobile_choices)),
+                "zalo_count": str(len(zalo_choices)),
+            },
         )
 
     async def async_step_zalo(
@@ -931,6 +1189,17 @@ class ConversationalAssistantOptionsFlow(config_entries.OptionsFlow):
                 for target in targets
                 if str(target.get(CONF_ZALO_TARGET_ID)) != selected
             ]
+            selected_calendar_targets = self._ensure_options().get(
+                CONF_CALENDAR_NOTIFICATION_ZALO_TARGETS, []
+            )
+            if isinstance(selected_calendar_targets, list):
+                self._ensure_options()[
+                    CONF_CALENDAR_NOTIFICATION_ZALO_TARGETS
+                ] = [
+                    target_id
+                    for target_id in selected_calendar_targets
+                    if str(target_id) != selected
+                ]
             return await self.async_step_zalo()
 
         return self.async_show_form(
