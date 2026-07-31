@@ -47,6 +47,7 @@
         "description": "Các cài đặt đã được chia theo từng nhóm chức năng. Hiện có {zalo_count} nơi nhận Zalo.",
         "menu_options": {
           "general": "Cài đặt chung",
+          "calendar": "Cài đặt lịch",
           "zalo": "Cài đặt Zalo",
           "ai": "Cài đặt AI",
           "tts": "Cài đặt TTS",
@@ -62,6 +63,24 @@
         },
         "data_description": {
           "confirm_targets": "Khi bật, cả nhắc hẹn từ Voice Assist và Zalo chỉ được lưu sau khi bạn trả lời bằng số thứ tự hoặc tên nơi nhận."
+        }
+      },
+      "calendar": {
+        "title": "Cài đặt lịch",
+        "description": "Sensor quét tất cả lịch đang khả dụng. Đã tìm thấy {mobile_count} thiết bị Mobile App và {zalo_count} nơi nhận Zalo đang bật để chọn làm nơi nhận thông báo cố định.",
+        "data": {
+          "calendar_lookahead_days": "Số ngày sự kiện sắp tới cần quét",
+          "calendar_notification_enabled": "Gửi thông báo lịch hằng ngày khi có sự kiện",
+          "calendar_notification_time": "Giờ gửi thông báo hằng ngày",
+          "calendar_notification_mobile_devices": "Mobile App nhận thông báo cố định",
+          "calendar_notification_zalo_targets": "Zalo nhận thông báo cố định"
+        },
+        "data_description": {
+          "calendar_lookahead_days": "Mặc định 30 ngày. Trạng thái sensor là tổng số sự kiện; attributes liệt kê chi tiết sự kiện từ tất cả entity calendar đang khả dụng.",
+          "calendar_notification_enabled": "Khi bật, tích hợp làm mới sensor vào giờ đã chọn và chỉ gửi thông báo khi số sự kiện lớn hơn 0.",
+          "calendar_notification_time": "Theo múi giờ Home Assistant. Mặc định 07:00 mỗi ngày.",
+          "calendar_notification_mobile_devices": "Chọn một hoặc nhiều thiết bị Mobile App luôn nhận bản tin lịch.",
+          "calendar_notification_zalo_targets": "Chọn một hoặc nhiều nơi nhận Zalo đang bật và đã được tạo trong Cài đặt Zalo."
         }
       },
       "zalo": {
