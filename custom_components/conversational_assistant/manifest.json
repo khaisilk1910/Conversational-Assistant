@@ -4,10 +4,11 @@
   "codeowners": [],
   "config_flow": true,
   "dependencies": [
+    "ai_task",
     "conversation"
   ],
   "integration_type": "service",
   "iot_class": "local_push",
   "requirements": [],
-  "version": "2026.07.31.1000"
+  "version": "1.7.0"
 }

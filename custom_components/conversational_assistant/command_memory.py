@@ -16,6 +16,7 @@ from .targeting import normalize_text
 # Internal actions are intentionally limited to workflows implemented by this
 # integration. A learned phrase is an alias, not arbitrary executable code.
 ACTION_CAMERA = "camera"
+ACTION_CAMERA_ANALYSIS = "camera_analysis"
 ACTION_REMINDER_CREATE = "create"
 ACTION_REMINDER_LIST = "list"
 ACTION_REMINDER_DELETE = "delete"
@@ -32,6 +33,7 @@ ACTION_IMAGE_GENERATION = "image_generation"
 
 SUPPORTED_ACTIONS = {
     ACTION_CAMERA,
+    ACTION_CAMERA_ANALYSIS,
     ACTION_REMINDER_CREATE,
     ACTION_REMINDER_LIST,
     ACTION_REMINDER_DELETE,
@@ -50,6 +52,7 @@ SUPPORTED_ACTIONS = {
 MAX_LEARNED_COMMANDS = 100
 
 REQUEST_ACTIONS = {
+    ACTION_CAMERA_ANALYSIS,
     ACTION_REMINDER_CREATE,
     ACTION_REMINDER_DELETE,
     ACTION_NOTE_CREATE,
@@ -60,6 +63,7 @@ REQUEST_ACTIONS = {
 
 ACTION_LABELS = {
     ACTION_CAMERA: "chụp ảnh camera",
+    ACTION_CAMERA_ANALYSIS: "phân tích camera bằng AI",
     ACTION_REMINDER_CREATE: "tạo nhắc hẹn",
     ACTION_REMINDER_LIST: "xem danh sách nhắc hẹn",
     ACTION_REMINDER_DELETE: "xóa nhắc hẹn",
@@ -78,6 +82,10 @@ ACTION_LABELS = {
 # Explicit labels also let users teach short targets such as "để camera" or
 # "để tạo nhắc hẹn", which may not be classified by the normal command parser.
 _TARGET_LABELS = {
+    "analyze camera": ACTION_CAMERA_ANALYSIS,
+    "analyse camera": ACTION_CAMERA_ANALYSIS,
+    "check camera": ACTION_CAMERA_ANALYSIS,
+    "camera analysis": ACTION_CAMERA_ANALYSIS,
     "camera": ACTION_CAMERA,
     "take camera photo": ACTION_CAMERA,
     "take a camera photo": ACTION_CAMERA,
@@ -125,6 +133,10 @@ _TARGET_LABELS = {
     "chup camera": ACTION_CAMERA,
     "chup anh camera": ACTION_CAMERA,
     "lay anh camera": ACTION_CAMERA,
+    "phan tich cam": ACTION_CAMERA_ANALYSIS,
+    "phan tich camera": ACTION_CAMERA_ANALYSIS,
+    "kiem tra cam": ACTION_CAMERA_ANALYSIS,
+    "kiem tra camera": ACTION_CAMERA_ANALYSIS,
     "tao nhac hen": ACTION_REMINDER_CREATE,
     "tao nhac nho": ACTION_REMINDER_CREATE,
     "dat nhac hen": ACTION_REMINDER_CREATE,
@@ -587,6 +599,7 @@ def canonical_text(
         ACTION_NOTE_VIEW: "mở ghi chú",
         ACTION_SEARCH: "tìm thông tin",
         ACTION_IMAGE_GENERATION: "tạo ảnh",
+        ACTION_CAMERA_ANALYSIS: "phân tích camera",
     }
     prefix = prefixes.get(action, "")
     return f"{prefix} {request}".strip() if prefix else request

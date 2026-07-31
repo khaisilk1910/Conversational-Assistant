@@ -55,9 +55,14 @@ from .const import (
     ACTION_DISMISS,
     ACTION_SNOOZE,
     AI_TASK_DOMAIN,
+    AI_TASK_SERVICE_GENERATE_DATA,
     AI_TASK_SERVICE_GENERATE_IMAGE,
+    CAMERA_ANALYSIS_INSTRUCTIONS,
+    CAMERA_ANALYSIS_SENTENCES,
+    CAMERA_ANALYSIS_TIMEOUT_SECONDS,
     CAMERA_SENTENCES,
     CONF_AI_AGENT_FAILOVER_ENABLED,
+    CONF_AI_CAMERA_TASK_ENTITY_ID,
     CONF_AI_IMAGE_TASK_ENTITY_ID,
     CONF_AI_SEARCH_AGENT_ID,
     CANCEL_SENTENCES,
@@ -83,6 +88,7 @@ from .const import (
     CONF_ZALO_WEBHOOK_ENABLED,
     CREATE_SENTENCES,
     DEFAULT_AI_AGENT_FAILOVER_ENABLED,
+    DEFAULT_AI_CAMERA_TASK_ENTITY_ID,
     DEFAULT_AI_IMAGE_TASK_ENTITY_ID,
     DEFAULT_AI_SEARCH_AGENT_ID,
     DEFAULT_CONFIRM_TARGETS,
@@ -125,6 +131,7 @@ from .const import (
 )
 from .command_memory import (
     ACTION_CAMERA,
+    ACTION_CAMERA_ANALYSIS,
     ACTION_CALENDAR,
     ACTION_HELP,
     ACTION_HOME_ASSISTANT,
@@ -425,12 +432,23 @@ class CameraTarget:
     available: bool
 
 
+@dataclass(slots=True, frozen=True)
+class CameraAnalysisResult:
+    """Captured image and AI description for one selected camera."""
+
+    camera: CameraTarget
+    image_path: str
+    analysis: str
+    attempted_agents: tuple[str, ...]
+
+
 @dataclass(slots=True)
 class PendingZaloCamera:
     """Camera list waiting for a selection in one Zalo chat."""
 
     cameras: list[CameraTarget]
     expires_at: datetime
+    mode: str = "capture"
 
 
 @dataclass(slots=True, frozen=True)
@@ -474,6 +492,8 @@ class PendingVoiceCamera:
     phase: str
     created_at: datetime
     expires_at: datetime
+    mode: str = "capture"
+    analysis_items: list[CameraAnalysisResult] | None = None
 
 
 @dataclass(slots=True, frozen=True)
@@ -712,6 +732,20 @@ class ConversationalAssistantManager(NoteManagerMixin):
         ).strip()
 
     @property
+    def ai_camera_task_entity_id(self) -> str:
+        """Return the optional AI Task entity used for camera analysis."""
+        configured = str(
+            self._option(
+                CONF_AI_CAMERA_TASK_ENTITY_ID,
+                DEFAULT_AI_CAMERA_TASK_ENTITY_ID,
+            )
+            or ""
+        ).strip()
+        # Preserve upgrades from 1.6.3: the image AI Task is a practical
+        # fallback until a dedicated camera-analysis entity is selected.
+        return configured or self.ai_image_task_entity_id
+
+    @property
     def ai_agent_failover_enabled(self) -> bool:
         """Return whether failed AI requests rotate through available agents."""
         return bool(
@@ -833,6 +867,54 @@ class ConversationalAssistantManager(NoteManagerMixin):
                 if raw_features is not None:
                     try:
                         if not (int(raw_features) & 4):
+                            continue
+                    except (TypeError, ValueError):
+                        _LOGGER.debug(
+                            "AI Task entity %s has invalid supported_features %r",
+                            state.entity_id,
+                            raw_features,
+                        )
+                add(state.entity_id)
+
+        return [
+            (entity_id, self._ai_task_agent_display_name(entity_id))
+            for entity_id in entity_ids
+        ]
+
+    def _ai_camera_agent_candidates(
+        self, primary_entity_id: str
+    ) -> list[tuple[str, str]]:
+        """Return preferred camera AI Task then compatible failover tasks."""
+        entity_ids: list[str] = []
+
+        def add(entity_id: str | None) -> None:
+            normalized = str(entity_id or "").strip()
+            if normalized and normalized not in entity_ids:
+                entity_ids.append(normalized)
+
+        add(primary_entity_id)
+        if self.ai_agent_failover_enabled:
+            try:
+                states = sorted(
+                    self.hass.states.async_all(AI_TASK_DOMAIN),
+                    key=lambda item: (
+                        str(item.attributes.get("friendly_name", "")).casefold(),
+                        item.entity_id,
+                    ),
+                )
+            except Exception:  # noqa: BLE001 - keep the selected task usable
+                _LOGGER.exception(
+                    "Failed listing AI Task entities for camera failover"
+                )
+                states = []
+            for state in states:
+                if state.state in {STATE_UNAVAILABLE, STATE_UNKNOWN}:
+                    continue
+                raw_features = state.attributes.get(ATTR_SUPPORTED_FEATURES)
+                if raw_features is not None:
+                    try:
+                        # GENERATE_DATA (1) and SUPPORT_ATTACHMENTS (2).
+                        if (int(raw_features) & 3) != 3:
                             continue
                     except (TypeError, ValueError):
                         _LOGGER.debug(
@@ -1287,6 +1369,7 @@ class ConversationalAssistantManager(NoteManagerMixin):
                 "image": "image generation",
                 "conversation": "conversation",
                 "calendar": "calendar analysis",
+                "camera": "camera analysis",
             }.get(feature, "search")
             message = (
                 f"🔄 **Switching AI for {feature_name}**\n\n"
@@ -1299,6 +1382,7 @@ class ConversationalAssistantManager(NoteManagerMixin):
                 "image": "tạo ảnh",
                 "conversation": "hội thoại",
                 "calendar": "phân tích lịch",
+                "camera": "phân tích camera",
             }.get(feature, "tìm kiếm")
             message = (
                 f"🔄 **Đang chuyển AI dự phòng cho {feature_name}**\n\n"
@@ -1313,6 +1397,10 @@ class ConversationalAssistantManager(NoteManagerMixin):
         if action == ACTION_IMAGE_GENERATION:
             candidates = self._ai_image_agent_candidates(
                 self.ai_image_task_entity_id
+            )
+        elif action == ACTION_CAMERA_ANALYSIS:
+            candidates = self._ai_camera_agent_candidates(
+                self.ai_camera_task_entity_id
             )
         elif action == ACTION_CALENDAR:
             candidates = self._conversation_agent_candidates(
@@ -1460,6 +1548,10 @@ class ConversationalAssistantManager(NoteManagerMixin):
                 ),
                 agent_manager.register_trigger(
                     CANCEL_SENTENCES, self._async_cancel_from_voice
+                ),
+                agent_manager.register_trigger(
+                    CAMERA_ANALYSIS_SENTENCES,
+                    self._async_camera_analysis_from_voice,
                 ),
                 agent_manager.register_trigger(
                     CAMERA_SENTENCES, self._async_camera_from_voice
@@ -1646,6 +1738,8 @@ class ConversationalAssistantManager(NoteManagerMixin):
             return builtin
 
         ha_kind = explicit_home_assistant_request_kind(text)
+        if ha_kind == "camera_analysis":
+            return ACTION_CAMERA_ANALYSIS
         if ha_kind == "camera":
             return ACTION_CAMERA
         if ha_kind == "calendar":
@@ -2377,7 +2471,9 @@ class ConversationalAssistantManager(NoteManagerMixin):
             "• Generate an image of a cozy smart home at night.\n\n"
             "5. CAMERA\n"
             "• Chụp camera. / Take a camera photo.\n"
-            "• Lấy ảnh camera sân trước. / Capture the front yard camera.\n\n"
+            "• Lấy ảnh camera sân trước. / Capture the front yard camera.\n"
+            "• Phân tích camera; có thể chọn nhiều camera và gửi kết quả kèm ảnh lên Zalo.\n"
+            "• Analyze camera. / Check camera.\n\n"
             "6. NHẮC HẸN / REMINDERS\n"
             "• Nhắc tôi 30 phút nữa uống thuốc.\n"
             "• Remind me to take medicine in 30 minutes.\n"
@@ -2985,6 +3081,297 @@ class ConversationalAssistantManager(NoteManagerMixin):
         )
 
     @staticmethod
+    def _camera_analysis_selection_prompt(
+        cameras: list[CameraTarget], invalid: bool = False
+    ) -> str:
+        """Build a numbered multi-camera analysis prompt for Zalo."""
+        lines = []
+        for index, camera in enumerate(cameras, start=1):
+            status = " — không khả dụng" if not camera.available else ""
+            lines.append(f"{index} - {camera.display_name}{status}")
+        prefix = (
+            "Lựa chọn chưa hợp lệ. Hãy chọn ít nhất một camera.\n"
+            if invalid
+            else "Các camera có thể phân tích trên Home Assistant:\n"
+        )
+        return (
+            f"{prefix}{chr(10).join(lines)}\n"
+            "Trả lời một hoặc nhiều số/tên camera, ví dụ: **1 3 10**. "
+            "Có thể gửi **Tất cả** để phân tích mọi camera khả dụng. "
+            "Gửi **Hủy** để dừng."
+        )
+
+    @staticmethod
+    def _voice_camera_analysis_selection_prompt(
+        cameras: list[CameraTarget], invalid: bool = False
+    ) -> str:
+        """Build a numbered camera-analysis prompt for Voice Assist."""
+        lines = []
+        for index, camera in enumerate(cameras, start=1):
+            status = " - không khả dụng" if not camera.available else ""
+            lines.append(f"{index} - {camera.display_name}{status}")
+        prefix = (
+            "Lựa chọn chưa hợp lệ. Hãy chọn ít nhất một camera khả dụng.\n"
+            if invalid
+            else "Các camera có thể phân tích trên Home Assistant:\n"
+        )
+        return (
+            f"{prefix}{chr(10).join(lines)}\n"
+            "Hãy nói một hoặc nhiều số hoặc tên camera, ví dụ 1 và 3. "
+            "Bạn cũng có thể nói tất cả, hoặc nói hủy."
+        )
+
+    @staticmethod
+    def _voice_camera_analysis_destination_prompt(
+        targets: list[dict[str, Any]], invalid: bool = False
+    ) -> str:
+        """Ask which Zalo destinations should receive analysis results."""
+        lines = []
+        for index, target in enumerate(targets, start=1):
+            name = (
+                str(target.get(CONF_ZALO_TARGET_NAME, "")).strip()
+                or str(target.get(CONF_ZALO_THREAD_ID, "")).strip()
+                or "Zalo"
+            )
+            lines.append(f"{index} - {name}")
+        prefix = "Lựa chọn nơi gửi chưa hợp lệ. " if invalid else ""
+        return (
+            f"{prefix}Bạn có muốn gửi ảnh và nội dung phân tích lên Zalo không?\n"
+            f"{chr(10).join(lines)}\n"
+            "Hãy nói một hoặc nhiều số hoặc tên nơi nhận, nói tất cả để gửi "
+            "mọi nơi, hoặc nói không gửi để kết thúc."
+        )
+
+    def _camera_analysis_unavailable_text(self) -> str:
+        """Return a clear setup error for camera analysis."""
+        if not self.hass.services.has_service(
+            AI_TASK_DOMAIN, AI_TASK_SERVICE_GENERATE_DATA
+        ):
+            return (
+                "Action ai_task.generate_data chưa sẵn sàng trên Home Assistant. "
+                "Hãy kiểm tra tích hợp AI Task."
+            )
+        if not self._ai_camera_agent_candidates(
+            self.ai_camera_task_entity_id
+        ):
+            return (
+                "Chưa có AI Task agent phù hợp để phân tích camera. Hãy mở "
+                "Cấu hình Conversational Assistant, mục AI, rồi chọn AI Task "
+                "agent hỗ trợ generate_data và camera attachments."
+            )
+        return ""
+
+    async def _async_camera_analysis_from_zalo(
+        self, context: ZaloWebhookContext
+    ) -> str:
+        """Start multi-camera AI analysis from Zalo."""
+        self._clear_zalo_pending_for_owner(context.owner_key)
+        unavailable = self._camera_analysis_unavailable_text()
+        if unavailable:
+            return unavailable
+        cameras = self._discovered_camera_targets()
+        if not cameras:
+            return (
+                "Chưa tìm thấy camera nào trên Home Assistant. Hãy kiểm tra "
+                "tích hợp camera và trạng thái các entity camera."
+            )
+        self._zalo_pending_cameras[context.owner_key] = PendingZaloCamera(
+            cameras=cameras,
+            expires_at=dt_util.now()
+            + timedelta(seconds=PENDING_CONFIRMATION_TIMEOUT_SECONDS),
+            mode="analysis",
+        )
+        return self._camera_analysis_selection_prompt(cameras)
+
+    async def _async_camera_analysis_from_voice(
+        self, user_input: ConversationInput, _result: RecognizeResult
+    ) -> str:
+        """Start multi-camera AI analysis from Voice Assist."""
+        unavailable = self._camera_analysis_unavailable_text()
+        if unavailable:
+            return await self._async_voice_response(user_input, unavailable)
+        cameras = self._discovered_camera_targets()
+        if not cameras:
+            return await self._async_voice_response(
+                user_input,
+                "Chưa tìm thấy camera nào trên Home Assistant. Hãy kiểm tra "
+                "tích hợp camera và trạng thái các entity camera.",
+            )
+        self._set_pending_voice_camera(
+            user_input,
+            cameras,
+            self._configured_zalo_targets(),
+            mode="analysis",
+        )
+        return await self._async_voice_response(
+            user_input, self._voice_camera_analysis_selection_prompt(cameras)
+        )
+
+    def _camera_ai_attachment(self, camera: CameraTarget) -> dict[str, Any]:
+        """Build the dynamic media selector payload requested by AI Task."""
+        return {
+            "media_content_id": f"media-source://camera/{camera.entity_id}",
+            "media_content_type": "application/vnd.apple.mpegurl",
+            "metadata": {
+                "title": camera.display_name,
+                "thumbnail": f"/api/camera_proxy/{camera.entity_id}",
+                "media_class": "video",
+                "children_media_class": None,
+                "navigateIds": [
+                    {},
+                    {
+                        "media_content_type": "app",
+                        "media_content_id": "media-source://camera",
+                    },
+                ],
+            },
+        }
+
+    @staticmethod
+    def _camera_analysis_response_text(response: Any) -> str:
+        """Extract and normalize the one-line generate_data response."""
+        result = response if isinstance(response, dict) else {}
+        nested = result.get("response")
+        if "data" not in result and isinstance(nested, dict):
+            result = nested
+        data = result.get("data")
+        if isinstance(data, str):
+            text = data
+        elif data is None:
+            text = ""
+        else:
+            try:
+                text = json.dumps(data, ensure_ascii=False, separators=(",", ":"))
+            except (TypeError, ValueError):
+                text = str(data)
+        return re.sub(r"\s+", " ", text).strip()
+
+    async def _async_analyze_camera_with_ai(
+        self,
+        camera: CameraTarget,
+        service_context: Context | None,
+        zalo_context: ZaloWebhookContext | None = None,
+    ) -> tuple[str | None, list[str]]:
+        """Analyze one camera with per-agent timeout and failover."""
+        candidates = self._ai_camera_agent_candidates(
+            self.ai_camera_task_entity_id
+        )
+        attempted: list[str] = []
+        total_attempts = len(candidates)
+        for index, (entity_id, agent_name) in enumerate(candidates):
+            attempted.append(agent_name)
+            try:
+                async with asyncio.timeout(CAMERA_ANALYSIS_TIMEOUT_SECONDS):
+                    response = await self.hass.services.async_call(
+                        AI_TASK_DOMAIN,
+                        AI_TASK_SERVICE_GENERATE_DATA,
+                        {
+                            "task_name": f"Phân tích cam - {camera.display_name}",
+                            "entity_id": entity_id,
+                            "attachments": self._camera_ai_attachment(camera),
+                            "instructions": CAMERA_ANALYSIS_INSTRUCTIONS,
+                        },
+                        blocking=True,
+                        context=service_context,
+                        return_response=True,
+                    )
+                text = self._camera_analysis_response_text(response)
+                if not text:
+                    raise RuntimeError("AI Task returned empty analysis")
+                return text, attempted
+            except TimeoutError:
+                _LOGGER.warning(
+                    "AI Task %s timed out analyzing camera %s",
+                    entity_id,
+                    camera.entity_id,
+                )
+            except Exception:  # noqa: BLE001 - fail over per camera
+                _LOGGER.exception(
+                    "AI Task %s failed analyzing camera %s",
+                    entity_id,
+                    camera.entity_id,
+                )
+            if index + 1 < total_attempts:
+                await self._async_send_ai_failover_notice(
+                    zalo_context,
+                    service_context,
+                    failed_agent=agent_name,
+                    next_agent=candidates[index + 1][1],
+                    next_attempt=index + 2,
+                    total_attempts=total_attempts,
+                    feature="camera",
+                    language="vi",
+                )
+        return None, attempted
+
+    async def _async_capture_and_analyze_cameras(
+        self,
+        owner_key: str,
+        cameras: list[CameraTarget],
+        service_context: Context | None,
+        zalo_context: ZaloWebhookContext | None = None,
+    ) -> tuple[list[CameraAnalysisResult], list[str]]:
+        """Capture and analyze each camera independently."""
+        items: list[CameraAnalysisResult] = []
+        failures: list[str] = []
+        for camera in cameras:
+            try:
+                image_path, capture_error = (
+                    await self._async_capture_camera_snapshot(
+                        owner_key, camera, service_context
+                    )
+                )
+                if image_path is None:
+                    failures.append(
+                        capture_error or f"{camera.display_name}: lỗi chụp ảnh"
+                    )
+                    continue
+                analysis, attempted = await self._async_analyze_camera_with_ai(
+                    camera, service_context, zalo_context
+                )
+                if analysis is None:
+                    analysis = (
+                        "Không thể phân tích camera bằng các AI Task agent hiện có."
+                    )
+                    failures.append(f"{camera.display_name}: phân tích AI thất bại")
+                if len(attempted) > 1:
+                    analysis = (
+                        f"{analysis} (Đã thử {len(attempted)} AI agent: "
+                        + " → ".join(attempted)
+                        + ")"
+                    )
+                items.append(
+                    CameraAnalysisResult(
+                        camera=camera,
+                        image_path=image_path,
+                        analysis=re.sub(r"\s+", " ", analysis).strip(),
+                        attempted_agents=tuple(attempted),
+                    )
+                )
+            except asyncio.CancelledError:
+                raise
+            except Exception:  # noqa: BLE001 - isolate failures per camera
+                _LOGGER.exception(
+                    "Unexpected camera analysis failure for %s", camera.entity_id
+                )
+                failures.append(
+                    f"{camera.display_name}: lỗi ngoài dự kiến khi xử lý"
+                )
+        return items, failures
+
+    @staticmethod
+    def _camera_analysis_voice_text(
+        items: list[CameraAnalysisResult], failures: list[str]
+    ) -> str:
+        """Format analysis results for Voice Assist."""
+        lines = [
+            f"{item.camera.display_name}: {item.analysis}" for item in items
+        ]
+        if failures:
+            lines.append("Một số mục không hoàn tất: " + "; ".join(failures) + ".")
+        return "\n".join(lines)
+
+    @staticmethod
     def _camera_snapshot_paths(
         media_root: str, owner_key: str, entity_id: str
     ) -> tuple[str, str]:
@@ -3082,11 +3469,10 @@ class ConversationalAssistantManager(NoteManagerMixin):
         filename, image_path = self._camera_snapshot_paths(
             media_root, owner_key, camera.entity_id
         )
-        await self.hass.async_add_executor_job(
-            _prepare_camera_snapshot_path, filename
-        )
-
         try:
+            await self.hass.async_add_executor_job(
+                _prepare_camera_snapshot_path, filename
+            )
             await self.hass.services.async_call(
                 "camera",
                 "snapshot",
@@ -3097,15 +3483,14 @@ class ConversationalAssistantManager(NoteManagerMixin):
                 blocking=True,
                 context=service_context,
             )
+            snapshot_exists = await self.hass.async_add_executor_job(
+                os.path.isfile, filename
+            )
         except Exception:  # noqa: BLE001 - continue with other cameras
             _LOGGER.exception(
                 "Failed to capture snapshot from %s", camera.entity_id
             )
             return None, f"{camera.display_name}: không chụp được ảnh"
-
-        snapshot_exists = await self.hass.async_add_executor_job(
-            os.path.isfile, filename
-        )
         if not snapshot_exists:
             return None, f"{camera.display_name}: không tạo được file ảnh"
         return image_path, None
@@ -3298,6 +3683,123 @@ class ConversationalAssistantManager(NoteManagerMixin):
         return sent_targets, failures
 
     @staticmethod
+    def _camera_analysis_zalo_message(item: CameraAnalysisResult) -> str:
+        """Pair one captured image with its camera analysis."""
+        return (
+            f"📷 **{item.camera.display_name}**\n"
+            f"🔎 **Phân tích:** {item.analysis}"
+        )
+
+    async def _async_send_camera_analysis_to_zalo(
+        self,
+        context: ZaloWebhookContext,
+        items: list[CameraAnalysisResult],
+        service_context: Context | None,
+    ) -> tuple[int, list[str]]:
+        """Send each analyzed image back to the originating Zalo chat."""
+        account_selection = self._zalo_webhook_account_selection()
+        if not account_selection:
+            return 0, ["Chưa cấu hình tài khoản Zalo trả lời webhook"]
+        if not self.hass.services.has_service(
+            ZALO_DOMAIN, ZALO_SERVICE_SEND_IMAGE
+        ):
+            return 0, [f"Action {ZALO_DOMAIN}.{ZALO_SERVICE_SEND_IMAGE} chưa sẵn sàng"]
+
+        sent = 0
+        failures: list[str] = []
+        for item in items:
+            try:
+                await self._async_send_zalo_typing_event(context, service_context)
+                await self.hass.services.async_call(
+                    ZALO_DOMAIN,
+                    ZALO_SERVICE_SEND_IMAGE,
+                    {
+                        "type": context.thread_type,
+                        "ttl": 0,
+                        "image_path": item.image_path,
+                        "message": self._camera_analysis_zalo_message(item),
+                        "thread_id": context.thread_id,
+                        "account_selection": account_selection,
+                    },
+                    blocking=True,
+                    context=service_context,
+                )
+                sent += 1
+            except Exception:  # noqa: BLE001 - continue remaining cameras
+                _LOGGER.exception(
+                    "Failed sending camera analysis for %s to Zalo thread %s",
+                    item.camera.entity_id,
+                    context.thread_id,
+                )
+                failures.append(f"{item.camera.display_name}: gửi Zalo thất bại")
+        return sent, failures
+
+    async def _async_send_camera_analysis_to_configured_zalo(
+        self,
+        items: list[CameraAnalysisResult],
+        zalo_targets: list[dict[str, Any]],
+        service_context: Context | None,
+    ) -> tuple[list[str], list[str]]:
+        """Send analyzed images and matching text to selected Zalo targets."""
+        sent_targets: list[str] = []
+        failures: list[str] = []
+        if not self.hass.services.has_service(
+            ZALO_DOMAIN, ZALO_SERVICE_SEND_IMAGE
+        ):
+            return [], [f"Action {ZALO_DOMAIN}.{ZALO_SERVICE_SEND_IMAGE} chưa sẵn sàng"]
+
+        for target in zalo_targets:
+            target_name = (
+                str(target.get(CONF_ZALO_TARGET_NAME, "")).strip()
+                or str(target.get(CONF_ZALO_THREAD_ID, "")).strip()
+                or "Zalo"
+            )
+            thread_id = str(target.get(CONF_ZALO_THREAD_ID, "")).strip()
+            account_selection = str(
+                target.get(CONF_ZALO_ACCOUNT_SELECTION, "")
+            ).strip()
+            thread_type = str(
+                target.get(CONF_ZALO_TYPE, DEFAULT_ZALO_TYPE)
+            ).strip()
+            if not thread_id or not account_selection:
+                failures.append(f"{target_name}: thiếu cấu hình")
+                continue
+
+            target_ok = True
+            for item in items:
+                try:
+                    await self._async_send_zalo_typing_to_target(
+                        thread_id, account_selection, service_context
+                    )
+                    await self.hass.services.async_call(
+                        ZALO_DOMAIN,
+                        ZALO_SERVICE_SEND_IMAGE,
+                        {
+                            "type": thread_type,
+                            "ttl": 0,
+                            "image_path": item.image_path,
+                            "message": self._camera_analysis_zalo_message(item),
+                            "thread_id": thread_id,
+                            "account_selection": account_selection,
+                        },
+                        blocking=True,
+                        context=service_context,
+                    )
+                except Exception:  # noqa: BLE001 - continue other targets
+                    _LOGGER.exception(
+                        "Failed sending camera analysis to Zalo target %s",
+                        thread_id,
+                    )
+                    failures.append(
+                        f"{target_name}: lỗi gửi {item.camera.display_name}"
+                    )
+                    target_ok = False
+                    break
+            if target_ok:
+                sent_targets.append(target_name)
+        return sent_targets, failures
+
+    @staticmethod
     def _is_voice_camera_confirmation(text: str) -> bool:
         """Return True when a follow-up clearly approves capture and send."""
         normalized = normalize_text(text)
@@ -3350,15 +3852,22 @@ class ConversationalAssistantManager(NoteManagerMixin):
             "do not take the photo",
             "dont take the photo",
             "don t take the photo",
+            "do not send",
+            "dont send",
+            "don t send",
             "never mind",
             "khong",
             "khong dong y",
             "khong chup",
             "khong chup anh",
+            "khong gui",
+            "khong gui zalo",
             "huy",
             "huy chup",
+            "huy gui",
             "thoi",
             "thoi khong chup",
+            "thoi khong gui",
         }
 
     def _current_voice_camera_zalo_targets(
@@ -3495,6 +4004,48 @@ class ConversationalAssistantManager(NoteManagerMixin):
             response_type="images" if len(image_paths) > 1 else "image",
         )
 
+    async def _async_analyze_cameras_to_zalo(
+        self,
+        context: ZaloWebhookContext,
+        cameras: list[CameraTarget],
+        service_context: Context | None,
+    ) -> ZaloDirectResponse | str:
+        """Capture, analyze, and return each selected camera to Zalo."""
+        if not self.hass.services.has_service("camera", "snapshot"):
+            return "Action camera.snapshot chưa sẵn sàng trên Home Assistant."
+        unavailable = self._camera_analysis_unavailable_text()
+        if unavailable:
+            return unavailable
+
+        items, failures = await self._async_capture_and_analyze_cameras(
+            context.owner_key,
+            cameras,
+            service_context,
+            context,
+        )
+        if not items:
+            details = "; ".join(failures)
+            return (
+                "Không chụp hoặc phân tích được các camera đã chọn. "
+                + (details or "Hãy kiểm tra camera và AI Task agent.")
+            )
+        sent_count, send_failures = await self._async_send_camera_analysis_to_zalo(
+            context, items, service_context
+        )
+        failures.extend(send_failures)
+        if sent_count == 0:
+            return (
+                "Đã xử lý camera nhưng không gửi được ảnh và kết quả lên Zalo. "
+                + "; ".join(failures)
+            )
+        if failures:
+            await self._async_send_zalo_webhook_reply(
+                context,
+                f"✅ Đã gửi kết quả cho {sent_count} camera. "
+                "Một số mục không hoàn tất: " + "; ".join(failures) + ".",
+            )
+        return ZaloDirectResponse(sent=True, response_type="camera_analysis")
+
     async def _async_zalo_pending_camera_reply(
         self,
         context: ZaloWebhookContext,
@@ -3504,39 +4055,34 @@ class ConversationalAssistantManager(NoteManagerMixin):
         """Handle one or more camera selections from Zalo."""
         normalized = normalize_text(context.text)
         cancel_phrases = {
-            "no",
-            "cancel",
-            "stop",
-            "skip",
-            "do not capture",
-            "dont capture",
-            "don t capture",
-            "do not take a photo",
-            "dont take a photo",
-            "don t take a photo",
-            "never mind",
-            "khong",
-            "huy",
-            "bo qua",
-            "khong chup",
-            "khong chup anh",
-            "khong lay anh",
+            "no", "cancel", "stop", "skip", "do not capture",
+            "dont capture", "don t capture", "do not take a photo",
+            "dont take a photo", "don t take a photo", "never mind",
+            "khong", "huy", "bo qua", "khong chup", "khong chup anh",
+            "khong lay anh", "khong phan tich",
         }
         if normalized in cancel_phrases:
             self._zalo_pending_cameras.pop(context.owner_key, None)
             self._zalo_pending_calendar_events.pop(context.owner_key, None)
-            return "Đã hủy yêu cầu chụp ảnh camera."
+            return (
+                "Đã hủy yêu cầu phân tích camera."
+                if pending.mode == "analysis"
+                else "Đã hủy yêu cầu chụp ảnh camera."
+            )
 
         selected = parse_target_selection(
             context.text, [camera.display_name for camera in pending.cameras]
+        )
+        prompt = (
+            self._camera_analysis_selection_prompt
+            if pending.mode == "analysis"
+            else self._camera_selection_prompt
         )
         if not selected:
             pending.expires_at = dt_util.now() + timedelta(
                 seconds=PENDING_CONFIRMATION_TIMEOUT_SECONDS
             )
-            return self._camera_selection_prompt(
-                pending.cameras, invalid=True
-            )
+            return prompt(pending.cameras, invalid=True)
 
         cameras = [pending.cameras[index] for index in selected]
         unavailable = [
@@ -3551,14 +4097,19 @@ class ConversationalAssistantManager(NoteManagerMixin):
                 "Các camera đã chọn hiện không khả dụng: "
                 + ", ".join(unavailable)
                 + ". Hãy chọn camera khác.\n"
-                + self._camera_selection_prompt(pending.cameras)
+                + prompt(pending.cameras)
             )
 
         self._zalo_pending_cameras.pop(context.owner_key, None)
         self._zalo_pending_calendar_events.pop(context.owner_key, None)
-        result = await self._async_capture_cameras_to_zalo(
-            context, available, service_context
-        )
+        if pending.mode == "analysis":
+            result = await self._async_analyze_cameras_to_zalo(
+                context, available, service_context
+            )
+        else:
+            result = await self._async_capture_cameras_to_zalo(
+                context, available, service_context
+            )
         if unavailable and isinstance(result, ZaloDirectResponse):
             await self._async_send_zalo_webhook_reply(
                 context,
@@ -5386,6 +5937,8 @@ class ConversationalAssistantManager(NoteManagerMixin):
     ) -> str:
         """Process one calendar or Conversation command from Zalo."""
         self._clear_zalo_pending_for_owner(context.owner_key)
+        if request_kind == "camera_analysis":
+            return await self._async_camera_analysis_from_zalo(context)
         if request_kind == "camera":
             return await self._async_camera_from_zalo(context)
         if request_kind == "calendar":
@@ -5449,7 +6002,7 @@ class ConversationalAssistantManager(NoteManagerMixin):
         if (
             pending_camera is not None
             and command is None
-            and explicit_ha_kind in {None, "camera"}
+            and explicit_ha_kind in {None, "camera", "camera_analysis"}
         ):
             return await self._async_zalo_pending_camera_reply(
                 context, pending_camera, service_context
@@ -5528,6 +6081,9 @@ class ConversationalAssistantManager(NoteManagerMixin):
         if command == "help":
             self._clear_zalo_pending_for_owner(context.owner_key)
             return self._integration_help_text()
+        if command == ACTION_CAMERA_ANALYSIS:
+            self._clear_zalo_pending_for_owner(context.owner_key)
+            return await self._async_camera_analysis_from_zalo(context)
         if command == ACTION_CAMERA:
             self._clear_zalo_pending_for_owner(context.owner_key)
             return await self._async_camera_from_zalo(context)
@@ -5553,8 +6109,20 @@ class ConversationalAssistantManager(NoteManagerMixin):
             )
         return None
 
-    def _zalo_long_running_action(self, text: str) -> str | None:
+    def _zalo_long_running_action(
+        self, context: ZaloWebhookContext
+    ) -> str | None:
         """Return a slow action only when the request has usable content."""
+        text = context.text
+        pending_camera = self._zalo_pending_camera(context.owner_key)
+        if pending_camera is not None and pending_camera.mode == "analysis":
+            selected = parse_target_selection(
+                text,
+                [camera.display_name for camera in pending_camera.cameras],
+            )
+            if selected:
+                return ACTION_CAMERA_ANALYSIS
+
         command = self._zalo_command_kind(text)
         effective_text = text
         if command is None:
@@ -5609,6 +6177,8 @@ class ConversationalAssistantManager(NoteManagerMixin):
             feature = (
                 "image generation"
                 if action == ACTION_IMAGE_GENERATION
+                else "camera analysis"
+                if action == ACTION_CAMERA_ANALYSIS
                 else "calendar analysis"
                 if action == ACTION_CALENDAR
                 else "search"
@@ -5620,6 +6190,8 @@ class ConversationalAssistantManager(NoteManagerMixin):
         feature = (
             "tạo ảnh"
             if action == ACTION_IMAGE_GENERATION
+            else "phân tích camera"
+            if action == ACTION_CAMERA_ANALYSIS
             else "phân tích lịch"
             if action == ACTION_CALENDAR
             else "tìm kiếm"
@@ -5655,12 +6227,25 @@ class ConversationalAssistantManager(NoteManagerMixin):
         per_agent_timeout_seconds = (
             ZALO_IMAGE_TIMEOUT_SECONDS
             if action == ACTION_IMAGE_GENERATION
+            else CAMERA_ANALYSIS_TIMEOUT_SECONDS
+            if action == ACTION_CAMERA_ANALYSIS
             else ZALO_SEARCH_TIMEOUT_SECONDS
         )
         candidate_count = self._ai_long_running_candidate_count(action)
-        # Each candidate receives its own complete timeout window. The outer
-        # timeout is only a final safety net for delivery/cleanup overhead.
-        timeout_seconds = per_agent_timeout_seconds * candidate_count + 120
+        camera_count = 1
+        if action == ACTION_CAMERA_ANALYSIS:
+            pending_camera = self._zalo_pending_camera(context.owner_key)
+            if pending_camera is not None:
+                selected = parse_target_selection(
+                    context.text,
+                    [camera.display_name for camera in pending_camera.cameras],
+                )
+                camera_count = max(1, len(selected))
+        # Each candidate and selected camera receives a complete timeout window.
+        # The outer timeout is only a final safety net for delivery/cleanup.
+        timeout_seconds = (
+            per_agent_timeout_seconds * candidate_count * camera_count + 120
+        )
         await self._async_send_zalo_typing_event(context, service_context)
         typing_stop = asyncio.Event()
         typing_task = self.hass.async_create_task(
@@ -5758,7 +6343,7 @@ class ConversationalAssistantManager(NoteManagerMixin):
         if self._is_duplicate_zalo_message(context.message_id):
             return {"ok": True, "handled": False, "reason": "duplicate"}
 
-        long_action = self._zalo_long_running_action(context.text)
+        long_action = self._zalo_long_running_action(context)
         if long_action is not None:
             processing_message_sent = await self._async_send_zalo_webhook_reply(
                 context,
@@ -6574,6 +7159,7 @@ class ConversationalAssistantManager(NoteManagerMixin):
         user_input: ConversationInput,
         cameras: list[CameraTarget],
         zalo_targets: list[dict[str, Any]],
+        mode: str = "capture",
     ) -> PendingVoiceCamera:
         """Store a voice camera request waiting for selection."""
         self._purge_expired_pending()
@@ -6590,6 +7176,8 @@ class ConversationalAssistantManager(NoteManagerMixin):
             created_at=now,
             expires_at=now
             + timedelta(seconds=PENDING_CONFIRMATION_TIMEOUT_SECONDS),
+            mode=mode,
+            analysis_items=[],
         )
         self._pending_voice_cameras[pending.pending_id] = pending
         self._sync_pending_followup_trigger()
@@ -6942,6 +7530,10 @@ class ConversationalAssistantManager(NoteManagerMixin):
             else user_input
         )
 
+        if command.action == ACTION_CAMERA_ANALYSIS:
+            return await self._async_camera_analysis_from_voice(
+                user_input, result
+            )
         if command.action == ACTION_CAMERA:
             return await self._async_camera_from_voice(user_input, result)
         if command.action == ACTION_REMINDER_CREATE:
@@ -7017,6 +7609,14 @@ class ConversationalAssistantManager(NoteManagerMixin):
         normalized = normalize_text(text)
         if normalized.startswith(
             (
+                "analyze camera",
+                "analyse camera",
+                "check camera",
+                "inspect camera",
+                "phan tich cam",
+                "phan tich camera",
+                "kiem tra cam",
+                "kiem tra camera",
                 "take a camera photo",
                 "take camera photo",
                 "take a photo from camera",
@@ -7175,7 +7775,18 @@ class ConversationalAssistantManager(NoteManagerMixin):
                 self._pending_voice_cameras.pop(
                     camera_pending.pending_id, None
                 )
-                response = "Đã hủy yêu cầu chụp ảnh camera."
+                if (
+                    camera_pending.mode == "analysis"
+                    and camera_pending.phase == "analysis_destination"
+                ):
+                    response = (
+                        "Đã hoàn tất phân tích và không gửi ảnh, nội dung "
+                        "phân tích lên Zalo."
+                    )
+                elif camera_pending.mode == "analysis":
+                    response = "Đã hủy yêu cầu phân tích camera."
+                else:
+                    response = "Đã hủy yêu cầu chụp ảnh camera."
             elif creation is not None:
                 self._pending.pop(creation.pending_id, None)
                 response = "Đã hủy nhắc nhở đang tạo."
@@ -7203,6 +7814,11 @@ class ConversationalAssistantManager(NoteManagerMixin):
         pending: PendingVoiceCamera,
     ) -> str:
         """Handle camera selection and final voice confirmation."""
+        if pending.mode == "analysis":
+            return await self._async_confirm_camera_analysis_from_voice(
+                user_input, result, pending
+            )
+
         if pending.phase == "selection":
             selection = self._selection_slot(user_input, result)
             indexes = parse_target_selection(
@@ -7272,6 +7888,193 @@ class ConversationalAssistantManager(NoteManagerMixin):
         response = await self._async_capture_voice_cameras(
             user_input, pending, zalo_targets
         )
+        return await self._async_voice_response(user_input, response)
+
+    async def _async_confirm_camera_analysis_from_voice(
+        self,
+        user_input: ConversationInput,
+        result: RecognizeResult,
+        pending: PendingVoiceCamera,
+    ) -> str:
+        """Analyze selected cameras, then optionally send results to Zalo."""
+        if pending.phase == "selection":
+            selection = self._selection_slot(user_input, result)
+            indexes = parse_target_selection(
+                selection,
+                [camera.display_name for camera in pending.cameras],
+            )
+            selected = [pending.cameras[index] for index in indexes]
+            available = [camera for camera in selected if camera.available]
+            if not available:
+                pending.expires_at = dt_util.now() + timedelta(
+                    seconds=PENDING_CONFIRMATION_TIMEOUT_SECONDS
+                )
+                self._sync_pending_followup_trigger()
+                return await self._async_voice_response(
+                    user_input,
+                    self._voice_camera_analysis_selection_prompt(
+                        pending.cameras, invalid=True
+                    ),
+                )
+
+            pending.selected_cameras = available
+            processing_seconds = (
+                CAMERA_ANALYSIS_TIMEOUT_SECONDS
+                * max(
+                    1,
+                    len(
+                        self._ai_camera_agent_candidates(
+                            self.ai_camera_task_entity_id
+                        )
+                    ),
+                )
+                * max(1, len(available))
+                + 120
+            )
+            # Do not let the normal 120-second confirmation cleanup remove the
+            # in-flight analysis. A fresh 120-second destination window is set
+            # immediately after the results are ready.
+            pending.expires_at = dt_util.now() + timedelta(
+                seconds=processing_seconds
+            )
+            self._sync_pending_followup_trigger()
+            owner_key = "voice-analysis:" + uuid.uuid5(
+                uuid.NAMESPACE_URL,
+                "|".join(sorted(pending.source_keys)),
+            ).hex
+            items, failures = await self._async_capture_and_analyze_cameras(
+                owner_key,
+                available,
+                user_input.context,
+            )
+            if not items:
+                self._pending_voice_cameras.pop(pending.pending_id, None)
+                self._sync_pending_followup_trigger()
+                details = "; ".join(failures)
+                return await self._async_voice_response(
+                    user_input,
+                    "Không thể chụp và phân tích các camera đã chọn. "
+                    + (details or "Hãy kiểm tra camera và AI Task agent."),
+                )
+
+            pending.analysis_items = items
+            current_targets = self._configured_zalo_targets()
+            pending.zalo_targets = [dict(target) for target in current_targets]
+            analysis_text = self._camera_analysis_voice_text(items, failures)
+            unavailable = [
+                camera.display_name
+                for camera in selected
+                if not camera.available
+            ]
+            if unavailable:
+                analysis_text += (
+                    "\nĐã bỏ qua camera không khả dụng: "
+                    + ", ".join(unavailable)
+                    + "."
+                )
+
+            if not current_targets:
+                self._pending_voice_cameras.pop(pending.pending_id, None)
+                self._sync_pending_followup_trigger()
+                analysis_text += (
+                    "\nChưa có Zalo destination đang bật nên tôi không thể "
+                    "gửi ảnh và nội dung phân tích lên Zalo."
+                )
+                return await self._async_voice_response(
+                    user_input, analysis_text, ai_generated=True
+                )
+
+            pending.phase = "analysis_destination"
+            pending.expires_at = dt_util.now() + timedelta(
+                seconds=PENDING_CONFIRMATION_TIMEOUT_SECONDS
+            )
+            self._sync_pending_followup_trigger()
+            return await self._async_voice_response(
+                user_input,
+                analysis_text
+                + "\n"
+                + self._voice_camera_analysis_destination_prompt(
+                    current_targets
+                ),
+                ai_generated=True,
+            )
+
+        if pending.phase != "analysis_destination":
+            self._pending_voice_cameras.pop(pending.pending_id, None)
+            self._sync_pending_followup_trigger()
+            return await self._async_voice_response(
+                user_input,
+                "Phiên phân tích camera không còn hợp lệ. Hãy yêu cầu lại.",
+            )
+
+        current_targets = self._current_voice_camera_zalo_targets(pending)
+        if not current_targets:
+            self._pending_voice_cameras.pop(pending.pending_id, None)
+            self._sync_pending_followup_trigger()
+            return await self._async_voice_response(
+                user_input,
+                "Các Zalo destination đã bị xóa hoặc tắt trước khi gửi. "
+                "Kết quả phân tích đã hoàn tất nhưng chưa gửi lên Zalo.",
+            )
+
+        selection = self._selection_slot(user_input, result)
+        target_names = [
+            str(target.get(CONF_ZALO_TARGET_NAME, "")).strip()
+            or str(target.get(CONF_ZALO_THREAD_ID, "")).strip()
+            or "Zalo"
+            for target in current_targets
+        ]
+        indexes = parse_target_selection(selection, target_names)
+        if not indexes:
+            pending.zalo_targets = [dict(target) for target in current_targets]
+            pending.expires_at = dt_util.now() + timedelta(
+                seconds=PENDING_CONFIRMATION_TIMEOUT_SECONDS
+            )
+            self._sync_pending_followup_trigger()
+            return await self._async_voice_response(
+                user_input,
+                self._voice_camera_analysis_destination_prompt(
+                    current_targets, invalid=True
+                ),
+            )
+
+        selected_targets = [current_targets[index] for index in indexes]
+        items = list(pending.analysis_items or [])
+        self._pending_voice_cameras.pop(pending.pending_id, None)
+        self._sync_pending_followup_trigger()
+        if not items:
+            return await self._async_voice_response(
+                user_input,
+                "Kết quả phân tích camera không còn trong phiên hiện tại. "
+                "Hãy yêu cầu phân tích lại.",
+            )
+
+        sent_targets, send_failures = (
+            await self._async_send_camera_analysis_to_configured_zalo(
+                items,
+                selected_targets,
+                user_input.context,
+            )
+        )
+        if not sent_targets:
+            details = "; ".join(send_failures)
+            response = (
+                "Đã phân tích camera nhưng chưa gửi được lên Zalo. "
+                + (details or "Hãy kiểm tra tích hợp zalo_bot.")
+            )
+        else:
+            response = (
+                f"Đã gửi ảnh và nội dung phân tích của {len(items)} camera "
+                "lên Zalo đến "
+                + ", ".join(sent_targets)
+                + "."
+            )
+            if send_failures:
+                response += (
+                    " Một số mục không hoàn tất: "
+                    + "; ".join(send_failures)
+                    + "."
+                )
         return await self._async_voice_response(user_input, response)
 
     async def _async_confirm_targets_from_voice(
@@ -7373,7 +8176,10 @@ class ConversationalAssistantManager(NoteManagerMixin):
             )
         if camera is not None:
             self._pending_voice_cameras.pop(camera.pending_id, None)
-            response = "Đã hủy yêu cầu chụp ảnh camera."
+            if camera.mode == "analysis":
+                response = "Đã hủy yêu cầu phân tích camera."
+            else:
+                response = "Đã hủy yêu cầu chụp ảnh camera."
         elif creation is not None:
             self._pending.pop(creation.pending_id, None)
             response = "Đã hủy nhắc nhở đang tạo."

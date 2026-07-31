@@ -143,6 +143,9 @@ def explicit_home_assistant_request_kind(text: str) -> str | None:
     if not normalized:
         return None
 
+    if _is_camera_analysis_request(normalized):
+        return "camera_analysis"
+
     if _is_camera_image_request(normalized):
         return "camera"
 
@@ -1332,6 +1335,39 @@ def _is_camera_image_request(normalized: str) -> bool:
     return normalized == "camera" or any(
         phrase in normalized for phrase in image_phrases
     )
+
+
+def _is_camera_analysis_request(normalized: str) -> bool:
+    """Return whether text requests AI analysis of one or more cameras."""
+    if not normalized:
+        return False
+    for polite_prefix in ("hay ", "please "):
+        if normalized.startswith(polite_prefix):
+            normalized = normalized[len(polite_prefix) :].strip()
+            break
+    phrases = {
+        "analyze camera",
+        "analyze cameras",
+        "analyse camera",
+        "analyse cameras",
+        "camera analysis",
+        "check camera",
+        "check cameras",
+        "inspect camera",
+        "inspect cameras",
+        "phan tich cam",
+        "phan tich camera",
+        "phan tich cac cam",
+        "phan tich cac camera",
+        "kiem tra cam",
+        "kiem tra camera",
+        "kiem tra cac cam",
+        "kiem tra cac camera",
+        "xem va phan tich cam",
+        "xem va phan tich camera",
+    }
+    prefixes = tuple(f"{phrase} " for phrase in phrases)
+    return normalized in phrases or normalized.startswith(prefixes)
 
 
 def _is_calendar_query(normalized: str) -> bool:

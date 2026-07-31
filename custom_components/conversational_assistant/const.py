@@ -21,6 +21,7 @@ CONF_ZALO_HOME_ASSISTANT_ENABLED = "zalo_home_assistant_enabled"
 CONF_ZALO_CONVERSATION_AGENT_ID = "zalo_conversation_agent_id"
 CONF_AI_SEARCH_AGENT_ID = "ai_search_agent_id"
 CONF_AI_IMAGE_TASK_ENTITY_ID = "ai_image_task_entity_id"
+CONF_AI_CAMERA_TASK_ENTITY_ID = "ai_camera_task_entity_id"
 CONF_AI_AGENT_FAILOVER_ENABLED = "ai_agent_failover_enabled"
 
 # Legacy single-Zalo options, retained for automatic migration.
@@ -47,10 +48,12 @@ DEFAULT_ZALO_HOME_ASSISTANT_ENABLED = True
 DEFAULT_ZALO_CONVERSATION_AGENT_ID = "conversation.home_assistant"
 DEFAULT_AI_SEARCH_AGENT_ID = ""
 DEFAULT_AI_IMAGE_TASK_ENTITY_ID = ""
+DEFAULT_AI_CAMERA_TASK_ENTITY_ID = ""
 DEFAULT_AI_AGENT_FAILOVER_ENABLED = True
 
 AI_TASK_DOMAIN = "ai_task"
 AI_TASK_SERVICE_GENERATE_IMAGE = "generate_image"
+AI_TASK_SERVICE_GENERATE_DATA = "generate_data"
 
 # Action used by an existing webhook/automation to pass Zalo payloads in.
 SERVICE_PROCESS_ZALO_WEBHOOK = "process_zalo_webhook"
@@ -77,6 +80,7 @@ ZALO_TYPING_REFRESH_SECONDS = 4
 # instead of leaving the user waiting forever when an AI provider stalls.
 ZALO_SEARCH_TIMEOUT_SECONDS = 180
 ZALO_IMAGE_TIMEOUT_SECONDS = 360
+CAMERA_ANALYSIS_TIMEOUT_SECONDS = 180
 
 # Device/entity discovery is intentionally lazy.  A short cache keeps repeated
 # reminder/camera requests fast without scanning Home Assistant registries while
@@ -171,6 +175,32 @@ SEARCH_SENTENCES = [
     "[please ]look up {request}",
     "[please ]find information about",
     "[please ]find information about {request}",
+]
+
+
+# Camera analysis uses AI Task generate_data with the selected camera media
+# source attached. Each selected camera is processed independently so one
+# unavailable camera or provider failure does not discard other results.
+CAMERA_ANALYSIS_INSTRUCTIONS = (
+    "Phân tích camera nếu có người hãy đếm số người, mô tả giới tính, độ tuổi, "
+    "đặc điểm nhận dạng mũ nón đầu tóc trang phục, xe đang ở bên cạnh hoặc điều "
+    "khiển là xe gì. Nếu có động vật hãy mô tả loài gì, đặc điểm loài. Bỏ qua các "
+    "chi tiết vật thể cố định. Nếu không có người hay động vật trả lời Không có "
+    "người, động vật. Chỉ trả lại nội dung trên một dòng duy nhất ( không ngắt "
+    "dòng). Mô tả ngắn gọn đủ ý không thưa gửi dài dòng."
+)
+
+CAMERA_ANALYSIS_SENTENCES = [
+    "[hãy ]phân tích cam",
+    "[hãy ]phân tích camera",
+    "[hãy ]kiểm tra cam",
+    "[hãy ]kiểm tra camera",
+    "[hãy ]xem và phân tích cam",
+    "[hãy ]xem và phân tích camera",
+    "[please ]analyze camera",
+    "[please ]analyse camera",
+    "[please ]check camera",
+    "[please ]inspect camera",
 ]
 
 # AI image generation is currently delivered to the originating Zalo chat.

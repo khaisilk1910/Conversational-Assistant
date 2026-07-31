@@ -16,6 +16,7 @@ from homeassistant.helpers import selector
 from .const import (
     AI_TASK_DOMAIN,
     CONF_AI_AGENT_FAILOVER_ENABLED,
+    CONF_AI_CAMERA_TASK_ENTITY_ID,
     CONF_AI_IMAGE_TASK_ENTITY_ID,
     CONF_AI_SEARCH_AGENT_ID,
     CONF_CONFIRM_TARGETS,
@@ -36,6 +37,7 @@ from .const import (
     CONF_ZALO_WEBHOOK_BOT_ACCOUNT_ID,
     CONF_ZALO_WEBHOOK_ENABLED,
     DEFAULT_AI_AGENT_FAILOVER_ENABLED,
+    DEFAULT_AI_CAMERA_TASK_ENTITY_ID,
     DEFAULT_AI_IMAGE_TASK_ENTITY_ID,
     DEFAULT_AI_SEARCH_AGENT_ID,
     DEFAULT_CONFIRM_TARGETS,
@@ -116,6 +118,7 @@ def _ai_settings_schema(
     zalo_conversation_agent_id: str,
     ai_search_agent_id: str,
     ai_image_task_entity_id: str,
+    ai_camera_task_entity_id: str,
     ai_agent_failover_enabled: bool,
 ) -> vol.Schema:
     """Build AI agent selectors."""
@@ -163,6 +166,24 @@ def _ai_settings_schema(
         fields[vol.Optional(CONF_AI_IMAGE_TASK_ENTITY_ID)] = (
             image_task_selector
         )
+
+    camera_task_selector = selector.EntitySelector(
+        selector.EntitySelectorConfig(
+            domain=AI_TASK_DOMAIN,
+            multiple=False,
+        )
+    )
+    if ai_camera_task_entity_id:
+        fields[
+            vol.Optional(
+                CONF_AI_CAMERA_TASK_ENTITY_ID,
+                default=ai_camera_task_entity_id,
+            )
+        ] = camera_task_selector
+    else:
+        fields[vol.Optional(CONF_AI_CAMERA_TASK_ENTITY_ID)] = (
+            camera_task_selector
+        )
     return vol.Schema(fields)
 
 
@@ -209,6 +230,7 @@ def _initial_schema(
     zalo_conversation_agent_id: str,
     ai_search_agent_id: str,
     ai_image_task_entity_id: str,
+    ai_camera_task_entity_id: str,
     ai_agent_failover_enabled: bool,
 ) -> vol.Schema:
     """Build the initial installation form with all setting groups."""
@@ -224,6 +246,7 @@ def _initial_schema(
             zalo_conversation_agent_id,
             ai_search_agent_id,
             ai_image_task_entity_id,
+            ai_camera_task_entity_id,
             ai_agent_failover_enabled,
         ),
         _tts_settings_schema(speaker_enabled, tts_entity_id),
@@ -272,6 +295,9 @@ def _normalize_ai_settings(user_input: dict[str, Any]) -> dict[str, Any]:
     ).strip()
     normalized[CONF_AI_IMAGE_TASK_ENTITY_ID] = str(
         normalized.get(CONF_AI_IMAGE_TASK_ENTITY_ID, "") or ""
+    ).strip()
+    normalized[CONF_AI_CAMERA_TASK_ENTITY_ID] = str(
+        normalized.get(CONF_AI_CAMERA_TASK_ENTITY_ID, "") or ""
     ).strip()
     normalized[CONF_AI_AGENT_FAILOVER_ENABLED] = bool(
         normalized.get(
@@ -456,6 +482,13 @@ class ConversationalAssistantConfigFlow(config_entries.ConfigFlow, domain=DOMAIN
                     )
                     or ""
                 ).strip(),
+                str(
+                    values.get(
+                        CONF_AI_CAMERA_TASK_ENTITY_ID,
+                        DEFAULT_AI_CAMERA_TASK_ENTITY_ID,
+                    )
+                    or ""
+                ).strip(),
                 bool(
                     values.get(
                         CONF_AI_AGENT_FAILOVER_ENABLED,
@@ -588,6 +621,13 @@ class ConversationalAssistantOptionsFlow(config_entries.OptionsFlow):
             self.config_entry.data.get(
                 CONF_AI_IMAGE_TASK_ENTITY_ID,
                 DEFAULT_AI_IMAGE_TASK_ENTITY_ID,
+            ),
+        )
+        options.setdefault(
+            CONF_AI_CAMERA_TASK_ENTITY_ID,
+            self.config_entry.data.get(
+                CONF_AI_CAMERA_TASK_ENTITY_ID,
+                DEFAULT_AI_CAMERA_TASK_ENTITY_ID,
             ),
         )
         options.setdefault(
@@ -726,6 +766,8 @@ class ConversationalAssistantOptionsFlow(config_entries.OptionsFlow):
                 options.pop(CONF_AI_SEARCH_AGENT_ID, None)
             if not user_input.get(CONF_AI_IMAGE_TASK_ENTITY_ID):
                 options.pop(CONF_AI_IMAGE_TASK_ENTITY_ID, None)
+            if not user_input.get(CONF_AI_CAMERA_TASK_ENTITY_ID):
+                options.pop(CONF_AI_CAMERA_TASK_ENTITY_ID, None)
             return await self.async_step_init()
 
         values = user_input or options
@@ -750,6 +792,13 @@ class ConversationalAssistantOptionsFlow(config_entries.OptionsFlow):
                     values.get(
                         CONF_AI_IMAGE_TASK_ENTITY_ID,
                         DEFAULT_AI_IMAGE_TASK_ENTITY_ID,
+                    )
+                    or ""
+                ).strip(),
+                str(
+                    values.get(
+                        CONF_AI_CAMERA_TASK_ENTITY_ID,
+                        DEFAULT_AI_CAMERA_TASK_ENTITY_ID,
                     )
                     or ""
                 ).strip(),
