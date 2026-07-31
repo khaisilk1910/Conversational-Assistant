@@ -12,6 +12,7 @@ from typing import Any
 from homeassistant.components.calendar.const import CalendarEntityFeature
 from homeassistant.util import dt as dt_util
 
+from .device_control import device_power_request_hint
 from .targeting import normalize_text
 
 
@@ -250,6 +251,12 @@ def explicit_home_assistant_request_kind(text: str) -> str | None:
 
     if weather_search_request(text) is not None:
         return "weather"
+
+    # Keep malformed or joined-word power commands inside the Home Assistant
+    # route so the manager can try the local agent first and use AI only as a
+    # parser fallback when the native intent cannot resolve the target.
+    if device_power_request_hint(text):
+        return "conversation"
 
     command_prefixes = (
         "turn on ",
