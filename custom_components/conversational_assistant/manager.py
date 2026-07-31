@@ -138,6 +138,7 @@ from .const import (
     ZALO_SERVICE_SEND_IMAGES_TO_GROUP,
     ZALO_SERVICE_SEND_MESSAGE,
     ZALO_SERVICE_SEND_TYPING_EVENT,
+    ZALO_TEXT_CHUNK_MAX_CHARS,
     ZALO_IMAGE_TIMEOUT_SECONDS,
     ZALO_SEARCH_TIMEOUT_SECONDS,
     ZALO_TYPING_REFRESH_SECONDS,
@@ -245,7 +246,13 @@ _HELP_EXACT_PHRASES = frozenset(
         "hoc cach su dung conversational assistant",
         "lenh",
         "cac lenh",
+        "cac lenh cua tich hop",
+        "danh sach lenh cua tich hop",
+        "xem cac lenh cua tich hop",
         "cac tinh nang",
+        "cac tinh nang cua tich hop",
+        "danh sach tinh nang cua tich hop",
+        "xem cac tinh nang cua tich hop",
         "cac lenh ho tro",
         "huong dan cac tinh nang",
         "huong dan tinh nang",
@@ -299,11 +306,22 @@ def _is_integration_help_request(text: str) -> bool:
             "what features",
             "show commands",
             "show features",
+            "commands",
+            "features",
+            "usage",
             "huong dan",
+            "xem huong dan",
             "cach su dung",
             "cach dung",
+            "xem cach su dung",
+            "xem cach dung",
             "hoc cach",
             "gioi thieu",
+            "cac lenh",
+            "danh sach lenh",
+            "lenh ho tro",
+            "cac tinh nang",
+            "danh sach tinh nang",
             "lam duoc gi",
             "tinh nang gi",
             "su dung nhu the nao",
@@ -1708,6 +1726,22 @@ class ConversationalAssistantManager(NoteManagerMixin):
         text = str(reply or "").strip()
         if ai_generated:
             return text
+
+        # These responses are intentionally deterministic. The usage guide
+        # must be returned immediately from the built-in content, while
+        # calendar layouts and multi-turn confirmation prompts must preserve
+        # exact emoji, numbering, Markdown, and typeable command keywords.
+        # AI is still available inside the actual search/calendar/camera
+        # workflows where it is needed; only the final structured wording is
+        # protected from a second rewrite pass here.
+        if (
+            text == self._integration_help_text()
+            or _is_integration_help_request(context.text)
+            or self._zalo_owner_has_pending_confirmation(context.owner_key)
+            or explicit_home_assistant_request_kind(context.text) == "calendar"
+        ):
+            return text
+
         polished, attempted = await self._async_ai_polish_response(
             context.text,
             text,
@@ -3094,26 +3128,96 @@ class ConversationalAssistantManager(NoteManagerMixin):
             )
             return False
 
-        try:
-            await self.hass.services.async_call(
-                ZALO_DOMAIN,
-                ZALO_SERVICE_SEND_MESSAGE,
-                {
-                    "type": context.thread_type,
-                    "ttl": 0,
-                    "message": message,
-                    "thread_id": context.thread_id,
-                    "account_selection": account_selection,
-                },
-                blocking=True,
-            )
-        except Exception:  # noqa: BLE001 - webhook must still return HTTP 200
-            _LOGGER.exception(
-                "Failed to reply to Zalo webhook thread %s",
-                context.thread_id,
-            )
-            return False
+        chunks = self._split_zalo_text(message)
+        for index, chunk in enumerate(chunks, start=1):
+            try:
+                await self.hass.services.async_call(
+                    ZALO_DOMAIN,
+                    ZALO_SERVICE_SEND_MESSAGE,
+                    {
+                        "type": context.thread_type,
+                        "ttl": 0,
+                        "message": chunk,
+                        "thread_id": context.thread_id,
+                        "account_selection": account_selection,
+                    },
+                    blocking=True,
+                )
+            except Exception:  # noqa: BLE001 - webhook must still return HTTP 200
+                _LOGGER.exception(
+                    "Failed to reply to Zalo webhook thread %s "
+                    "while sending text chunk %s/%s",
+                    context.thread_id,
+                    index,
+                    len(chunks),
+                )
+                return False
         return True
+
+    @staticmethod
+    def _split_zalo_text(
+        message: str, max_chars: int = ZALO_TEXT_CHUNK_MAX_CHARS
+    ) -> list[str]:
+        """Split long Zalo text without breaking normal Markdown lines.
+
+        Paragraph boundaries are preferred so the built-in guide keeps each
+        numbered feature together. A paragraph that is itself too long (for
+        example a large camera list) is split at line boundaries, then at a
+        nearby whitespace boundary only as a final fallback.
+        """
+        text = str(message or "").strip()
+        if not text:
+            return [""]
+        if max_chars <= 0 or len(text) <= max_chars:
+            return [text]
+
+        def split_long_block(block: str) -> list[str]:
+            pieces: list[str] = []
+            current = ""
+            for line in block.splitlines():
+                candidate = line if not current else f"{current}\n{line}"
+                if len(candidate) <= max_chars:
+                    current = candidate
+                    continue
+                if current:
+                    pieces.append(current.rstrip())
+                    current = ""
+
+                remaining = line
+                while len(remaining) > max_chars:
+                    cut = remaining.rfind(" ", 0, max_chars + 1)
+                    if cut <= 0:
+                        cut = max_chars
+                    pieces.append(remaining[:cut].rstrip())
+                    remaining = remaining[cut:].lstrip()
+                current = remaining
+            if current:
+                pieces.append(current.rstrip())
+            return [piece for piece in pieces if piece]
+
+        chunks: list[str] = []
+        current = ""
+        for paragraph in text.split("\n\n"):
+            paragraph = paragraph.strip()
+            if not paragraph:
+                continue
+            candidate = paragraph if not current else f"{current}\n\n{paragraph}"
+            if len(candidate) <= max_chars:
+                current = candidate
+                continue
+            if current:
+                chunks.append(current.rstrip())
+                current = ""
+            if len(paragraph) <= max_chars:
+                current = paragraph
+            else:
+                block_pieces = split_long_block(paragraph)
+                if block_pieces:
+                    chunks.extend(block_pieces[:-1])
+                    current = block_pieces[-1]
+        if current:
+            chunks.append(current.rstrip())
+        return chunks or [text]
 
     async def _async_create_from_zalo(
         self, context: ZaloWebhookContext
@@ -3380,9 +3484,10 @@ class ConversationalAssistantManager(NoteManagerMixin):
         )
         return (
             f"{prefix}{chr(10).join(lines)}\n"
-            "Trả lời một hoặc nhiều số/tên camera để xác nhận, ví dụ: "
-            "1 3 10. Có thể gửi **tất cả** để chụp mọi camera khả dụng. "
-            "Gửi **không chụp** để **hủy**."
+            "\n📝 **Cách chọn camera:**\n"
+            "• Gửi một hoặc nhiều số hoặc tên camera, ví dụ: `1 3 10`.\n"
+            "• Gửi **Tất cả** để chụp mọi camera khả dụng.\n"
+            "• Gửi **Không chụp** hoặc **Hủy** để dừng."
         )
 
     @staticmethod
@@ -3493,9 +3598,10 @@ class ConversationalAssistantManager(NoteManagerMixin):
         )
         return (
             f"{prefix}{chr(10).join(lines)}\n"
-            "Trả lời một hoặc nhiều số/tên camera, ví dụ: **1 3 10**. "
-            "Có thể gửi **Tất cả** để phân tích mọi camera khả dụng. "
-            "Gửi **Hủy** để dừng."
+            "\n📝 **Cách chọn camera:**\n"
+            "• Gửi một hoặc nhiều số hoặc tên camera, ví dụ: `1 3 10`.\n"
+            "• Gửi **Tất cả** để phân tích mọi camera khả dụng.\n"
+            "• Gửi **Hủy** để dừng."
         )
 
     @staticmethod

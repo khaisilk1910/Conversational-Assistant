@@ -88,6 +88,12 @@ ZALO_TYPE_GROUP = "1"
 
 ZALO_WEBHOOK_SEEN_MESSAGE_LIMIT = 512
 
+# Keep text replies below the practical single-message size accepted by Zalo
+# bot implementations. Long structured replies (notably the built-in usage
+# guide and large calendar/camera lists) are split at paragraph or line
+# boundaries before calling zalo_bot.send_message.
+ZALO_TEXT_CHUNK_MAX_CHARS = 1800
+
 # Refresh the native Zalo typing indicator while a command is still being
 # processed. The task is created only for an active webhook request and is
 # stopped immediately after the final text/image response is delivered.

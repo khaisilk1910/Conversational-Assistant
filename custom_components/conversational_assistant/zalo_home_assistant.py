@@ -857,13 +857,17 @@ def format_calendar_events(
             event_start = dt_util.as_local(event.start)
             days_remaining = max(0, (event_start.date() - local_now.date()).days)
             content = _display_event_summary(event)
-            lines.append(f"{item_index}. **Ngày diễn ra:** {_format_event_time(event, local_now)}")
-            lines.append(f"   **Nội dung:** {content}")
-            lines.append(f"   **Còn:** {_days_remaining_text(days_remaining)}")
+            lines.append(f"{item_index}. 📌 **Nội dung:** {content}")
+            lines.append(
+                f"   🕒 **Thời gian:** {_format_event_time(event, local_now)}"
+            )
+            lines.append(
+                f"   ⏳ **Còn:** {_days_remaining_text(days_remaining)}"
+            )
             if event.location:
-                lines.append(f"   **Địa điểm:** {event.location}")
+                lines.append(f"   📍 **Địa điểm:** {event.location}")
             if event.description and normalize_text(event.description) != normalize_text(content):
-                lines.append(f"   **Chi tiết:** {event.description}")
+                lines.append(f"   📝 **Chi tiết:** {event.description}")
 
     return "\n".join(lines)
 
