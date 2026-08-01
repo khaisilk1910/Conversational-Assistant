@@ -25,12 +25,12 @@ Tích hợp kết hợp quản lý nhắc hẹn, ghi chú bảo mật, thông b�
 > 
 > Khi đó chỉ yêu cầu: **Hẹn 10h30 hàng ngày uống thuốc**
 >
-> AI Search bạn phải vào cài đặt và **Tắt Assistant** như ảnh dưới. Tham khảo [Tham Khảo Cài AI Ở Đây](https://github.com/luuquangvu/hass_local_openai_llm)
+> AI Search bạn phải vào cài đặt và **Tắt Assist** như ảnh dưới. Tham khảo [Tham Khảo Cài AI Ở Đây](https://github.com/luuquangvu/hass_local_openai_llm)
 > <img width="732" height="487" alt="image" src="https://github.com/user-attachments/assets/c41eddad-79ef-473b-910d-2e4312cc1cc7" />
 
 
 ```
-alias: Zalo - Bot Answer Multi Group Voice Reminder
+alias: Zalo - Bot Conversational Assistant
 description: ""
 triggers:
   - trigger: webhook
@@ -55,6 +55,20 @@ mode: parallel
 max: 50
 ```
 
+---
+
+## Cài đặt
+
+### Cài tự động
+
+  - Nhấn nút bên dưới để thêm vào HACS trên Home Assistant.
+
+  [![Open your Home Assistant instance and open a repository inside the Home Assistant Community Store.](https://my.home-assistant.io/badges/hacs_repository.svg)](https://my.home-assistant.io/redirect/hacs_repository/?owner=khaisilk1910&repository=Conversational-Assistant&category=integration)
+
+  - Sau khi thêm trong HACS và khởi động lại Home Assistant
+     
+  - Vào Settings -> Integrations -> Add integration -> Tìm `Conversational Assistant`
+  - 
 ---
 
 ## Mục lục
