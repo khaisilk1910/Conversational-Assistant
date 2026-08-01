@@ -106,6 +106,13 @@ ZALO_SEARCH_TIMEOUT_SECONDS = 180
 ZALO_IMAGE_TIMEOUT_SECONDS = 360
 CAMERA_ANALYSIS_TIMEOUT_SECONDS = 180
 
+# Dedicated Zalo chat mode. After 120 seconds without a new inbound message,
+# the integration asks whether the user wants to continue. A final 10-second
+# grace period then closes the session when no reply arrives.
+ACTION_CHAT = "chat"
+ZALO_CHAT_IDLE_TIMEOUT_SECONDS = 120
+ZALO_CHAT_REENGAGE_TIMEOUT_SECONDS = 10
+
 # Device/entity discovery is intentionally lazy.  A short cache keeps repeated
 # reminder/camera requests fast without scanning Home Assistant registries while
 # Home Assistant is starting.

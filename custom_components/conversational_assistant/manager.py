@@ -63,6 +63,7 @@ from homeassistant.helpers.storage import Store
 from homeassistant.util import dt as dt_util
 
 from .const import (
+    ACTION_CHAT,
     ACTION_DISMISS,
     ACTION_SNOOZE,
     AI_TASK_DOMAIN,
@@ -147,12 +148,19 @@ from .const import (
     ZALO_SERVICE_SEND_MESSAGE,
     ZALO_SERVICE_SEND_TYPING_EVENT,
     ZALO_TEXT_CHUNK_MAX_CHARS,
+    ZALO_CHAT_IDLE_TIMEOUT_SECONDS,
+    ZALO_CHAT_REENGAGE_TIMEOUT_SECONDS,
     ZALO_IMAGE_TIMEOUT_SECONDS,
     ZALO_SEARCH_TIMEOUT_SECONDS,
     ZALO_TYPING_REFRESH_SECONDS,
     ZALO_TYPE_GROUP,
     ZALO_TYPE_USER,
     ZALO_WEBHOOK_SEEN_MESSAGE_LIMIT,
+)
+from .chat_flow import (
+    chat_start_request,
+    contains_inappropriate_language,
+    sanitize_chat_reply,
 )
 from .command_memory import (
     ACTION_CAMERA,
@@ -586,6 +594,17 @@ class ZaloWebhookContext:
     text: str
 
 
+@dataclass(slots=True)
+class ActiveZaloChat:
+    """One ongoing AI chat bound to a Zalo thread."""
+
+    context: ZaloWebhookContext
+    conversation_id: str | None
+    phase: str
+    generation: int
+    expires_at: datetime
+
+
 def _add_month(value: datetime, target_day: int) -> datetime:
     """Add one month while preserving the requested day when possible."""
     year = value.year + (1 if value.month == 12 else 0)
@@ -743,6 +762,9 @@ class ConversationalAssistantManager(NoteManagerMixin):
         self._zalo_seen_message_id_set: set[str] = set()
         self._zalo_ha_conversation_ids: dict[str, str] = {}
         self._zalo_search_conversation_ids: dict[str, str] = {}
+        self._zalo_chat_sessions: dict[str, ActiveZaloChat] = {}
+        self._zalo_chat_timeout_tasks: dict[str, asyncio.Task[Any]] = {}
+        self._zalo_chat_locks: dict[str, asyncio.Lock] = {}
         self._zalo_background_tasks: set[asyncio.Task[Any]] = set()
         self._store: Store[dict[str, Any]] = Store(
             hass,
@@ -1808,6 +1830,7 @@ class ConversationalAssistantManager(NoteManagerMixin):
         if (
             text == self._integration_help_text()
             or _is_integration_help_request(context.text)
+            or chat_start_request(context.text) is not None
             or self._zalo_owner_has_pending_confirmation(context.owner_key)
             or explicit_home_assistant_request_kind(context.text) == "calendar"
         ):
@@ -1846,6 +1869,7 @@ class ConversationalAssistantManager(NoteManagerMixin):
             feature_name = {
                 "image": "image generation",
                 "conversation": "conversation",
+                "chat": "chat",
                 "calendar": "calendar analysis",
                 "camera": "camera analysis",
                 "weather": "weather lookup",
@@ -1860,6 +1884,7 @@ class ConversationalAssistantManager(NoteManagerMixin):
             feature_name = {
                 "image": "tạo ảnh",
                 "conversation": "hội thoại",
+                "chat": "trò chuyện",
                 "calendar": "phân tích lịch",
                 "camera": "phân tích camera",
                 "weather": "tra cứu thời tiết",
@@ -2096,6 +2121,14 @@ class ConversationalAssistantManager(NoteManagerMixin):
             unsub()
         self._zalo_ha_conversation_ids.clear()
         self._zalo_search_conversation_ids.clear()
+        chat_timeout_tasks = tuple(self._zalo_chat_timeout_tasks.values())
+        for task in chat_timeout_tasks:
+            task.cancel()
+        if chat_timeout_tasks:
+            await asyncio.gather(*chat_timeout_tasks, return_exceptions=True)
+        self._zalo_chat_timeout_tasks.clear()
+        self._zalo_chat_sessions.clear()
+        self._zalo_chat_locks.clear()
         self._unsubs.clear()
         self._pending.clear()
         self._pending_deletions.clear()
@@ -2992,16 +3025,19 @@ class ConversationalAssistantManager(NoteManagerMixin):
             "9️⃣ **🔎 TÌM KIẾM INTERNET**\n"
             "• Dùng AI Agent Search riêng để tìm và tổng hợp thông tin Việt/Anh.\n"
             "• Ví dụ: `Tìm thông tin giá vàng hôm nay`; `Search for the latest Home Assistant news`.\n\n"
-            "🔟 **🎨 TẠO ẢNH AI TRÊN ZALO**\n"
+            "🔟 **💬 TRÒ CHUYỆN HỎI ĐÁP TRÊN ZALO**\n"
+            "• Bắt đầu bằng `Trò chuyện đi`, `Tám đi` hoặc `Buôn đi`; mọi câu hỏi trong phiên dùng AI Search khi cần kiểm chứng.\n"
+            "• Sau 120 giây không phản hồi, integration hỏi lại; im lặng thêm 10 giây sẽ tự dừng trò chuyện.\n\n"
+            "1️⃣1️⃣ **🎨 TẠO ẢNH AI TRÊN ZALO**\n"
             "• Tạo ảnh từ mô tả và gửi lại đúng cuộc trò chuyện Zalo.\n"
             "• Ví dụ: `Tạo ảnh một chú mèo phi hành gia`; `Generate an image of a smart home`.\n\n"
-            "1️⃣1️⃣ **🧩 BỘ NHỚ CÂU LỆNH**\n"
+            "1️⃣2️⃣ **🧩 BỘ NHỚ CÂU LỆNH**\n"
             "• Dạy alias mới, xem danh sách hoặc xóa câu lệnh đã học.\n"
             "• Ví dụ: `Học câu lệnh xem cổng để chụp ảnh camera`; `Xóa câu lệnh xem cổng`.\n\n"
-            "1️⃣2️⃣ **🤖 AI DỰ PHÒNG VÀ TRẠNG THÁI XỬ LÝ**\n"
+            "1️⃣3️⃣ **🤖 AI DỰ PHÒNG VÀ TRẠNG THÁI XỬ LÝ**\n"
             "• Agent đã chọn luôn được thử trước; khi lỗi có thể tự chuyển agent khác.\n"
             "• Yêu cầu lâu sẽ báo: ⏳ **Đang xử lý thông tin yêu cầu. Hãy chờ phản hồi.**\n\n"
-            "1️⃣3️⃣ **✅ CHỌN VÀ XÁC NHẬN**\n"
+            "1️⃣4️⃣ **✅ CHỌN VÀ XÁC NHẬN**\n"
             "• Có thể chọn nhiều mục bằng `1 3 10`, tên mục hoặc **Tất cả**.\n"
             "• Dùng đúng từ khóa bôi đậm như **Có**, **Không**, **Hủy**, **Bỏ qua**; mỗi bước có hiệu lực 120 giây.\n\n"
             "💡 Gửi `Hướng dẫn sử dụng tích hợp` để xem lại nội dung này."
@@ -4770,6 +4806,229 @@ class ConversationalAssistantManager(NoteManagerMixin):
         self._zalo_pending_calendar_events.pop(owner_key, None)
         self._zalo_pending_calendar_managements.pop(owner_key, None)
 
+    def _cancel_zalo_chat_timeout(self, owner_key: str) -> None:
+        """Cancel the current inactivity timer for one Zalo chat."""
+        task = self._zalo_chat_timeout_tasks.pop(owner_key, None)
+        if task is not None and task is not asyncio.current_task():
+            task.cancel()
+
+    def _schedule_zalo_chat_timeout(self, session: ActiveZaloChat) -> None:
+        """Start a fresh 120-second inactivity timer for one chat session."""
+        owner_key = session.context.owner_key
+        self._cancel_zalo_chat_timeout(owner_key)
+        generation = session.generation
+        task = self.hass.async_create_task(
+            self._async_zalo_chat_inactivity_sequence(owner_key, generation)
+        )
+        self._zalo_chat_timeout_tasks[owner_key] = task
+
+        def _remove_finished(done_task: asyncio.Task[Any]) -> None:
+            if self._zalo_chat_timeout_tasks.get(owner_key) is done_task:
+                self._zalo_chat_timeout_tasks.pop(owner_key, None)
+            if done_task.cancelled():
+                return
+            try:
+                done_task.result()
+            except Exception:  # noqa: BLE001 - log timer delivery failures
+                _LOGGER.exception(
+                    "Zalo chat inactivity timer failed for %s", owner_key
+                )
+
+        task.add_done_callback(_remove_finished)
+
+    def _start_zalo_chat(self, context: ZaloWebhookContext) -> ActiveZaloChat:
+        """Open a fresh AI chat and discard any old provider conversation ID."""
+        previous = self._zalo_chat_sessions.get(context.owner_key)
+        generation = previous.generation + 1 if previous is not None else 1
+        session = ActiveZaloChat(
+            context=context,
+            conversation_id=None,
+            phase="active",
+            generation=generation,
+            expires_at=dt_util.now()
+            + timedelta(seconds=ZALO_CHAT_IDLE_TIMEOUT_SECONDS),
+        )
+        self._zalo_chat_sessions[context.owner_key] = session
+        self._schedule_zalo_chat_timeout(session)
+        return session
+
+    def _touch_zalo_chat_activity(
+        self, context: ZaloWebhookContext
+    ) -> ActiveZaloChat | None:
+        """Reactivate an existing chat whenever its Zalo thread sends a message."""
+        session = self._zalo_chat_sessions.get(context.owner_key)
+        if session is None:
+            return None
+        session.context = context
+        session.phase = "active"
+        session.generation += 1
+        session.expires_at = dt_util.now() + timedelta(
+            seconds=ZALO_CHAT_IDLE_TIMEOUT_SECONDS
+        )
+        self._schedule_zalo_chat_timeout(session)
+        return session
+
+    def _pause_zalo_chat_timeout_for_processing(
+        self, context: ZaloWebhookContext
+    ) -> ActiveZaloChat:
+        """Pause inactivity countdown while an AI response is being generated."""
+        session = self._zalo_chat_sessions.get(context.owner_key)
+        if session is None:
+            session = self._start_zalo_chat(context)
+        self._cancel_zalo_chat_timeout(context.owner_key)
+        session.context = context
+        session.phase = "processing"
+        session.generation += 1
+        session.expires_at = dt_util.now() + timedelta(
+            seconds=ZALO_SEARCH_TIMEOUT_SECONDS
+        )
+        return session
+
+    def _pause_existing_zalo_chat_for_request(
+        self, context: ZaloWebhookContext
+    ) -> bool:
+        """Pause an already-open chat while another integration action runs."""
+        if context.owner_key not in self._zalo_chat_sessions:
+            return False
+        self._pause_zalo_chat_timeout_for_processing(context)
+        return True
+
+    def _resume_zalo_chat_after_request(
+        self, context: ZaloWebhookContext
+    ) -> None:
+        """Restart inactivity timing after a non-chat response is delivered."""
+        session = self._zalo_chat_sessions.get(context.owner_key)
+        if (
+            session is None
+            or session.phase != "processing"
+            or session.context is not context
+        ):
+            return
+        session.phase = "active"
+        session.expires_at = dt_util.now() + timedelta(
+            seconds=ZALO_CHAT_IDLE_TIMEOUT_SECONDS
+        )
+        self._schedule_zalo_chat_timeout(session)
+
+    @staticmethod
+    def _zalo_chat_yields_to_home_assistant(
+        text: str, request_kind: str | None
+    ) -> bool:
+        """Keep explicit smart-home work available inside an active chat."""
+        if request_kind in {
+            "camera",
+            "camera_analysis",
+            "calendar",
+            "weather",
+        }:
+            return True
+        if request_kind != "conversation":
+            return False
+        if device_power_request_hint(text):
+            return True
+
+        normalized = normalize_text(text)
+        action_cues = (
+            "kiem tra",
+            "xem trang thai",
+            "trang thai",
+            "bao cao",
+            "check",
+            "show status",
+            "status of",
+            "report",
+        )
+        target_cues = (
+            "thiet bi",
+            "den",
+            "quat",
+            "dieu hoa",
+            "may lanh",
+            "cua cuon",
+            "cua gara",
+            "khoa cua",
+            "cam bien",
+            "media player",
+            "light",
+            "fan",
+            "air conditioner",
+            "garage door",
+            "rolling door",
+            "sensor",
+            "device",
+            "home assistant",
+        )
+        return any(cue in normalized for cue in action_cues) and any(
+            cue in normalized for cue in target_cues
+        )
+
+    @staticmethod
+    def _zalo_chat_welcome_text() -> str:
+        """Return the deterministic opening message for chat mode."""
+        return (
+            "💬 **Mở phòng trò chuyện rồi nè!**\n\n"
+            "Bạn cứ hỏi hoặc kể bất kỳ chuyện gì. Mình sẽ dùng **AI Search** "
+            "khi cần kiểm chứng thông tin, nói rõ khi chưa chắc chắn, dùng đúng "
+            "thuật ngữ chuyên ngành nhưng vẫn giải thích dễ hiểu.\n\n"
+            "Mình sẽ giữ cuộc trò chuyện trong **120 giây** sau mỗi phản hồi. "
+            "Im lặng lâu quá thì mình sẽ hỏi lại một lần trước khi đóng phòng 😄"
+        )
+
+    @staticmethod
+    def _zalo_chat_reengagement_text() -> str:
+        """Ask once whether an inactive user wants to keep chatting."""
+        return (
+            "👋 **Bạn còn muốn trò chuyện tiếp không?**\n\n"
+            "Phản hồi trong **10 giây** nhé. Chỉ cần nhắn một câu bất kỳ là "
+            "cuộc trò chuyện sẽ tiếp tục."
+        )
+
+    @staticmethod
+    def _zalo_chat_closed_text() -> str:
+        """Return the final message after the 10-second grace period."""
+        return (
+            "🛑 **Đã dừng trò chuyện hỏi đáp**\n\n"
+            "Phòng tám tạm đóng vì chưa thấy bạn phản hồi. Khi muốn mở lại, "
+            "hãy nhắn **Trò chuyện đi**, **Tám đi** hoặc **Buôn đi** nhé 😄"
+        )
+
+    async def _async_zalo_chat_inactivity_sequence(
+        self, owner_key: str, generation: int
+    ) -> None:
+        """Ask after 120 seconds, then close after a final 10-second wait."""
+        await asyncio.sleep(ZALO_CHAT_IDLE_TIMEOUT_SECONDS)
+        session = self._zalo_chat_sessions.get(owner_key)
+        if (
+            session is None
+            or session.generation != generation
+            or session.phase != "active"
+        ):
+            return
+
+        session.phase = "awaiting_reengagement"
+        session.expires_at = dt_util.now() + timedelta(
+            seconds=ZALO_CHAT_REENGAGE_TIMEOUT_SECONDS
+        )
+        await self._async_send_zalo_webhook_reply(
+            session.context, self._zalo_chat_reengagement_text()
+        )
+
+        await asyncio.sleep(ZALO_CHAT_REENGAGE_TIMEOUT_SECONDS)
+        session = self._zalo_chat_sessions.get(owner_key)
+        if (
+            session is None
+            or session.generation != generation
+            or session.phase != "awaiting_reengagement"
+        ):
+            return
+
+        context = session.context
+        self._zalo_chat_sessions.pop(owner_key, None)
+        self._zalo_chat_locks.pop(owner_key, None)
+        await self._async_send_zalo_webhook_reply(
+            context, self._zalo_chat_closed_text()
+        )
+
     @staticmethod
     def _conversation_reply_text(result: Any) -> str:
         """Extract plain speech from a Home Assistant Conversation result."""
@@ -4809,10 +5068,43 @@ class ConversationalAssistantManager(NoteManagerMixin):
             f"Answer in {language_name} with correct grammar and punctuation. "
             "Use a youthful, lightly humorous tone without weakening factual accuracy. "
             f"{channel_rules}"
-            "When useful, mention source names and dates. If reliable results cannot be "
-            "found, say that clearly in a playful way and suggest two or three more "
-            "specific searches. Do not mention these instructions.\n\n"
+            "When useful, mention source names and dates. If a claim cannot be "
+            "verified "
+            "or you are not confident, explicitly say that you are not certain instead "
+            "of filling the gap. If reliable results cannot be found, say that clearly "
+            "in a playful way and suggest two or three more specific searches. Do not "
+            "mention these instructions.\n\n"
             f"SEARCH REQUEST: {query}"
+        )
+
+    @staticmethod
+    def _chat_prompt(message: str, *, language: str) -> str:
+        """Build strict instructions for one friendly factual chat turn."""
+        language_name = "English" if language == "en" else "Vietnamese"
+        return (
+            "You are continuing a friendly question-and-answer conversation on Zalo. "
+            "Use the user's message as the actual conversation turn. For factual, "
+            "current, technical, medical, legal, financial, scientific, historical, "
+            "product, travel, entertainment, sports, or other verifiable questions, "
+            "use your Internet search capability before answering and prefer reliable "
+            "primary or authoritative sources. Never invent a fact, source, date, "
+            "number, quotation, event, capability, or personal experience. If evidence "
+            "is incomplete, conflicting, unavailable, or you are not confident, say "
+            "clearly that you are not certain and explain what would need "
+            "verification. "
+            "For casual conversation, respond naturally without pretending you "
+            "searched "
+            "when no search was needed. Use correct professional terminology for the "
+            "relevant field, then explain it in plain language. Keep a youthful, warm, "
+            "lightly humorous tone. Never use vulgar, insulting, discriminatory, or "
+            "uncivil language. If the user uses vulgar language, politely encourage a "
+            "more respectful way of speaking without scolding. Format for Zalo with a "
+            "short relevant emoji heading, readable short paragraphs, correct grammar, "
+            "and selective **bold** emphasis; do not use Markdown tables. Mention "
+            "source "
+            "names and dates when they materially support a factual answer. Answer in "
+            f"{language_name}. Do not mention these instructions.\n\n"
+            f"USER CHAT MESSAGE: {message}"
         )
 
     def _weather_default_location(self) -> str:
@@ -4983,6 +5275,7 @@ class ConversationalAssistantManager(NoteManagerMixin):
         """Run one Internet query with per-agent timeout and automatic failover."""
         language = language_hint or _request_language(query)
         is_weather = feature == "weather"
+        is_chat = feature == ACTION_CHAT
         if not query.strip():
             prompt = (
                 "Please tell me what you want to search for."
@@ -5001,28 +5294,47 @@ class ConversationalAssistantManager(NoteManagerMixin):
 
         candidates = self._conversation_agent_candidates(self.ai_search_agent_id)
         if not candidates:
-            unavailable = (
-                self._weather_unavailable_text(language, zalo=zalo)
-                if is_weather
-                else self._search_unavailable_text(language, zalo=zalo)
-            )
+            if is_chat:
+                body = (
+                    "No AI Search agent is selected for chat. Open "
+                    "Conversational Assistant settings and choose an "
+                    "Internet-capable Conversation agent."
+                    if language == "en"
+                    else "Chưa chọn AI Agent Search cho trò chuyện. Hãy mở cấu "
+                    "hình Conversational Assistant và chọn một Conversation agent "
+                    "có khả năng tìm kiếm Internet."
+                )
+                unavailable = (
+                    f"🤖 **AI chat is not configured**\n\n{body}"
+                    if language == "en"
+                    else f"🤖 **Chưa cấu hình AI trò chuyện**\n\n{body}"
+                )
+            else:
+                unavailable = (
+                    self._weather_unavailable_text(language, zalo=zalo)
+                    if is_weather
+                    else self._search_unavailable_text(language, zalo=zalo)
+                )
             return unavailable, None
 
         attempted_agents: list[str] = []
         had_empty_response = False
         primary_agent_id = self.ai_search_agent_id
         total_attempts = len(candidates)
-        prompt_text = (
-            self._weather_search_prompt(
+        if is_weather:
+            prompt_text = self._weather_search_prompt(
                 query,
                 zalo=zalo,
                 language=language,
                 reference_time=dt_util.now(),
                 default_location=self._weather_default_location(),
             )
-            if is_weather
-            else self._search_prompt(query, zalo=zalo, language=language)
-        )
+        elif is_chat:
+            prompt_text = self._chat_prompt(query, language=language)
+        else:
+            prompt_text = self._search_prompt(
+                query, zalo=zalo, language=language
+            )
 
         for index, (agent_id, agent_name) in enumerate(candidates):
             attempted_agents.append(agent_name)
@@ -5073,6 +5385,16 @@ class ConversationalAssistantManager(NoteManagerMixin):
                                 "🌦️", "☀️", "🌤️", "⛅", "☁️", "🌧️",
                                 "⛈️", "🌩️", "🌨️", "❄️", "🌫️", "🌪️",
                             )
+                        elif is_chat:
+                            heading = (
+                                "💬 **Let’s chat**"
+                                if language == "en"
+                                else "💬 **Mình tám tiếp nhé**"
+                            )
+                            allowed_headings = (
+                                "💬", "🤝", "😄", "🧠", "📚", "💡",
+                                "🔎", "🌐", "🎯", "✨", "🧐", "🤔",
+                            )
                         else:
                             heading = (
                                 "🔎 **Search results**"
@@ -5116,11 +5438,25 @@ class ConversationalAssistantManager(NoteManagerMixin):
                 )
 
         if had_empty_response:
-            message = (
-                self._weather_empty_text(language, zalo=zalo)
-                if is_weather
-                else self._search_empty_text(language, zalo=zalo)
-            )
+            if is_chat:
+                body = (
+                    "I do not have a sufficiently reliable answer for that yet. "
+                    "Please add a little more context or ask in a more specific way."
+                    if language == "en"
+                    else "Mình chưa có câu trả lời đủ đáng tin cho nội dung này. "
+                    "Bạn thêm một chút bối cảnh hoặc hỏi cụ thể hơn nhé."
+                )
+                message = (
+                    f"🤔 **I’m not certain yet**\n\n{body}"
+                    if language == "en"
+                    else f"🤔 **Mình chưa chắc chắn**\n\n{body}"
+                )
+            else:
+                message = (
+                    self._weather_empty_text(language, zalo=zalo)
+                    if is_weather
+                    else self._search_empty_text(language, zalo=zalo)
+                )
         else:
             message = (
                 "All available search agents failed or timed out. Check the AI "
@@ -5135,6 +5471,12 @@ class ConversationalAssistantManager(NoteManagerMixin):
                         f"⚠️ **Weather agents unavailable**\n\n{message}"
                         if language == "en"
                         else f"⚠️ **AI tra cứu thời tiết chưa phản hồi**\n\n{message}"
+                    )
+                elif is_chat:
+                    message = (
+                        f"⚠️ **Chat agents unavailable**\n\n{message}"
+                        if language == "en"
+                        else f"⚠️ **AI trò chuyện chưa phản hồi**\n\n{message}"
                     )
                 else:
                     message = (
@@ -5172,6 +5514,56 @@ class ConversationalAssistantManager(NoteManagerMixin):
         if conversation_id:
             self._zalo_search_conversation_ids[context.owner_key] = conversation_id
         return reply
+
+    async def _async_chat_from_zalo(
+        self,
+        context: ZaloWebhookContext,
+        service_context: Context | None,
+    ) -> str:
+        """Answer one ongoing Zalo chat turn through the AI Search agent."""
+        lock = self._zalo_chat_locks.setdefault(
+            context.owner_key, asyncio.Lock()
+        )
+        async with lock:
+            session = self._pause_zalo_chat_timeout_for_processing(context)
+            generation = session.generation
+            conversation_id = session.conversation_id
+            language = _request_language(context.text)
+            next_conversation_id: str | None = None
+            try:
+                reply, next_conversation_id = await self._async_ai_search(
+                    context.text,
+                    conversation_id=conversation_id,
+                    service_context=service_context,
+                    zalo=True,
+                    language_hint=language,
+                    zalo_context=context,
+                    feature=ACTION_CHAT,
+                )
+                reply = sanitize_chat_reply(reply)
+                if contains_inappropriate_language(context.text):
+                    warning = (
+                        "🌿 **A gentle reminder:** Let’s keep the wording "
+                        "respectful so the conversation stays fun and useful."
+                        if language == "en"
+                        else "🌿 **Nhắc nhẹ nè:** Mình trò chuyện vui hết cỡ, "
+                        "nhưng mình giữ lời lẽ văn minh nhé. Đổi sang cách nói "
+                        "lịch sự hơn thì cuộc tám sẽ mượt như Wi‑Fi full vạch 😄"
+                    )
+                    reply = f"{warning}\n\n{reply}"
+                return reply
+            finally:
+                current = self._zalo_chat_sessions.get(context.owner_key)
+                if current is not None:
+                    if next_conversation_id:
+                        current.conversation_id = next_conversation_id
+                    current.context = context
+                    if current.generation == generation:
+                        current.phase = "active"
+                        current.expires_at = dt_util.now() + timedelta(
+                            seconds=ZALO_CHAT_IDLE_TIMEOUT_SECONDS
+                        )
+                        self._schedule_zalo_chat_timeout(current)
 
     async def _async_weather_from_zalo(
         self,
@@ -7917,6 +8309,17 @@ class ConversationalAssistantManager(NoteManagerMixin):
         service_context: Context | None = None,
     ) -> str | ZaloDirectResponse | None:
         """Route one inbound Zalo text message to reminder actions."""
+        first_chat_turn = chat_start_request(context.text)
+        if first_chat_turn is not None:
+            self._clear_zalo_pending_for_owner(context.owner_key)
+            self._start_zalo_chat(context)
+            if not first_chat_turn:
+                return self._zalo_chat_welcome_text()
+            context = replace(context, text=first_chat_turn)
+            return await self._async_chat_from_zalo(
+                context, service_context
+            )
+
         command = self._zalo_command_kind(context.text)
         learned_match = None
         if command is None:
@@ -7937,6 +8340,13 @@ class ConversationalAssistantManager(NoteManagerMixin):
             if self.zalo_home_assistant_enabled
             else None
         )
+        if (
+            context.owner_key in self._zalo_chat_sessions
+            and not self._zalo_chat_yields_to_home_assistant(
+                context.text, explicit_ha_kind
+            )
+        ):
+            explicit_ha_kind = None
         pending_note = self._zalo_pending_note(context.owner_key)
         pending_creation = self._zalo_pending_creation(context.owner_key)
         pending_deletion = self._zalo_pending_deletion(context.owner_key)
@@ -8078,6 +8488,11 @@ class ConversationalAssistantManager(NoteManagerMixin):
                 context, explicit_ha_kind, service_context
             )
 
+        if context.owner_key in self._zalo_chat_sessions:
+            return await self._async_chat_from_zalo(
+                context, service_context
+            )
+
         normalized = normalize_text(context.text)
         if (
             context.thread_type == ZALO_TYPE_USER
@@ -8135,9 +8550,26 @@ class ConversationalAssistantManager(NoteManagerMixin):
                 if instructions and instructions.strip()
                 else None
             )
+
+        first_chat_turn = chat_start_request(effective_text)
+        if first_chat_turn is not None:
+            return ACTION_CHAT if first_chat_turn.strip() else None
+
+        explicit_ha_kind = (
+            explicit_home_assistant_request_kind(effective_text)
+            if self.zalo_home_assistant_enabled
+            else None
+        )
+        if (
+            context.owner_key in self._zalo_chat_sessions
+            and not self._zalo_chat_yields_to_home_assistant(
+                effective_text, explicit_ha_kind
+            )
+        ):
+            explicit_ha_kind = None
         if (
             self.zalo_home_assistant_enabled
-            and explicit_home_assistant_request_kind(effective_text) == "calendar"
+            and explicit_ha_kind == "calendar"
         ):
             if (
                 calendar_request_action(effective_text) == "create"
@@ -8149,6 +8581,16 @@ class ConversationalAssistantManager(NoteManagerMixin):
                 and calendar_window_from_text(effective_text, dt_util.now()) is None
             ):
                 return ACTION_CALENDAR
+
+        if (
+            context.owner_key in self._zalo_chat_sessions
+            and command is None
+            and explicit_ha_kind is None
+            and not self._zalo_owner_has_pending_confirmation(
+                context.owner_key
+            )
+        ):
+            return ACTION_CHAT
         return None
 
     @staticmethod
@@ -8171,6 +8613,8 @@ class ConversationalAssistantManager(NoteManagerMixin):
                 if action == ACTION_CALENDAR
                 else "weather lookup"
                 if action == ACTION_WEATHER
+                else "chat response"
+                if action == ACTION_CHAT
                 else "search"
             )
             return (
@@ -8186,6 +8630,8 @@ class ConversationalAssistantManager(NoteManagerMixin):
             if action == ACTION_CALENDAR
             else "tra cứu thời tiết"
             if action == ACTION_WEATHER
+            else "trò chuyện"
+            if action == ACTION_CHAT
             else "tìm kiếm"
         )
         return (
@@ -8262,7 +8708,14 @@ class ConversationalAssistantManager(NoteManagerMixin):
                     )
                     return
                 reply = await self._async_prepare_zalo_reply(
-                    context, reply, service_context
+                    context,
+                    reply,
+                    service_context,
+                    ai_generated=action in {
+                        ACTION_SEARCH,
+                        ACTION_WEATHER,
+                        ACTION_CHAT,
+                    },
                 )
                 reply = self._append_zalo_confirmation_timeout_notice(
                     context, reply
@@ -8291,6 +8744,8 @@ class ConversationalAssistantManager(NoteManagerMixin):
                 context, self._zalo_background_error_text(language)
             )
         finally:
+            if action != ACTION_CHAT:
+                self._resume_zalo_chat_after_request(context)
             self._sync_pending_followup_trigger()
             typing_stop.set()
             try:
@@ -8335,8 +8790,16 @@ class ConversationalAssistantManager(NoteManagerMixin):
         if self._is_duplicate_zalo_message(context.message_id):
             return {"ok": True, "handled": False, "reason": "duplicate"}
 
+        if (
+            context.owner_key in self._zalo_chat_sessions
+            and chat_start_request(context.text) is None
+        ):
+            self._touch_zalo_chat_activity(context)
+
         long_action = self._zalo_long_running_action(context)
         if long_action is not None:
+            if long_action != ACTION_CHAT:
+                self._pause_existing_zalo_chat_for_request(context)
             processing_message_sent = await self._async_send_zalo_webhook_reply(
                 context,
                 self._zalo_processing_text(_request_language(context.text)),
@@ -8354,6 +8817,7 @@ class ConversationalAssistantManager(NoteManagerMixin):
 
         # Start typing immediately and keep refreshing it for normal Zalo
         # features until the final text/image response has actually been sent.
+        self._pause_existing_zalo_chat_for_request(context)
         await self._async_send_zalo_typing_event(context, service_context)
         typing_stop = asyncio.Event()
         typing_task = self.hass.async_create_task(
@@ -8394,6 +8858,7 @@ class ConversationalAssistantManager(NoteManagerMixin):
                 "reply_sent": reply_sent,
             }
         finally:
+            self._resume_zalo_chat_after_request(context)
             self._sync_pending_followup_trigger()
             typing_stop.set()
             await typing_task
