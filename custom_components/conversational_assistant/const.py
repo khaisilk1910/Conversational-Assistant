@@ -9,6 +9,7 @@ PLATFORMS = ["sensor"]
 CONF_NOTIFICATION_DEVICES = "notification_devices"
 CONF_DISMISS_ON_CLEAR = "dismiss_on_clear"
 CONF_CONFIRM_TARGETS = "confirm_targets"
+CONF_USER_ADDRESS = "user_address"
 CONF_ZALO_TARGETS = "zalo_targets"
 CONF_SPEAKER_ENABLED = "speaker_enabled"
 CONF_TTS_ENTITY_ID = "tts_entity_id"
@@ -49,6 +50,7 @@ CONF_ZALO_TARGET_ENABLED = "enabled"
 
 DEFAULT_DISMISS_ON_CLEAR = False
 DEFAULT_CONFIRM_TARGETS = True
+DEFAULT_USER_ADDRESS = "Sếp Khải"
 DEFAULT_SNOOZE_MINUTES = 10
 DEFAULT_ZALO_ENABLED = False
 DEFAULT_ZALO_TYPE = "1"
@@ -80,11 +82,13 @@ ATTR_CONFIG_ENTRY_ID = "config_entry_id"
 
 ZALO_DOMAIN = "zalo_bot"
 ZALO_SERVICE_SEND_MESSAGE = "send_message"
+ZALO_SERVICE_CREATE_REMINDER = "create_reminder"
 ZALO_SERVICE_SEND_IMAGE = "send_image"
 ZALO_SERVICE_SEND_IMAGES_TO_GROUP = "send_images_to_group"
 ZALO_SERVICE_SEND_TYPING_EVENT = "send_typing_event"
 ZALO_TYPE_USER = "0"
 ZALO_TYPE_GROUP = "1"
+ZALO_REMINDER_ADVANCE_MINUTES = 15
 
 ZALO_WEBHOOK_SEEN_MESSAGE_LIMIT = 512
 
@@ -185,6 +189,21 @@ DEVICE_CONTROL_SENTENCES = [
     "[please ](turn on|turn off|set|change) (swing|oscillation) {request}",
     "[please ](set|change) fan direction",
     "[please ](set|change) fan direction {request}",
+]
+
+# Direct Zalo forwarding from Voice Assist or an inbound Zalo command.
+# The destination is always selected from entries configured in the UI.
+ZALO_SEND_SENTENCES = [
+    "[hãy ]gửi zalo",
+    "[hãy ]gửi zalo {request}",
+    "[hãy ]thông báo zalo",
+    "[hãy ]thông báo zalo {request}",
+    "[hãy ]báo zalo",
+    "[hãy ]báo zalo {request}",
+    "[please ]send zalo",
+    "[please ]send zalo {request}",
+    "[please ]notify zalo",
+    "[please ]notify zalo {request}",
 ]
 
 # Users can teach persistent alternative phrases for existing workflows.

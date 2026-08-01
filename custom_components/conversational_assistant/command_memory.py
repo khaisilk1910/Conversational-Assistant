@@ -31,6 +31,7 @@ ACTION_CALENDAR = "calendar"
 ACTION_SEARCH = "search"
 ACTION_WEATHER = "weather"
 ACTION_IMAGE_GENERATION = "image_generation"
+ACTION_ZALO_SEND = "zalo_send"
 
 SUPPORTED_ACTIONS = {
     ACTION_CAMERA,
@@ -49,6 +50,7 @@ SUPPORTED_ACTIONS = {
     ACTION_SEARCH,
     ACTION_WEATHER,
     ACTION_IMAGE_GENERATION,
+    ACTION_ZALO_SEND,
 }
 
 MAX_LEARNED_COMMANDS = 100
@@ -62,6 +64,7 @@ REQUEST_ACTIONS = {
     ACTION_SEARCH,
     ACTION_WEATHER,
     ACTION_IMAGE_GENERATION,
+    ACTION_ZALO_SEND,
 }
 
 ACTION_LABELS = {
@@ -81,6 +84,7 @@ ACTION_LABELS = {
     ACTION_SEARCH: "tìm kiếm thông tin trên Internet",
     ACTION_WEATHER: "tra cứu thời tiết bằng AI Search",
     ACTION_IMAGE_GENERATION: "tạo ảnh bằng AI và gửi về Zalo",
+    ACTION_ZALO_SEND: "gửi nội dung đến Zalo đã cấu hình",
 }
 
 # Explicit labels also let users teach short targets such as "để camera" or
@@ -131,6 +135,8 @@ _TARGET_LABELS = {
     "weather": ACTION_WEATHER,
     "weather forecast": ACTION_WEATHER,
     "check weather": ACTION_WEATHER,
+    "send zalo": ACTION_ZALO_SEND,
+    "notify zalo": ACTION_ZALO_SEND,
     "generate image": ACTION_IMAGE_GENERATION,
     "generate an image": ACTION_IMAGE_GENERATION,
     "create image": ACTION_IMAGE_GENERATION,
@@ -186,6 +192,9 @@ _TARGET_LABELS = {
     "kiem tra thoi tiet": ACTION_WEATHER,
     "tra cuu thoi tiet": ACTION_WEATHER,
     "du bao thoi tiet": ACTION_WEATHER,
+    "gui zalo": ACTION_ZALO_SEND,
+    "thong bao zalo": ACTION_ZALO_SEND,
+    "bao zalo": ACTION_ZALO_SEND,
     "tao anh": ACTION_IMAGE_GENERATION,
     "tao mot anh": ACTION_IMAGE_GENERATION,
     "tao buc anh": ACTION_IMAGE_GENERATION,
@@ -612,6 +621,7 @@ def canonical_text(
         ACTION_SEARCH: "tìm thông tin",
         ACTION_WEATHER: "thời tiết",
         ACTION_IMAGE_GENERATION: "tạo ảnh",
+        ACTION_ZALO_SEND: "gửi zalo",
         ACTION_CAMERA_ANALYSIS: "phân tích camera",
     }
     prefix = prefixes.get(action, "")

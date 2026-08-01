@@ -19,7 +19,8 @@
           "ai_image_task_entity_id": "AI Task agent for image generation",
           "ai_agent_failover_enabled": "Automatically try other AI agents when the preferred agent fails",
           "ai_camera_task_entity_id": "AI Task agent for camera analysis",
-          "ai_camera_instructions": "Camera analysis instructions"
+          "ai_camera_instructions": "Camera analysis instructions",
+          "user_address": "Form of address"
         },
         "data_description": {
           "confirm_targets": "Voice Assist and Zalo commands discover phones and speakers on demand, list them with Zalo destinations, then wait for a reply such as: choose 1 and 3.",
@@ -34,7 +35,8 @@
           "ai_image_task_entity_id": "Choose an AI Task entity that supports ai_task.generate_image. Image requests received from Zalo are sent to this agent and the completed image is returned to the same conversation.",
           "ai_agent_failover_enabled": "Enabled by default. The integration always tries the selected agent first. If it errors, returns no usable result, or times out, compatible agents available in Home Assistant are tried in sequence. Every agent receives a fresh timeout window, and Zalo reports the switch and total number of attempted agents.",
           "ai_camera_task_entity_id": "Choose an AI Task entity that supports ai_task.generate_data with camera attachments. It analyzes selected cameras for Voice Assist and Zalo.",
-          "ai_camera_instructions": "Instructions sent to ai_task.generate_data for every selected camera. The default is the same camera-analysis prompt used in earlier versions; leaving it empty restores that default."
+          "ai_camera_instructions": "Instructions sent to ai_task.generate_data for every selected camera. The default is the same camera-analysis prompt used in earlier versions; leaving it empty restores that default.",
+          "user_address": "How the integration addresses the user in every reply. Default: Sếp Khải."
         }
       }
     },
@@ -61,10 +63,12 @@
         "description": "Configure shared confirmation and notification behavior for Conversational Assistant.",
         "data": {
           "dismiss_on_clear": "Treat swiping away as dismiss (Android only)",
-          "confirm_targets": "Ask which destinations and speakers to use before saving each reminder"
+          "confirm_targets": "Ask which destinations and speakers to use before saving each reminder",
+          "user_address": "Form of address"
         },
         "data_description": {
-          "confirm_targets": "When enabled, both Voice Assist and Zalo reminders are saved only after you reply with destination numbers or names."
+          "confirm_targets": "When enabled, both Voice Assist and Zalo reminders are saved only after you reply with destination numbers or names.",
+          "user_address": "How the integration addresses the user in every reply. Default: Sếp Khải."
         }
       },
       "calendar": {

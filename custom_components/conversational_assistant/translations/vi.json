@@ -19,7 +19,8 @@
           "ai_image_task_entity_id": "AI Task Agent dùng để tạo ảnh",
           "ai_agent_failover_enabled": "Tự động chuyển sang AI agent khác khi agent ưu tiên lỗi",
           "ai_camera_task_entity_id": "AI Task agent phân tích camera",
-          "ai_camera_instructions": "Nội dung hướng dẫn AI phân tích camera"
+          "ai_camera_instructions": "Nội dung hướng dẫn AI phân tích camera",
+          "user_address": "Xưng hô"
         },
         "data_description": {
           "confirm_targets": "Cả Voice Assist và lệnh Zalo sẽ quét theo yêu cầu rồi liệt kê điện thoại, nơi nhận Zalo và loa, sau đó chờ câu trả lời như: chọn 1 và 3.",
@@ -34,7 +35,8 @@
           "ai_image_task_entity_id": "Chọn AI Task entity hỗ trợ action ai_task.generate_image. Khi người dùng yêu cầu tạo ảnh trên Zalo, integration gọi agent này và gửi ảnh hoàn thành trở lại đúng cuộc trò chuyện.",
           "ai_agent_failover_enabled": "Mặc định bật. Tích hợp luôn thử agent đã chọn trước. Nếu agent lỗi, không trả kết quả hợp lệ hoặc hết thời gian chờ, tích hợp sẽ quét các agent tương thích đang có trong Home Assistant và thử lần lượt. Mỗi agent được tính lại thời gian chờ từ đầu; Zalo sẽ thông báo quá trình chuyển agent và tổng số agent đã thử.",
           "ai_camera_task_entity_id": "Chọn AI Task entity hỗ trợ ai_task.generate_data và tệp đính kèm camera. Agent này phân tích camera được chọn từ Voice Assist và Zalo.",
-          "ai_camera_instructions": "Instructions được gửi tới action ai_task.generate_data cho mọi camera đã chọn. Mặc định giữ nguyên nội dung phân tích camera của phiên bản trước; để trống sẽ tự khôi phục mặc định."
+          "ai_camera_instructions": "Instructions được gửi tới action ai_task.generate_data cho mọi camera đã chọn. Mặc định giữ nguyên nội dung phân tích camera của phiên bản trước; để trống sẽ tự khôi phục mặc định.",
+          "user_address": "Cách tích hợp gọi người dùng trong mọi phản hồi. Mặc định: Sếp Khải."
         }
       }
     },
@@ -61,10 +63,12 @@
         "description": "Thiết lập hành vi xác nhận và xử lý thông báo chung của Conversational Assistant.",
         "data": {
           "dismiss_on_clear": "Vuốt bỏ thông báo cũng được xem là Bỏ qua (chỉ Android)",
-          "confirm_targets": "Hỏi nơi nhận và loa phát trước khi lưu từng nhắc nhở"
+          "confirm_targets": "Hỏi nơi nhận và loa phát trước khi lưu từng nhắc nhở",
+          "user_address": "Xưng hô"
         },
         "data_description": {
-          "confirm_targets": "Khi bật, cả nhắc hẹn từ Voice Assist và Zalo chỉ được lưu sau khi bạn trả lời bằng số thứ tự hoặc tên nơi nhận."
+          "confirm_targets": "Khi bật, cả nhắc hẹn từ Voice Assist và Zalo chỉ được lưu sau khi bạn trả lời bằng số thứ tự hoặc tên nơi nhận.",
+          "user_address": "Cách tích hợp gọi người dùng trong mọi phản hồi. Mặc định: Sếp Khải."
         }
       },
       "calendar": {

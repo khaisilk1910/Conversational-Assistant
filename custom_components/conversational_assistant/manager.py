@@ -100,6 +100,7 @@ from .const import (
     CONF_DISMISS_ON_CLEAR,
     CONF_SPEAKER_ENABLED,
     CONF_TTS_ENTITY_ID,
+    CONF_USER_ADDRESS,
     CONF_ZALO_ACCOUNT_SELECTION,
     CONF_ZALO_CONVERSATION_AGENT_ID,
     CONF_ZALO_ENABLED,
@@ -125,6 +126,7 @@ from .const import (
     DEFAULT_CONFIRM_TARGETS,
     DEFAULT_DISMISS_ON_CLEAR,
     DEFAULT_SPEAKER_ENABLED,
+    DEFAULT_USER_ADDRESS,
     DEFAULT_SNOOZE_MINUTES,
     DEFAULT_ZALO_ENABLED,
     DEFAULT_ZALO_CONVERSATION_AGENT_ID,
@@ -152,6 +154,9 @@ from .const import (
     TTS_DOMAIN,
     TTS_SERVICE_SPEAK,
     ZALO_DOMAIN,
+    ZALO_REMINDER_ADVANCE_MINUTES,
+    ZALO_SEND_SENTENCES,
+    ZALO_SERVICE_CREATE_REMINDER,
     ZALO_SERVICE_SEND_IMAGE,
     ZALO_SERVICE_SEND_IMAGES_TO_GROUP,
     ZALO_SERVICE_SEND_MESSAGE,
@@ -189,6 +194,7 @@ from .command_memory import (
     ACTION_REMINDER_LIST,
     ACTION_SEARCH,
     ACTION_WEATHER,
+    ACTION_ZALO_SEND,
     CommandMemoryError,
     LearnedCommand,
     MAX_LEARNED_COMMANDS,
@@ -454,6 +460,30 @@ def _image_generation_request(text: str) -> str | None:
     return None
 
 
+def _zalo_send_request(text: str) -> str | None:
+    """Return exact content following a direct Zalo-send keyword."""
+    raw = str(text or "").strip()
+    word_matches = list(re.finditer(r"\S+", raw))
+    if not word_matches:
+        return None
+    normalized_words = [
+        normalize_text(match.group(0)) for match in word_matches
+    ]
+    start = 1 if normalized_words[0] in {"hay", "please"} else 0
+    prefixes = (
+        ("gui", "zalo"),
+        ("thong", "bao", "zalo"),
+        ("bao", "zalo"),
+        ("send", "zalo"),
+        ("notify", "zalo"),
+    )
+    for prefix in prefixes:
+        end = start + len(prefix)
+        if tuple(normalized_words[start:end]) == prefix:
+            return raw[word_matches[end - 1].end() :].lstrip()
+    return None
+
+
 @dataclass(slots=True)
 class NotificationTarget:
     """A selectable notification destination."""
@@ -503,6 +533,21 @@ class PendingZaloReminder:
 
     parsed: ParsedReminder
     targets: list[NotificationTarget]
+    expires_at: datetime
+
+
+@dataclass(slots=True)
+class PendingZaloSend:
+    """Direct Zalo content waiting for configured destination selection."""
+
+    pending_id: str
+    content: str
+    targets: list[NotificationTarget]
+    source_keys: set[str]
+    event_at: datetime | None
+    remind_at: datetime | None
+    reminder_title: str
+    created_at: datetime
     expires_at: datetime
 
 
@@ -860,6 +905,8 @@ class ConversationalAssistantManager(NoteManagerMixin):
         self._pending_voice_device_controls: dict[
             str, PendingVoiceDeviceControl
         ] = {}
+        self._pending_voice_zalo_sends: dict[str, PendingZaloSend] = {}
+        self._zalo_pending_sends: dict[str, PendingZaloSend] = {}
         self._zalo_pending_creations: dict[str, PendingZaloReminder] = {}
         self._zalo_pending_deletions: dict[str, PendingZaloDeletion] = {}
         self._zalo_pending_cameras: dict[str, PendingZaloCamera] = {}
@@ -1752,6 +1799,7 @@ class ConversationalAssistantManager(NoteManagerMixin):
         now = dt_util.now()
         pending_items = (
             self._zalo_pending_notes.get(owner_key),
+            self._zalo_pending_sends.get(owner_key),
             self._zalo_pending_creations.get(owner_key),
             self._zalo_pending_deletions.get(owner_key),
             self._zalo_pending_cameras.get(owner_key),
@@ -2195,6 +2243,9 @@ class ConversationalAssistantManager(NoteManagerMixin):
                     SEARCH_SENTENCES, self._async_search_from_voice
                 ),
                 agent_manager.register_trigger(
+                    ZALO_SEND_SENTENCES, self._async_send_to_zalo_from_voice
+                ),
+                agent_manager.register_trigger(
                     HELP_SENTENCES, self._async_help_from_voice
                 ),
                 agent_manager.register_trigger(
@@ -2266,6 +2317,8 @@ class ConversationalAssistantManager(NoteManagerMixin):
         self._pending_deletions.clear()
         self._pending_voice_cameras.clear()
         self._pending_voice_device_controls.clear()
+        self._pending_voice_zalo_sends.clear()
+        self._zalo_pending_sends.clear()
         self._zalo_pending_creations.clear()
         self._zalo_pending_deletions.clear()
         self._zalo_pending_cameras.clear()
@@ -2401,6 +2454,8 @@ class ConversationalAssistantManager(NoteManagerMixin):
         if explicit is not None:
             return explicit
 
+        if _zalo_send_request(text) is not None:
+            return ACTION_ZALO_SEND
         note_kind = note_zalo_command_kind(text)
         if note_kind is not None:
             return note_kind
@@ -2715,6 +2770,27 @@ class ConversationalAssistantManager(NoteManagerMixin):
             key,
             self.entry.data.get(key, default),
         )
+
+    @property
+    def user_address(self) -> str:
+        """Return the configured form of address used in assistant replies."""
+        value = " ".join(
+            str(
+                self._option(CONF_USER_ADDRESS, DEFAULT_USER_ADDRESS) or ""
+            ).split()
+        )
+        return (value or DEFAULT_USER_ADDRESS)[:80]
+
+    def _address_response(self, message: str) -> str:
+        """Prefix one assistant reply without changing forwarded content."""
+        response = str(message or "").strip()
+        if not response:
+            return response
+        address = self.user_address
+        if normalize_text(response).startswith(normalize_text(address)):
+            return response
+        separator = "\n\n" if "\n" in response else " "
+        return f"{address},{separator}{response}"
 
     def _discovered_mobile_device_ids(self) -> list[str]:
         """Return every Mobile App device with an available notify service."""
@@ -3205,6 +3281,11 @@ class ConversationalAssistantManager(NoteManagerMixin):
             "1️⃣4️⃣ **✅ CHỌN VÀ XÁC NHẬN**\n"
             "• Có thể chọn nhiều mục bằng `1 3 10`, tên mục hoặc **Tất cả**.\n"
             "• Dùng đúng từ khóa bôi đậm như **Có**, **Không**, **Hủy**, **Bỏ qua**; mỗi bước có hiệu lực 120 giây.\n\n"
+            "1️⃣5️⃣ **📨 GỬI NỘI DUNG VÀ NHẮC HẸN LÊN ZALO**\n"
+            "• Dùng `Gửi Zalo`, `Thông báo Zalo` hoặc `Báo Zalo`, sau đó chọn một hay nhiều Zalo đã thêm trong UI.\n"
+            "• Nội dung được chuyển tiếp nguyên văn. Nếu nhận ra ngày giờ, integration tạo thêm nhắc Zalo trước thời điểm đó 15 phút.\n"
+            "• Ví dụ: `Gửi Zalo yêu cầu ngày mai 8h00 tất cả nhân viên sale họp bàn chiến lược kinh doanh`.\n"
+            "• Có thể đổi cách bot gọi người dùng tại General settings > Xưng hô; mặc định là `Sếp Khải`.\n\n"
             "💡 Gửi `Hướng dẫn sử dụng tích hợp` để xem lại nội dung này."
         )
 
@@ -3261,6 +3342,19 @@ class ConversationalAssistantManager(NoteManagerMixin):
             return None
         if pending.expires_at <= dt_util.now():
             self._zalo_pending_creations.pop(owner_key, None)
+            return None
+        return pending
+
+    def _zalo_pending_send(
+        self, owner_key: str
+    ) -> PendingZaloSend | None:
+        """Return a non-expired direct Zalo-send selection."""
+        pending = self._zalo_pending_sends.get(owner_key)
+        if pending is None:
+            return None
+        if pending.expires_at <= dt_util.now():
+            self._zalo_pending_sends.pop(owner_key, None)
+            self._schedule_pending_expiry()
             return None
         return pending
 
@@ -3435,6 +3529,7 @@ class ConversationalAssistantManager(NoteManagerMixin):
         self, context: ZaloWebhookContext, message: str
     ) -> bool:
         """Reply to the exact user/group that sent a webhook command."""
+        message = self._address_response(message)
         message = self._zalo_emphasize_important_text(message)
         if not self.hass.services.has_service(
             ZALO_DOMAIN, ZALO_SERVICE_SEND_MESSAGE
@@ -4989,6 +5084,7 @@ class ConversationalAssistantManager(NoteManagerMixin):
     def _clear_zalo_pending_for_owner(self, owner_key: str) -> None:
         """Cancel unfinished Zalo flows when a new explicit command arrives."""
         self._zalo_pending_notes.pop(owner_key, None)
+        self._zalo_pending_sends.pop(owner_key, None)
         self._zalo_pending_creations.pop(owner_key, None)
         self._zalo_pending_deletions.pop(owner_key, None)
         self._zalo_pending_cameras.pop(owner_key, None)
@@ -10450,6 +10546,7 @@ class ConversationalAssistantManager(NoteManagerMixin):
         ):
             explicit_ha_kind = None
         pending_note = self._zalo_pending_note(context.owner_key)
+        pending_send = self._zalo_pending_send(context.owner_key)
         pending_creation = self._zalo_pending_creation(context.owner_key)
         pending_deletion = self._zalo_pending_deletion(context.owner_key)
         pending_camera = self._zalo_pending_camera(context.owner_key)
@@ -10460,6 +10557,19 @@ class ConversationalAssistantManager(NoteManagerMixin):
         pending_calendar_management = self._zalo_pending_calendar_management(
             context.owner_key
         )
+        if (
+            pending_send is not None
+            and command is None
+            and explicit_ha_kind is None
+        ):
+            return await self._async_zalo_pending_send_reply(
+                context, pending_send
+            )
+        if pending_send is not None and (
+            command is not None or explicit_ha_kind is not None
+        ):
+            self._zalo_pending_sends.pop(context.owner_key, None)
+            self._schedule_pending_expiry()
         if (
             pending_calendar_management is not None
             and command is None
@@ -10544,6 +10654,8 @@ class ConversationalAssistantManager(NoteManagerMixin):
             return await self._async_process_note_zalo_command(
                 context, command
             )
+        if command == ACTION_ZALO_SEND:
+            return await self._async_send_to_zalo_from_zalo(context)
         if command == ACTION_SEARCH:
             self._clear_zalo_pending_for_owner(context.owner_key)
             return await self._async_search_from_zalo(
@@ -11070,6 +11182,277 @@ class ConversationalAssistantManager(NoteManagerMixin):
                 )
             )
         return targets
+
+    def _zalo_send_schedule(
+        self, content: str
+    ) -> tuple[datetime | None, datetime | None, str]:
+        """Detect an event time and calculate the Zalo reminder lead time."""
+        now = dt_util.now()
+        request = (
+            f"remind me {content}"
+            if _request_language(content) == "en"
+            else f"nhắc {content}"
+        )
+        try:
+            parsed = parse_reminder_request(request, now=now)
+        except ReminderParseError:
+            return None, None, self._zalo_reminder_title(content)
+
+        event_at = dt_util.as_local(parsed.first_run)
+        remind_at = event_at - timedelta(
+            minutes=ZALO_REMINDER_ADVANCE_MINUTES
+        )
+        if remind_at <= now:
+            remind_at = None
+        title = self._zalo_reminder_title(parsed.message or content)
+        return event_at, remind_at, title
+
+    @staticmethod
+    def _zalo_reminder_title(value: str) -> str:
+        """Return a compact title accepted by zalo_bot.create_reminder."""
+        title = " ".join(str(value or "").split())
+        return (title or "Nhắc hẹn")[:120]
+
+    @staticmethod
+    def _format_zalo_send_time(value: datetime) -> str:
+        """Format one local event/reminder time for confirmation prompts."""
+        return dt_util.as_local(value).strftime("%H:%M ngày %d/%m/%Y")
+
+    def _zalo_send_selection_prompt(
+        self, pending: PendingZaloSend, *, invalid: bool = False
+    ) -> str:
+        """Build a numbered configured-Zalo selection prompt."""
+        lines = [
+            f"{index} - {target.display_name}"
+            for index, target in enumerate(pending.targets, start=1)
+        ]
+        prefix = (
+            "Lựa chọn chưa hợp lệ. Hãy chọn lại đúng số hoặc tên Zalo.\n"
+            if invalid
+            else "Hãy chọn Zalo sẽ nhận nội dung sau:\n"
+        )
+        schedule = ""
+        if pending.event_at is not None and pending.remind_at is not None:
+            schedule = (
+                "\nĐã nhận ra thời điểm "
+                f"**{self._format_zalo_send_time(pending.event_at)}**. "
+                "Sau khi gửi tin, integration sẽ tạo nhắc Zalo lúc "
+                f"**{self._format_zalo_send_time(pending.remind_at)}** "
+                f"(trước {ZALO_REMINDER_ADVANCE_MINUTES} phút)."
+            )
+        elif pending.event_at is not None:
+            schedule = (
+                "\nĐã nhận ra thời điểm "
+                f"**{self._format_zalo_send_time(pending.event_at)}**, "
+                "nhưng mốc nhắc trước 15 phút đã qua nên chỉ gửi nội dung, "
+                "không tạo nhắc hẹn đã quá hạn."
+            )
+        return (
+            f"{prefix}{chr(10).join(lines)}\n"
+            f"**Nội dung:** {pending.content}{schedule}\n"
+            "Trả lời số, tên Zalo hoặc **tất cả**. Gửi **Hủy** để bỏ yêu cầu."
+        )
+
+    async def _async_deliver_zalo_send(
+        self, pending: PendingZaloSend, targets: list[NotificationTarget]
+    ) -> str:
+        """Send exact content and optionally create a reminder per destination."""
+        sent_names: list[str] = []
+        reminder_names: list[str] = []
+        failures: list[str] = []
+        reminder_service_available = self.hass.services.has_service(
+            ZALO_DOMAIN, ZALO_SERVICE_CREATE_REMINDER
+        )
+
+        if not self.hass.services.has_service(
+            ZALO_DOMAIN, ZALO_SERVICE_SEND_MESSAGE
+        ):
+            return (
+                f"Không thể gửi vì service {ZALO_DOMAIN}."
+                f"{ZALO_SERVICE_SEND_MESSAGE} chưa khả dụng."
+            )
+
+        for target in targets:
+            zalo = target.zalo or {}
+            thread_id = str(zalo.get(CONF_ZALO_THREAD_ID, "")).strip()
+            account_selection = str(
+                zalo.get(CONF_ZALO_ACCOUNT_SELECTION, "")
+            ).strip()
+            zalo_type = str(
+                zalo.get(CONF_ZALO_TYPE, DEFAULT_ZALO_TYPE)
+            ).strip()
+            if not thread_id or not account_selection:
+                failures.append(f"{target.display_name}: cấu hình thiếu")
+                continue
+            try:
+                await self.hass.services.async_call(
+                    ZALO_DOMAIN,
+                    ZALO_SERVICE_SEND_MESSAGE,
+                    {
+                        "type": zalo_type,
+                        "ttl": 0,
+                        "message": pending.content,
+                        "thread_id": thread_id,
+                        "account_selection": account_selection,
+                    },
+                    blocking=True,
+                )
+                sent_names.append(target.display_name)
+            except Exception:  # noqa: BLE001 - continue other destinations
+                _LOGGER.exception(
+                    "Failed direct Zalo message to configured thread %s",
+                    thread_id,
+                )
+                failures.append(f"{target.display_name}: gửi tin thất bại")
+                continue
+
+            if pending.remind_at is None:
+                continue
+            if not reminder_service_available:
+                failures.append(
+                    f"{target.display_name}: chưa có service tạo nhắc Zalo"
+                )
+                continue
+            try:
+                await self.hass.services.async_call(
+                    ZALO_DOMAIN,
+                    ZALO_SERVICE_CREATE_REMINDER,
+                    {
+                        "type": zalo_type,
+                        "title": pending.reminder_title,
+                        "content": pending.content,
+                        "thread_id": thread_id,
+                        "account_selection": account_selection,
+                        # zalo_bot documents this field as a 13-digit Unix
+                        # timestamp in milliseconds.
+                        "remind_time": str(
+                            int(pending.remind_at.timestamp() * 1000)
+                        ),
+                    },
+                    blocking=True,
+                )
+                reminder_names.append(target.display_name)
+            except Exception:  # noqa: BLE001 - message was already delivered
+                _LOGGER.exception(
+                    "Failed Zalo reminder for configured thread %s",
+                    thread_id,
+                )
+                failures.append(f"{target.display_name}: tạo nhắc thất bại")
+
+        if not sent_names:
+            response = "Chưa gửi được nội dung đến Zalo đã chọn."
+        else:
+            response = "Đã gửi nội dung đến " + ", ".join(sent_names) + "."
+        if reminder_names and pending.remind_at is not None:
+            response += (
+                " Đã tạo nhắc lúc "
+                f"{self._format_zalo_send_time(pending.remind_at)} cho "
+                + ", ".join(reminder_names)
+                + "."
+            )
+        elif pending.event_at is not None and pending.remind_at is None:
+            response += (
+                " Không tạo nhắc vì thời điểm trước "
+                f"{ZALO_REMINDER_ADVANCE_MINUTES} phút đã qua."
+            )
+        if failures:
+            response += " Chưa hoàn tất: " + "; ".join(failures) + "."
+        return response
+
+    def _new_zalo_send_pending(
+        self, content: str, targets: list[NotificationTarget],
+        *, source_keys: set[str] | None = None
+    ) -> PendingZaloSend:
+        """Create one immutable direct-send request for a selection turn."""
+        now = dt_util.now()
+        event_at, remind_at, title = self._zalo_send_schedule(content)
+        return PendingZaloSend(
+            pending_id=uuid.uuid4().hex,
+            content=content,
+            targets=targets,
+            source_keys=source_keys or set(),
+            event_at=event_at,
+            remind_at=remind_at,
+            reminder_title=title,
+            created_at=now,
+            expires_at=now
+            + timedelta(seconds=PENDING_CONFIRMATION_TIMEOUT_SECONDS),
+        )
+
+    async def _async_send_to_zalo_from_zalo(
+        self, context: ZaloWebhookContext
+    ) -> str:
+        """Start direct Zalo forwarding from an inbound Zalo command."""
+        content = _zalo_send_request(context.text)
+        if content is None or not content.strip():
+            return (
+                "Thiếu nội dung cần gửi. Ví dụ: **Gửi Zalo yêu cầu ngày mai "
+                "8h00 tất cả nhân viên sale họp bàn chiến lược kinh doanh**."
+            )
+        targets = self._configured_zalo_selection_targets()
+        if not targets:
+            return (
+                "Chưa có Zalo nào được bật trong UI. Hãy vào Conversational "
+                "Assistant > Zalo settings để thêm nơi nhận."
+            )
+        self._clear_zalo_pending_for_owner(context.owner_key)
+        pending = self._new_zalo_send_pending(content.strip(), targets)
+        self._zalo_pending_sends[context.owner_key] = pending
+        self._schedule_pending_expiry()
+        return self._zalo_send_selection_prompt(pending)
+
+    async def _async_zalo_pending_send_reply(
+        self, context: ZaloWebhookContext, pending: PendingZaloSend
+    ) -> str:
+        """Select configured destinations and complete one direct Zalo send."""
+        if self._is_cancel_pending_text(context.text) or normalize_text(
+            context.text
+        ) in {"khong gui", "thoi khong gui"}:
+            self._zalo_pending_sends.pop(context.owner_key, None)
+            self._schedule_pending_expiry()
+            return "Đã hủy yêu cầu gửi Zalo."
+        indexes = parse_target_selection(
+            context.text, [target.display_name for target in pending.targets]
+        )
+        if not indexes:
+            pending.expires_at = dt_util.now() + timedelta(
+                seconds=PENDING_CONFIRMATION_TIMEOUT_SECONDS
+            )
+            self._schedule_pending_expiry()
+            return self._zalo_send_selection_prompt(pending, invalid=True)
+        selected = [pending.targets[index] for index in indexes]
+        self._zalo_pending_sends.pop(context.owner_key, None)
+        self._schedule_pending_expiry()
+        return await self._async_deliver_zalo_send(pending, selected)
+
+    async def _async_send_to_zalo_from_voice(
+        self, user_input: ConversationInput, _result: RecognizeResult
+    ) -> str:
+        """Start direct Zalo forwarding from Voice Assist."""
+        content = _zalo_send_request(user_input.text)
+        if content is None or not content.strip():
+            return await self._async_voice_response(
+                user_input,
+                "Thiếu nội dung cần gửi. Ví dụ: Gửi Zalo yêu cầu ngày mai "
+                "8 giờ tất cả nhân viên sale họp bàn chiến lược kinh doanh.",
+            )
+        targets = self._configured_zalo_selection_targets()
+        if not targets:
+            return await self._async_voice_response(
+                user_input,
+                "Chưa có Zalo nào được bật trong UI. Hãy thêm nơi nhận trong "
+                "Zalo settings của Conversational Assistant.",
+            )
+        source_keys = self._source_keys(user_input)
+        self._clear_pending_for_source(source_keys)
+        pending = self._new_zalo_send_pending(
+            content.strip(), targets, source_keys=source_keys
+        )
+        self._pending_voice_zalo_sends[pending.pending_id] = pending
+        self._sync_pending_followup_trigger()
+        return await self._async_voice_response(
+            user_input, self._zalo_send_selection_prompt(pending)
+        )
 
     def _configured_tts_entity_id(self) -> str | None:
         """Return the configured TTS entity or auto-select an available one."""
@@ -11608,8 +11991,10 @@ class ConversationalAssistantManager(NoteManagerMixin):
             *self._pending_deletions.values(),
             *self._pending_voice_cameras.values(),
             *self._pending_voice_device_controls.values(),
+            *self._pending_voice_zalo_sends.values(),
             *self._note_pending_items(),
             *self._zalo_pending_notes.values(),
+            *self._zalo_pending_sends.values(),
             *self._zalo_pending_creations.values(),
             *self._zalo_pending_deletions.values(),
             *self._zalo_pending_cameras.values(),
@@ -11635,6 +12020,7 @@ class ConversationalAssistantManager(NoteManagerMixin):
             or self._pending_deletions
             or self._pending_voice_cameras
             or self._pending_voice_device_controls
+            or self._pending_voice_zalo_sends
             or self._has_pending_notes()
         )
         if has_pending and self._unsub_pending_trigger is None:
@@ -11674,6 +12060,14 @@ class ConversationalAssistantManager(NoteManagerMixin):
         ):
             if pending.expires_at <= now:
                 del self._pending_voice_device_controls[pending_id]
+        for pending_id, pending in list(
+            self._pending_voice_zalo_sends.items()
+        ):
+            if pending.expires_at <= now:
+                del self._pending_voice_zalo_sends[pending_id]
+        for owner_key, pending in list(self._zalo_pending_sends.items()):
+            if pending.expires_at <= now:
+                del self._zalo_pending_sends[owner_key]
         for owner_key, pending in list(self._zalo_pending_creations.items()):
             if pending.expires_at <= now:
                 del self._zalo_pending_creations[owner_key]
@@ -11715,6 +12109,11 @@ class ConversationalAssistantManager(NoteManagerMixin):
         ):
             if source_keys & pending.source_keys:
                 del self._pending_voice_device_controls[pending_id]
+        for pending_id, pending in list(
+            self._pending_voice_zalo_sends.items()
+        ):
+            if source_keys & pending.source_keys:
+                del self._pending_voice_zalo_sends[pending_id]
 
     def _set_pending(
         self,
@@ -11792,6 +12191,30 @@ class ConversationalAssistantManager(NoteManagerMixin):
         self._sync_pending_followup_trigger()
         return pending
 
+    def _find_pending_voice_zalo_send(
+        self, user_input: ConversationInput
+    ) -> PendingZaloSend | None:
+        """Find a pending direct Zalo-send request for this voice source."""
+        self._purge_expired_pending()
+        source_keys = self._source_keys(user_input)
+        matching = [
+            pending
+            for pending in self._pending_voice_zalo_sends.values()
+            if source_keys & pending.source_keys
+        ]
+        if matching:
+            return max(matching, key=lambda item: item.created_at)
+        if (
+            len(self._pending_voice_zalo_sends) == 1
+            and not self._pending
+            and not self._pending_deletions
+            and not self._pending_voice_cameras
+            and not self._pending_voice_device_controls
+            and not self._has_pending_notes()
+        ):
+            return next(iter(self._pending_voice_zalo_sends.values()))
+        return None
+
     def _find_pending(
         self, user_input: ConversationInput
     ) -> PendingReminder | None:
@@ -11810,6 +12233,7 @@ class ConversationalAssistantManager(NoteManagerMixin):
             and not self._pending_deletions
             and not self._pending_voice_cameras
             and not self._pending_voice_device_controls
+            and not self._pending_voice_zalo_sends
             and not self._has_pending_notes()
         ):
             return next(iter(self._pending.values()))
@@ -11833,6 +12257,7 @@ class ConversationalAssistantManager(NoteManagerMixin):
             and not self._pending
             and not self._pending_voice_cameras
             and not self._pending_voice_device_controls
+            and not self._pending_voice_zalo_sends
             and not self._has_pending_notes()
         ):
             return next(iter(self._pending_deletions.values()))
@@ -11856,6 +12281,7 @@ class ConversationalAssistantManager(NoteManagerMixin):
             and not self._pending
             and not self._pending_deletions
             and not self._pending_voice_device_controls
+            and not self._pending_voice_zalo_sends
             and not self._has_pending_notes()
         ):
             return next(iter(self._pending_voice_cameras.values()))
@@ -11951,7 +12377,7 @@ class ConversationalAssistantManager(NoteManagerMixin):
         if not response:
             return response
         if ai_generated:
-            return _assist_speech_text(response)
+            return _assist_speech_text(self._address_response(response))
         language_code = str(getattr(user_input, "language", "vi") or "vi")
         language = (
             "en"
@@ -11966,11 +12392,13 @@ class ConversationalAssistantManager(NoteManagerMixin):
             service_context=getattr(user_input, "context", None),
         )
         return _assist_speech_text(
-            self._append_ai_attempt_summary(
-                polished,
-                attempted,
-                language=language,
-                zalo=False,
+            self._address_response(
+                self._append_ai_attempt_summary(
+                    polished,
+                    attempted,
+                    language=language,
+                    zalo=False,
+                )
             )
         )
 
@@ -12179,6 +12607,10 @@ class ConversationalAssistantManager(NoteManagerMixin):
             )
         if command.action == ACTION_CAMERA:
             return await self._async_camera_from_voice(user_input, result)
+        if command.action == ACTION_ZALO_SEND:
+            return await self._async_send_to_zalo_from_voice(
+                transformed_input, result
+            )
         if command.action == ACTION_REMINDER_CREATE:
             return await self._async_create_from_voice(
                 transformed_input, result
@@ -12253,6 +12685,8 @@ class ConversationalAssistantManager(NoteManagerMixin):
     def _is_primary_voice_command(self, text: str) -> bool:
         """Return whether another Conversational Assistant trigger handles text."""
         if _is_integration_help_request(text):
+            return True
+        if _zalo_send_request(text) is not None:
             return True
         if _search_request(text) is not None:
             return True
@@ -12406,6 +12840,9 @@ class ConversationalAssistantManager(NoteManagerMixin):
             "khong chup anh",
             "huy chup",
             "thoi khong chup",
+            "khong gui",
+            "thoi khong gui",
+            "huy gui zalo",
         }
 
     async def _async_pending_followup_from_voice(
@@ -12438,6 +12875,7 @@ class ConversationalAssistantManager(NoteManagerMixin):
             return None
 
         note_pending = self._find_pending_note(user_input)
+        zalo_send_pending = self._find_pending_voice_zalo_send(user_input)
         camera_pending = self._find_pending_voice_camera(user_input)
         creation = self._find_pending(user_input)
         deletion = self._find_pending_deletion(user_input)
@@ -12446,7 +12884,8 @@ class ConversationalAssistantManager(NoteManagerMixin):
                 user_input, result, note_pending
             )
         if (
-            camera_pending is None
+            zalo_send_pending is None
+            and camera_pending is None
             and creation is None
             and deletion is None
         ):
@@ -12457,7 +12896,12 @@ class ConversationalAssistantManager(NoteManagerMixin):
             camera_pending is not None
             and self._is_voice_camera_cancellation(user_input.text)
         ) or self._is_cancel_pending_text(user_input.text):
-            if camera_pending is not None:
+            if zalo_send_pending is not None:
+                self._pending_voice_zalo_sends.pop(
+                    zalo_send_pending.pending_id, None
+                )
+                response = "Đã hủy yêu cầu gửi Zalo."
+            elif camera_pending is not None:
                 self._pending_voice_cameras.pop(
                     camera_pending.pending_id, None
                 )
@@ -12483,6 +12927,10 @@ class ConversationalAssistantManager(NoteManagerMixin):
             self._sync_pending_followup_trigger()
             return await self._async_voice_response(user_input, response)
 
+        if zalo_send_pending is not None:
+            return await self._async_confirm_zalo_send_from_voice(
+                user_input, result, zalo_send_pending
+            )
         if camera_pending is not None:
             return await self._async_confirm_camera_from_voice(
                 user_input, result, camera_pending
@@ -12492,6 +12940,32 @@ class ConversationalAssistantManager(NoteManagerMixin):
                 user_input, result
             )
         return await self._async_confirm_targets_from_voice(user_input, result)
+
+    async def _async_confirm_zalo_send_from_voice(
+        self,
+        user_input: ConversationInput,
+        result: RecognizeResult,
+        pending: PendingZaloSend,
+    ) -> str:
+        """Complete a pending direct Zalo send after destination selection."""
+        selection = self._selection_slot(user_input, result)
+        indexes = parse_target_selection(
+            selection, [target.display_name for target in pending.targets]
+        )
+        if not indexes:
+            pending.expires_at = dt_util.now() + timedelta(
+                seconds=PENDING_CONFIRMATION_TIMEOUT_SECONDS
+            )
+            self._sync_pending_followup_trigger()
+            return await self._async_voice_response(
+                user_input,
+                self._zalo_send_selection_prompt(pending, invalid=True),
+            )
+        selected = [pending.targets[index] for index in indexes]
+        self._pending_voice_zalo_sends.pop(pending.pending_id, None)
+        self._sync_pending_followup_trigger()
+        response = await self._async_deliver_zalo_send(pending, selected)
+        return await self._async_voice_response(user_input, response)
 
     async def _async_confirm_camera_from_voice(
         self,
@@ -12925,19 +13399,24 @@ class ConversationalAssistantManager(NoteManagerMixin):
     async def _async_cancel_pending_from_voice(
         self, user_input: ConversationInput, _result: RecognizeResult
     ) -> str:
-        """Cancel a pending creation, deletion, or camera request."""
+        """Cancel a pending creation, deletion, camera, or Zalo-send request."""
+        zalo_send = self._find_pending_voice_zalo_send(user_input)
         camera = self._find_pending_voice_camera(user_input)
         creation = self._find_pending(user_input)
         deletion = self._find_pending_deletion(user_input)
         if (
-            camera is None
+            zalo_send is None
+            and camera is None
             and creation is None
             and deletion is None
         ):
             return await self._async_voice_response(
                 user_input, "Không có yêu cầu nào đang chờ xác nhận."
             )
-        if camera is not None:
+        if zalo_send is not None:
+            self._pending_voice_zalo_sends.pop(zalo_send.pending_id, None)
+            response = "Đã hủy yêu cầu gửi Zalo."
+        elif camera is not None:
             self._pending_voice_cameras.pop(camera.pending_id, None)
             if camera.mode == "analysis":
                 response = "Đã hủy yêu cầu phân tích camera."

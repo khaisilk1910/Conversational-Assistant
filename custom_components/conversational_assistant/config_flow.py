@@ -34,6 +34,7 @@ from .const import (
     CONF_DISMISS_ON_CLEAR,
     CONF_SPEAKER_ENABLED,
     CONF_TTS_ENTITY_ID,
+    CONF_USER_ADDRESS,
     CONF_ZALO_ACCOUNT_SELECTION,
     CONF_ZALO_CONVERSATION_AGENT_ID,
     CONF_ZALO_ENABLED,
@@ -58,6 +59,7 @@ from .const import (
     DEFAULT_CONFIRM_TARGETS,
     DEFAULT_DISMISS_ON_CLEAR,
     DEFAULT_SPEAKER_ENABLED,
+    DEFAULT_USER_ADDRESS,
     DEFAULT_ZALO_ENABLED,
     DEFAULT_ZALO_CONVERSATION_AGENT_ID,
     DEFAULT_ZALO_HOME_ASSISTANT_ENABLED,
@@ -77,6 +79,7 @@ CONF_SELECTED_ZALO_TARGET = "selected_zalo_target"
 def _general_settings_schema(
     dismiss_on_clear: bool,
     confirm_targets: bool,
+    user_address: str = DEFAULT_USER_ADDRESS,
 ) -> vol.Schema:
     """Build the general options schema."""
     return vol.Schema(
@@ -89,6 +92,14 @@ def _general_settings_schema(
                 CONF_CONFIRM_TARGETS,
                 default=confirm_targets,
             ): selector.BooleanSelector(),
+            vol.Optional(
+                CONF_USER_ADDRESS,
+                default=user_address or DEFAULT_USER_ADDRESS,
+            ): selector.TextSelector(
+                selector.TextSelectorConfig(
+                    type=selector.TextSelectorType.TEXT
+                )
+            ),
         }
     )
 
@@ -460,6 +471,7 @@ def _merge_schemas(*schemas: vol.Schema) -> vol.Schema:
 def _initial_schema(
     dismiss_on_clear: bool,
     confirm_targets: bool,
+    user_address: str,
     speaker_enabled: bool,
     tts_entity_id: str | None,
     zalo_webhook_enabled: bool,
@@ -475,7 +487,7 @@ def _initial_schema(
 ) -> vol.Schema:
     """Build the initial installation form with all setting groups."""
     return _merge_schemas(
-        _general_settings_schema(dismiss_on_clear, confirm_targets),
+        _general_settings_schema(dismiss_on_clear, confirm_targets, user_address),
         _zalo_settings_schema(
             zalo_webhook_enabled,
             zalo_webhook_bot_account_id,
@@ -559,9 +571,23 @@ def _normalize_ai_settings(user_input: dict[str, Any]) -> dict[str, Any]:
     return normalized
 
 
+def _normalize_general_settings(
+    user_input: dict[str, Any],
+) -> dict[str, Any]:
+    """Normalize user-facing general settings."""
+    normalized = dict(user_input)
+    address = " ".join(
+        str(normalized.get(CONF_USER_ADDRESS, DEFAULT_USER_ADDRESS) or "").split()
+    )
+    normalized[CONF_USER_ADDRESS] = (address or DEFAULT_USER_ADDRESS)[:80]
+    return normalized
+
+
 def _normalize_initial(user_input: dict[str, Any]) -> dict[str, Any]:
     """Normalize all text values from the initial installation form."""
-    return _normalize_ai_settings(_normalize_zalo_settings(user_input))
+    return _normalize_general_settings(
+        _normalize_ai_settings(_normalize_zalo_settings(user_input))
+    )
 
 
 def _first_tts_entity_id(hass) -> str | None:
@@ -681,6 +707,10 @@ class ConversationalAssistantConfigFlow(config_entries.ConfigFlow, domain=DOMAIN
                         DEFAULT_CONFIRM_TARGETS,
                     )
                 ),
+                str(
+                    values.get(CONF_USER_ADDRESS, DEFAULT_USER_ADDRESS)
+                    or DEFAULT_USER_ADDRESS
+                ).strip(),
                 bool(
                     values.get(
                         CONF_SPEAKER_ENABLED,
@@ -821,6 +851,12 @@ class ConversationalAssistantOptionsFlow(config_entries.OptionsFlow):
             CONF_CONFIRM_TARGETS,
             self.config_entry.data.get(
                 CONF_CONFIRM_TARGETS, DEFAULT_CONFIRM_TARGETS
+            ),
+        )
+        options.setdefault(
+            CONF_USER_ADDRESS,
+            self.config_entry.data.get(
+                CONF_USER_ADDRESS, DEFAULT_USER_ADDRESS
             ),
         )
         options.setdefault(
@@ -980,7 +1016,7 @@ class ConversationalAssistantOptionsFlow(config_entries.OptionsFlow):
         """Edit general discovery and voice-confirmation settings."""
         options = self._ensure_options()
         if user_input is not None:
-            options.update(user_input)
+            options.update(_normalize_general_settings(user_input))
             return await self.async_step_init()
 
         values = user_input or options
@@ -996,6 +1032,10 @@ class ConversationalAssistantOptionsFlow(config_entries.OptionsFlow):
                 bool(
                     values.get(CONF_CONFIRM_TARGETS, DEFAULT_CONFIRM_TARGETS)
                 ),
+                str(
+                    values.get(CONF_USER_ADDRESS, DEFAULT_USER_ADDRESS)
+                    or DEFAULT_USER_ADDRESS
+                ).strip(),
             ),
         )
 
