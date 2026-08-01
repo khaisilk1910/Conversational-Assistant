@@ -144,15 +144,15 @@
       },
       "tts": {
         "title": "TTS settings",
-        "description": "Configure speaker discovery, TTS engine, language, and voice used for reminders.",
+        "description": "Configure speaker discovery, TTS engine, language, and voice used for reminders and direct speaker announcements.",
         "data": {
-          "speaker_enabled": "Offer discovered speakers as reminder destinations",
-          "tts_entity_id": "TTS engine for speaker announcements",
+          "speaker_enabled": "Enable discovered speakers for reminders and direct TTS announcements",
+          "tts_entity_id": "TTS engine for reminders and direct speaker announcements",
           "tts_language": "TTS language",
           "tts_voice": "TTS voice name"
         },
         "data_description": {
-          "speaker_enabled": "When a destination list is needed, compatible media players are scanned while unavailable TVs and projectors are excluded.",
+          "speaker_enabled": "Compatible media players are scanned for reminder destinations and for direct speaker announcement commands; unavailable TVs and projectors are excluded.",
           "tts_entity_id": "If no engine is selected, the first available TTS entity is used automatically.",
           "tts_language": "Optional. Enter the exact language code supported by the selected TTS engine, for example vi. Leave blank to use the engine default.",
           "tts_voice": "Optional. Enter the exact voice name supported by the selected TTS engine. The value is sent as options.voice. Leave blank to use the engine default."

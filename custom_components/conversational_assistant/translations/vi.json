@@ -144,15 +144,15 @@
       },
       "tts": {
         "title": "Cài đặt TTS",
-        "description": "Thiết lập việc quét loa, bộ máy TTS, ngôn ngữ và giọng đọc cho nhắc hẹn.",
+        "description": "Thiết lập việc quét loa, bộ máy TTS, ngôn ngữ và giọng đọc cho nhắc hẹn và thông báo trực tiếp ra loa.",
         "data": {
-          "speaker_enabled": "Đưa các loa tự quét vào danh sách nơi nhận",
-          "tts_entity_id": "Bộ máy TTS dùng để đọc nhắc nhở",
+          "speaker_enabled": "Bật loa tự quét cho nhắc hẹn và thông báo trực tiếp",
+          "tts_entity_id": "Bộ máy TTS cho nhắc hẹn và thông báo trực tiếp",
           "tts_language": "Ngôn ngữ TTS (language)",
           "tts_voice": "Tên giọng TTS (voice)"
         },
         "data_description": {
-          "speaker_enabled": "Khi cần danh sách nơi nhận, integration quét media_player hỗ trợ play_media, bỏ qua TV, máy chiếu và thiết bị unavailable.",
+          "speaker_enabled": "Integration quét media_player tương thích để dùng làm nơi nhận nhắc hẹn và cho lệnh thông báo trực tiếp ra loa; TV, máy chiếu và thiết bị unavailable sẽ bị bỏ qua.",
           "tts_entity_id": "Nếu không chọn, integration tự dùng TTS entity đầu tiên đang có.",
           "tts_language": "Không bắt buộc. Nhập đúng mã ngôn ngữ mà bộ máy TTS đã chọn hỗ trợ, ví dụ vi. Không sử dụng thì để trống để dùng mặc định của TTS.",
           "tts_voice": "Không bắt buộc. Nhập đúng tên voice mà bộ máy TTS đã chọn hỗ trợ. Giá trị được gửi vào options.voice. Không sử dụng thì để trống để dùng mặc định của TTS."
