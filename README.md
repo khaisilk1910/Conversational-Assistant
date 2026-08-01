@@ -13,21 +13,6 @@ Tích hợp kết hợp quản lý nhắc hẹn, ghi chú bảo mật, thông b�
 > [!IMPORTANT]
 > Cài tích hợp rồi thêm Automation dưới nếu muốn dùng Zalo để tương tác.
 > 
-> Lưu ý lấy `uid_cua_bot_de_tranh_tu_tra_loi_tin_cua_chinh_bot` cho vào điều kiện để tránh bot tự trả lời tin nhắn của chính bot.
-> 
-> `webhook_id` là webhook Zalo_bot bạn đang dùng Automation cho Zalo Bot.
-> 
-> Thêm `'@1080' in (trigger.json.data.content | default('') | string)` nếu bạn muốn khi yêu cầu phải nhập `@1080` + nội dung yêu cầu.
-> 
-> Ví dụ: **`@1080` hẹn 10h30 hàng ngày uống thuốc**
-> 
-> Nếu không muốn hãy bỏ đoạn `and '@1080' in (trigger.json.data.content | default('') | string)`.
-> 
-> Khi đó chỉ yêu cầu: **Hẹn 10h30 hàng ngày uống thuốc**
->
-> AI Search bạn phải vào cài đặt và **Tắt Assist** như ảnh dưới. Tham khảo [Tham Khảo Cài AI Ở Đây](https://github.com/luuquangvu/hass_local_openai_llm)
-> <img width="732" height="487" alt="image" src="https://github.com/user-attachments/assets/c41eddad-79ef-473b-910d-2e4312cc1cc7" />
-
 
 ```
 alias: Zalo - Bot Conversational Assistant
@@ -54,6 +39,22 @@ actions:
 mode: parallel
 max: 50
 ```
+> 
+> Lưu ý lấy `uid_cua_bot_de_tranh_tu_tra_loi_tin_cua_chinh_bot` cho vào điều kiện để tránh bot tự trả lời tin nhắn của chính bot.
+> 
+> `webhook_id` là webhook Zalo_bot bạn đang dùng Automation cho Zalo Bot.
+> 
+> Thêm `'@1080' in (trigger.json.data.content | default('') | string)` nếu bạn muốn khi yêu cầu phải nhập `@1080` + nội dung yêu cầu.
+> 
+> Ví dụ: **`@1080` hẹn 10h30 hàng ngày uống thuốc**
+> 
+> Nếu không muốn hãy bỏ đoạn `and '@1080' in (trigger.json.data.content | default('') | string)`.
+> 
+> Khi đó chỉ yêu cầu: **Hẹn 10h30 hàng ngày uống thuốc**
+>
+> AI Search bạn phải vào cài đặt và **Tắt Assist** như ảnh dưới. Tham khảo [Tham Khảo Cài AI Ở Đây](https://github.com/luuquangvu/hass_local_openai_llm)
+> <img width="732" height="487" alt="image" src="https://github.com/user-attachments/assets/c41eddad-79ef-473b-910d-2e4312cc1cc7" />
+
 
 ---
 
