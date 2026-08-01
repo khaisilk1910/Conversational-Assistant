@@ -140,6 +140,53 @@ PENDING_CONFIRMATION_TIMEOUT_SECONDS = 120
 # Registered only while a reminder is waiting for destination confirmation.
 PENDING_FOLLOWUP_SENTENCES = ["{selection}"]
 
+# Voice Assist already handles ordinary on/off commands, target temperature,
+# fan percentage, and simple delayed commands. These triggers intentionally
+# cover advanced climate/fan operations and explicit persistent scheduling that
+# are not represented by Home Assistant's built-in intents. The callback still
+# yields native-supported immediate commands back to Home Assistant.
+DEVICE_CONTROL_SENTENCES = [
+    "[hãy ]hẹn giờ {request}",
+    "[hãy ]đặt hẹn giờ {request}",
+    "[hãy ]lên lịch điều khiển thiết bị {request}",
+    "[hãy ]đặt lịch điều khiển thiết bị {request}",
+    "[hãy ]lên lịch (bật|tắt|mở|đóng|chuyển|đổi|đặt|tăng|giảm) {request}",
+    "[hãy ]đặt lịch (bật|tắt|mở|đóng|chuyển|đổi|đặt|tăng|giảm) {request}",
+    "[hãy ](chuyển|đổi|đặt) chế độ (điều hòa|điều hoà|máy lạnh|quạt)",
+    "[hãy ](chuyển|đổi|đặt) chế độ (điều hòa|điều hoà|máy lạnh|quạt) {request}",
+    "[hãy ](tăng|giảm) nhiệt độ (điều hòa|điều hoà|máy lạnh)",
+    "[hãy ](tăng|giảm) nhiệt độ (điều hòa|điều hoà|máy lạnh) {request}",
+    "[hãy ](đặt|chỉnh) nhiệt độ (điều hòa|điều hoà|máy lạnh) {request}",
+    "[hãy ](đặt|chỉnh) (điều hòa|điều hoà|máy lạnh) {request}",
+    "[hãy ](chuyển|đổi) (điều hòa|điều hoà|máy lạnh) {request}",
+    "[hãy ](tăng|giảm|đặt|chỉnh) tốc độ (quạt|gió)",
+    "[hãy ](tăng|giảm|đặt|chỉnh) tốc độ (quạt|gió) {request}",
+    "[hãy ](bật|tắt|chuyển|đổi|đặt) đảo gió",
+    "[hãy ](bật|tắt|chuyển|đổi|đặt) đảo gió {request}",
+    "[hãy ](bật|tắt) quay đảo",
+    "[hãy ](bật|tắt) quay đảo {request}",
+    "[hãy ](bật|tắt) quay quạt",
+    "[hãy ](bật|tắt) quay quạt {request}",
+    "[hãy ](đổi|chuyển|đặt) hướng quay",
+    "[hãy ](đổi|chuyển|đặt) hướng quay {request}",
+    "[hãy ]đặt độ ẩm (điều hòa|điều hoà|máy lạnh)",
+    "[hãy ]đặt độ ẩm (điều hòa|điều hoà|máy lạnh) {request}",
+    "[please ]schedule device control {request}",
+    "[please ]schedule (turn on|turn off|open|close|set|change|switch|increase|decrease) {request}",
+    "[please ]set a device timer {request}",
+    "[please ](set|change|switch) (air conditioner|climate|fan) mode",
+    "[please ](set|change|switch) (air conditioner|climate|fan) mode {request}",
+    "[please ](increase|decrease|raise|lower) (air conditioner|climate) temperature",
+    "[please ](increase|decrease|raise|lower) (air conditioner|climate) temperature {request}",
+    "[please ](set|change) (air conditioner|climate) temperature {request}",
+    "[please ](increase|decrease|set|change) fan speed",
+    "[please ](increase|decrease|set|change) fan speed {request}",
+    "[please ](turn on|turn off|set|change) (swing|oscillation)",
+    "[please ](turn on|turn off|set|change) (swing|oscillation) {request}",
+    "[please ](set|change) fan direction",
+    "[please ](set|change) fan direction {request}",
+]
+
 # Users can teach persistent alternative phrases for existing workflows.
 # These management commands are static; learned phrases themselves are
 # registered dynamically after loading Home Assistant Store.

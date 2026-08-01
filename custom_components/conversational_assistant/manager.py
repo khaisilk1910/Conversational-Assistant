@@ -7,10 +7,11 @@ import calendar
 import json
 from collections import deque
 from collections.abc import Callable
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 from datetime import date, datetime, time, timedelta
 from functools import partial
 import logging
+from math import isfinite
 import os
 import re
 from time import monotonic
@@ -21,6 +22,13 @@ import uuid
 from hassil.recognize import RecognizeResult
 
 from homeassistant.components import media_source, persistent_notification
+from homeassistant.components.climate.const import ClimateEntityFeature
+
+try:
+    from homeassistant.components.fan import FanEntityFeature
+except ImportError:  # Home Assistant compatibility fallback
+    from homeassistant.components.fan.const import FanEntityFeature
+
 from homeassistant.components.calendar.const import (
     DATA_COMPONENT as CALENDAR_DATA_COMPONENT,
     CalendarEntityFeature,
@@ -124,6 +132,7 @@ from .const import (
     DEFAULT_ZALO_TYPE,
     DEFAULT_ZALO_WEBHOOK_BOT_ACCOUNT_ID,
     DEFAULT_ZALO_WEBHOOK_ENABLED,
+    DEVICE_CONTROL_SENTENCES,
     DISCOVERY_CACHE_SECONDS,
     DOMAIN,
     EVENT_NOTIFICATION_ACTION,
@@ -193,16 +202,24 @@ from .command_memory import (
     parse_learn_request,
 )
 from .device_control import (
-    DevicePowerInterpretation,
+    CLIMATE_CONTROL_ACTIONS,
+    CONTROL_ACTIONS,
+    FAN_CONTROL_ACTIONS,
+    POWER_CONTROL_ACTIONS,
+    DeviceControlInterpretation,
     DevicePowerTarget,
     POWER_CONTROL_DOMAINS,
+    deterministic_action_and_parameters,
+    deterministic_interpretation,
     device_power_request_hint,
-    exact_power_targets,
-    explicit_power_action,
+    exact_named_targets,
     interpretation_from_payload,
     is_rolling_door_target,
+    match_supported_option,
+    parse_device_target_selection,
+    parse_scheduled_for,
     rank_power_targets,
-    rolling_door_open_request_hint,
+    requested_device_domains,
 )
 from .models import Reminder
 from .note_flow import (
@@ -564,12 +581,106 @@ class PendingVoiceCamera:
 
 @dataclass(slots=True)
 class PendingZaloDevicePower:
-    """Rolling-door open command waiting for confirmation in one Zalo chat."""
+    """One multi-turn Zalo device-control request."""
 
     action: str
     targets: list[DevicePowerTarget]
     expires_at: datetime
     attempted_agents: list[str]
+    parameters: dict[str, Any] = field(default_factory=dict)
+    scheduled_for: datetime | None = None
+    phase: str = "confirm_door"
+    original_text: str = ""
+    target_domain: str = ""
+
+
+@dataclass(slots=True)
+class PendingVoiceDeviceControl:
+    """One multi-turn Voice Assist device-control request."""
+
+    pending_id: str
+    action: str
+    targets: list[DevicePowerTarget]
+    source_keys: set[str]
+    created_at: datetime
+    expires_at: datetime
+    attempted_agents: list[str]
+    parameters: dict[str, Any] = field(default_factory=dict)
+    scheduled_for: datetime | None = None
+    phase: str = "select_target"
+    original_text: str = ""
+    target_domain: str = ""
+
+
+@dataclass(slots=True)
+class ScheduledDeviceAction:
+    """Persistent device action scheduled from Zalo or Voice Assist."""
+
+    action_id: str
+    action: str
+    entity_ids: list[str]
+    target_names: dict[str, str]
+    parameters: dict[str, Any]
+    run_at: datetime
+    created_at: datetime
+    zalo_context: dict[str, str]
+    request_text: str = ""
+
+    def as_dict(self) -> dict[str, Any]:
+        """Return a storage-safe representation."""
+        return {
+            "action_id": self.action_id,
+            "action": self.action,
+            "entity_ids": list(self.entity_ids),
+            "target_names": dict(self.target_names),
+            "parameters": dict(self.parameters),
+            "run_at": self.run_at.isoformat(),
+            "created_at": self.created_at.isoformat(),
+            "zalo_context": dict(self.zalo_context),
+            "request_text": self.request_text,
+        }
+
+    @classmethod
+    def from_dict(cls, value: dict[str, Any]) -> "ScheduledDeviceAction":
+        """Restore and validate one stored scheduled action."""
+        action = str(value.get("action", "") or "").strip()
+        if action not in CONTROL_ACTIONS:
+            raise ValueError("unsupported scheduled action")
+        run_at = dt_util.parse_datetime(str(value.get("run_at", "") or ""))
+        created_at = dt_util.parse_datetime(
+            str(value.get("created_at", "") or "")
+        )
+        if run_at is None or created_at is None:
+            raise ValueError("invalid scheduled timestamps")
+        if run_at.tzinfo is None:
+            run_at = dt_util.as_local(run_at)
+        if created_at.tzinfo is None:
+            created_at = dt_util.as_local(created_at)
+        entity_ids = [
+            str(item).strip()
+            for item in value.get("entity_ids", [])
+            if str(item).strip()
+        ]
+        if not entity_ids:
+            raise ValueError("scheduled action has no target")
+        parameters = value.get("parameters", {})
+        target_names = value.get("target_names", {})
+        zalo_context = value.get("zalo_context", {})
+        if not isinstance(parameters, dict):
+            raise ValueError("invalid scheduled parameters")
+        if not isinstance(target_names, dict) or not isinstance(zalo_context, dict):
+            raise ValueError("invalid scheduled metadata")
+        return cls(
+            action_id=str(value.get("action_id", "") or uuid.uuid4().hex),
+            action=action,
+            entity_ids=entity_ids,
+            target_names={str(k): str(v) for k, v in target_names.items()},
+            parameters=dict(parameters),
+            run_at=run_at,
+            created_at=created_at,
+            zalo_context={str(k): str(v) for k, v in zalo_context.items()},
+            request_text=str(value.get("request_text", "") or ""),
+        )
 
 
 @dataclass(slots=True, frozen=True)
@@ -746,11 +857,18 @@ class ConversationalAssistantManager(NoteManagerMixin):
         self._pending: dict[str, PendingReminder] = {}
         self._pending_deletions: dict[str, PendingDeletion] = {}
         self._pending_voice_cameras: dict[str, PendingVoiceCamera] = {}
+        self._pending_voice_device_controls: dict[
+            str, PendingVoiceDeviceControl
+        ] = {}
         self._zalo_pending_creations: dict[str, PendingZaloReminder] = {}
         self._zalo_pending_deletions: dict[str, PendingZaloDeletion] = {}
         self._zalo_pending_cameras: dict[str, PendingZaloCamera] = {}
         self._zalo_pending_device_powers: dict[
             str, PendingZaloDevicePower
+        ] = {}
+        self._scheduled_device_actions: dict[str, ScheduledDeviceAction] = {}
+        self._scheduled_device_action_unsubs: dict[
+            str, Callable[[], None]
         ] = {}
         self._zalo_pending_calendar_events: dict[
             str, PendingZaloCalendarEvent
@@ -2029,6 +2147,15 @@ class ConversationalAssistantManager(NoteManagerMixin):
                 _LOGGER.warning("Skipping invalid learned command: %s", item)
                 continue
             self.learned_commands[command.command_id] = command
+        for item in stored.get("scheduled_device_actions", []):
+            try:
+                scheduled = ScheduledDeviceAction.from_dict(item)
+            except (KeyError, TypeError, ValueError):
+                _LOGGER.warning(
+                    "Skipping invalid scheduled device action: %s", item
+                )
+                continue
+            self._scheduled_device_actions[scheduled.action_id] = scheduled
 
         agent_manager = get_agent_manager(self.hass)
         self._unsubs.extend(
@@ -2070,6 +2197,10 @@ class ConversationalAssistantManager(NoteManagerMixin):
                 agent_manager.register_trigger(
                     HELP_SENTENCES, self._async_help_from_voice
                 ),
+                agent_manager.register_trigger(
+                    DEVICE_CONTROL_SENTENCES,
+                    self._async_device_control_from_voice,
+                ),
                 *self._register_note_triggers(agent_manager),
                 self.hass.bus.async_listen(
                     EVENT_NOTIFICATION_ACTION, self._async_notification_action
@@ -2090,8 +2221,9 @@ class ConversationalAssistantManager(NoteManagerMixin):
 
     @callback
     def _async_home_assistant_started(self, _hass: HomeAssistant) -> None:
-        """Start reminder and calendar scheduling after Home Assistant is ready."""
+        """Start reminder, device-action, and calendar scheduling."""
         self._schedule_next()
+        self._schedule_all_device_actions()
         self._start_calendar_monitoring()
 
     async def async_unload(self) -> None:
@@ -2133,10 +2265,20 @@ class ConversationalAssistantManager(NoteManagerMixin):
         self._pending.clear()
         self._pending_deletions.clear()
         self._pending_voice_cameras.clear()
+        self._pending_voice_device_controls.clear()
         self._zalo_pending_creations.clear()
         self._zalo_pending_deletions.clear()
         self._zalo_pending_cameras.clear()
         self._zalo_pending_device_powers.clear()
+        for unsub in self._scheduled_device_action_unsubs.values():
+            try:
+                unsub()
+            except Exception:  # noqa: BLE001 - best effort during unload
+                _LOGGER.debug(
+                    "Failed cancelling one scheduled device action",
+                    exc_info=True,
+                )
+        self._scheduled_device_action_unsubs.clear()
         self._zalo_pending_calendar_events.clear()
         self._zalo_pending_calendar_managements.clear()
         self._clear_discovery_caches()
@@ -2174,6 +2316,13 @@ class ConversationalAssistantManager(NoteManagerMixin):
                 for command in sorted(
                     self.learned_commands.values(),
                     key=lambda item: item.created_at,
+                )
+            ],
+            "scheduled_device_actions": [
+                item.as_dict()
+                for item in sorted(
+                    self._scheduled_device_actions.values(),
+                    key=lambda scheduled: (scheduled.run_at, scheduled.action_id),
                 )
             ],
         }
@@ -2991,15 +3140,26 @@ class ConversationalAssistantManager(NoteManagerMixin):
         return (
             "📘 **HƯỚNG DẪN SỬ DỤNG CONVERSATIONAL ASSISTANT**\n"
             "🇻🇳 Dùng tiếng Việt hoặc 🇬🇧 English trên Voice Assist và Zalo.\n\n"
-            "1️⃣ **🏠 NHÀ THÔNG MINH**\n"
-            "• Điều khiển bật/tắt/mở/đóng của integration chỉ chạy trong "
-            "Zalo; Voice Assist dùng trực tiếp tính năng sẵn có của Home "
-            "Assistant để tránh xung đột.\n"
-            "• Trên Zalo, lệnh thiết bị hợp lệ được thực hiện ngay. Chỉ lệnh "
-            "**mở cửa cuốn/cửa gara** mới yêu cầu **Đồng ý** hoặc **Hủy** "
-            "trong 120 giây.\n"
-            "• Ví dụ: `Bật đèn phòng khách`; `Tắtquạt phòng ngủ`; "
-            "`Mở cửa cuốn`; `Kiểm tra thiết bị đang bật ở tầng 2`.\n\n"
+            "1️⃣ **🏠 NHÀ THÔNG MINH: ZALO VÀ VOICE ASSIST**\n"
+            "• Home Assistant Assist tiếp tục xử lý trực tiếp các lệnh gốc như "
+            "bật/tắt, đặt nhiệt độ, đặt tốc độ quạt và lệnh trì hoãn cơ bản; "
+            "integration không giành xử lý các lệnh gốc này để tránh xung đột.\n"
+            "• Integration bổ sung trên Voice Assist và Zalo các thao tác chưa "
+            "được intent gốc bao phủ đầy đủ: tăng/giảm nhiệt độ, chuyển HVAC "
+            "mode, fan mode, preset, đảo gió dọc/ngang, độ ẩm; tốc độ, quay "
+            "đảo, hướng quay và preset của quạt.\n"
+            "• Hỗ trợ hẹn giờ bền vững cho mọi thao tác integration có thể "
+            "điều khiển, gồm mốc tương đối hoặc thời điểm cụ thể. Lịch vẫn được "
+            "khôi phục sau khi Home Assistant khởi động lại.\n"
+            "• Nếu thiếu tên quạt hoặc điều hòa, bot đọc/liệt kê thiết bị và chờ "
+            "chọn trong 120 giây. Nếu thao tác không được thiết bị hỗ trợ, bot "
+            "chỉ gợi ý các action và mode Home Assistant đang công bố.\n"
+            "• Lệnh hợp lệ được thực hiện ngay; chỉ **mở cửa cuốn/cửa gara** "
+            "mới yêu cầu **Đồng ý** hoặc **Hủy** trong 120 giây.\n"
+            "• Ví dụ: `Chuyển điều hòa phòng ngủ sang cool`; `Tăng nhiệt độ "
+            "điều hòa 2 độ`; `Bật đảo gió ngang`; `Tăng tốc độ quạt 20%`; "
+            "`Bật quay đảo quạt`; `Hẹn giờ tắt quạt sau 30 phút`; `Lên lịch "
+            "chuyển điều hòa sang dry lúc 22 giờ`.\n\n"
             "2️⃣ **🌦️ THỜI TIẾT BẰNG AI SEARCH**\n"
             "• AI Search tự hiểu đúng địa điểm và mốc thời gian, rồi tra cứu dự báo Internet mới nhất.\n"
             "• Ví dụ: `Thời tiết Hà Nội chiều mai`; `Will it rain in Bangkok this weekend?`.\n\n"
@@ -3026,8 +3186,13 @@ class ConversationalAssistantManager(NoteManagerMixin):
             "• Dùng AI Agent Search riêng để tìm và tổng hợp thông tin Việt/Anh.\n"
             "• Ví dụ: `Tìm thông tin giá vàng hôm nay`; `Search for the latest Home Assistant news`.\n\n"
             "🔟 **💬 TRÒ CHUYỆN HỎI ĐÁP TRÊN ZALO**\n"
-            "• Bắt đầu bằng `Trò chuyện đi`, `Tám đi` hoặc `Buôn đi`; mọi câu hỏi trong phiên dùng AI Search khi cần kiểm chứng.\n"
-            "• Sau 120 giây không phản hồi, integration hỏi lại; im lặng thêm 10 giây sẽ tự dừng trò chuyện.\n\n"
+            "• Bắt đầu bằng `Trò chuyện đi`, `Tám đi` hoặc `Buôn đi`, sau đó "
+            "hỏi đáp mọi chủ đề. AI Search được dùng khi cần kiểm chứng thông "
+            "tin; điều chưa chắc chắn sẽ được nói rõ thay vì tự bịa.\n"
+            "• Phản hồi thân thiện, trẻ trung, dùng thuật ngữ đúng lĩnh vực và "
+            "nhắc giữ cách nói văn minh khi gặp từ ngữ thô tục.\n"
+            "• Sau 120 giây không phản hồi, integration hỏi lại; im lặng thêm "
+            "10 giây sẽ tự dừng trò chuyện.\n\n"
             "1️⃣1️⃣ **🎨 TẠO ẢNH AI TRÊN ZALO**\n"
             "• Tạo ảnh từ mô tả và gửi lại đúng cuộc trò chuyện Zalo.\n"
             "• Ví dụ: `Tạo ảnh một chú mèo phi hành gia`; `Generate an image of a smart home`.\n\n"
@@ -3134,6 +3299,31 @@ class ConversationalAssistantManager(NoteManagerMixin):
             self._zalo_pending_device_powers.pop(owner_key, None)
             return None
         return pending
+
+    def _is_zalo_pending_device_power_followup(
+        self,
+        context: ZaloWebhookContext,
+        pending: PendingZaloDevicePower,
+        explicit_ha_kind: str | None,
+    ) -> bool:
+        """Keep relevant replies in a device flow without hijacking new commands."""
+        if self._is_cancel_pending_text(context.text):
+            return True
+        if pending.phase == "confirm_door":
+            return explicit_ha_kind is None
+        if pending.phase == "select_target":
+            selected = parse_device_target_selection(
+                context.text, pending.targets
+            )
+            return bool(selected) or explicit_ha_kind is None
+        if explicit_ha_kind not in {None, "conversation"}:
+            return False
+
+        named = exact_named_targets(context.text, self._device_power_targets())
+        if not named:
+            return True
+        pending_ids = {target.entity_id for target in pending.targets}
+        return all(target.entity_id in pending_ids for target in named)
 
     def _zalo_pending_calendar_event(
         self, owner_key: str
@@ -5849,8 +6039,36 @@ class ConversationalAssistantManager(NoteManagerMixin):
             )
         return ZaloDirectResponse(sent=True, response_type="generated_image")
 
+    @staticmethod
+    def _safe_float(value: Any) -> float | None:
+        """Return one finite float or None."""
+        try:
+            result = float(value)
+        except (TypeError, ValueError):
+            return None
+        return result if isfinite(result) else None
+
+    @staticmethod
+    def _attribute_options(value: Any) -> tuple[str, ...]:
+        """Return clean string options from a state attribute."""
+        if not isinstance(value, (list, tuple, set)):
+            return ()
+        return tuple(
+            text
+            for item in value
+            if (text := str(item or "").strip())
+        )
+
+    @staticmethod
+    def _has_feature(supported_features: int, feature: Any) -> bool:
+        """Check one IntFlag defensively across Home Assistant releases."""
+        try:
+            return bool(supported_features & int(feature))
+        except (TypeError, ValueError):
+            return False
+
     def _device_power_targets(self) -> list[DevicePowerTarget]:
-        """Return exposed entities with live Zalo device-control services."""
+        """Return exposed entities with live, entity-specific capabilities."""
         entity_registry = er.async_get(self.hass)
         device_registry = dr.async_get(self.hass)
         area_registry = ar.async_get(self.hass)
@@ -5863,12 +6081,33 @@ class ConversationalAssistantManager(NoteManagerMixin):
             if state.state == STATE_UNAVAILABLE:
                 continue
 
-            supports_turn_on = domain != "cover" and (
-                self.hass.services.has_service(domain, "turn_on")
+            try:
+                supported_features = int(
+                    state.attributes.get(ATTR_SUPPORTED_FEATURES, 0) or 0
+                )
+            except (TypeError, ValueError):
+                supported_features = 0
+
+            supports_turn_on = domain != "cover" and self.hass.services.has_service(
+                domain, "turn_on"
             )
-            supports_turn_off = domain != "cover" and (
-                self.hass.services.has_service(domain, "turn_off")
+            supports_turn_off = domain != "cover" and self.hass.services.has_service(
+                domain, "turn_off"
             )
+            if domain in {"climate", "fan"}:
+                feature_enum = (
+                    ClimateEntityFeature if domain == "climate" else FanEntityFeature
+                )
+                turn_on_feature = getattr(feature_enum, "TURN_ON", 0)
+                turn_off_feature = getattr(feature_enum, "TURN_OFF", 0)
+                if turn_on_feature:
+                    supports_turn_on = supports_turn_on and self._has_feature(
+                        supported_features, turn_on_feature
+                    )
+                if turn_off_feature:
+                    supports_turn_off = supports_turn_off and self._has_feature(
+                        supported_features, turn_off_feature
+                    )
             supports_open_cover = (
                 domain == "cover"
                 and self.hass.services.has_service("cover", "open_cover")
@@ -5877,12 +6116,124 @@ class ConversationalAssistantManager(NoteManagerMixin):
                 domain == "cover"
                 and self.hass.services.has_service("cover", "close_cover")
             )
+
+            advanced_actions: set[str] = set()
+            hvac_modes: tuple[str, ...] = ()
+            fan_modes: tuple[str, ...] = ()
+            swing_modes: tuple[str, ...] = ()
+            swing_horizontal_modes: tuple[str, ...] = ()
+            preset_modes: tuple[str, ...] = ()
+
+            if domain == "climate":
+                hvac_modes = self._attribute_options(
+                    state.attributes.get("hvac_modes")
+                )
+                fan_modes = self._attribute_options(
+                    state.attributes.get("fan_modes")
+                )
+                swing_modes = self._attribute_options(
+                    state.attributes.get("swing_modes")
+                )
+                swing_horizontal_modes = self._attribute_options(
+                    state.attributes.get("swing_horizontal_modes")
+                )
+                preset_modes = self._attribute_options(
+                    state.attributes.get("preset_modes")
+                )
+                if hvac_modes and self.hass.services.has_service(
+                    "climate", "set_hvac_mode"
+                ):
+                    advanced_actions.add("climate_set_hvac_mode")
+                if self._has_feature(
+                    supported_features, ClimateEntityFeature.TARGET_TEMPERATURE
+                ) and self.hass.services.has_service("climate", "set_temperature"):
+                    advanced_actions.update(
+                        {
+                            "climate_set_temperature",
+                            "climate_increase_temperature",
+                            "climate_decrease_temperature",
+                        }
+                    )
+                temperature_range_feature = getattr(
+                    ClimateEntityFeature, "TARGET_TEMPERATURE_RANGE", 0
+                )
+                if self._has_feature(
+                    supported_features, temperature_range_feature
+                ) and self.hass.services.has_service("climate", "set_temperature"):
+                    advanced_actions.add("climate_set_temperature_range")
+                if self._has_feature(
+                    supported_features, ClimateEntityFeature.TARGET_HUMIDITY
+                ) and self.hass.services.has_service("climate", "set_humidity"):
+                    advanced_actions.add("climate_set_humidity")
+                if self._has_feature(
+                    supported_features, ClimateEntityFeature.FAN_MODE
+                ) and fan_modes and self.hass.services.has_service(
+                    "climate", "set_fan_mode"
+                ):
+                    advanced_actions.update(
+                        {
+                            "climate_set_fan_mode",
+                            "climate_increase_fan_mode",
+                            "climate_decrease_fan_mode",
+                        }
+                    )
+                if self._has_feature(
+                    supported_features, ClimateEntityFeature.PRESET_MODE
+                ) and preset_modes and self.hass.services.has_service(
+                    "climate", "set_preset_mode"
+                ):
+                    advanced_actions.add("climate_set_preset_mode")
+                if self._has_feature(
+                    supported_features, ClimateEntityFeature.SWING_MODE
+                ) and swing_modes and self.hass.services.has_service(
+                    "climate", "set_swing_mode"
+                ):
+                    advanced_actions.add("climate_set_swing_mode")
+                horizontal_feature = getattr(
+                    ClimateEntityFeature, "SWING_HORIZONTAL_MODE", 0
+                )
+                if self._has_feature(
+                    supported_features, horizontal_feature
+                ) and swing_horizontal_modes and self.hass.services.has_service(
+                    "climate", "set_swing_horizontal_mode"
+                ):
+                    advanced_actions.add("climate_set_swing_horizontal_mode")
+
+            elif domain == "fan":
+                preset_modes = self._attribute_options(
+                    state.attributes.get("preset_modes")
+                )
+                if self._has_feature(
+                    supported_features, FanEntityFeature.SET_SPEED
+                ):
+                    if self.hass.services.has_service("fan", "set_percentage"):
+                        advanced_actions.add("fan_set_percentage")
+                    if self.hass.services.has_service("fan", "increase_speed"):
+                        advanced_actions.add("fan_increase_speed")
+                    if self.hass.services.has_service("fan", "decrease_speed"):
+                        advanced_actions.add("fan_decrease_speed")
+                if self._has_feature(
+                    supported_features, FanEntityFeature.OSCILLATE
+                ) and self.hass.services.has_service("fan", "oscillate"):
+                    advanced_actions.add("fan_oscillate")
+                if self._has_feature(
+                    supported_features, FanEntityFeature.DIRECTION
+                ) and self.hass.services.has_service("fan", "set_direction"):
+                    advanced_actions.add("fan_set_direction")
+                if self._has_feature(
+                    supported_features, FanEntityFeature.PRESET_MODE
+                ) and preset_modes and self.hass.services.has_service(
+                    "fan", "set_preset_mode"
+                ):
+                    advanced_actions.add("fan_set_preset_mode")
+
             if not any(
                 (
                     supports_turn_on,
                     supports_turn_off,
                     supports_open_cover,
                     supports_close_cover,
+                    advanced_actions,
                 )
             ):
                 continue
@@ -5929,9 +6280,6 @@ class ConversationalAssistantManager(NoteManagerMixin):
                         registry_entry, "aliases", ()
                     ) or ()
                 for alias in registry_aliases:
-                    # Newer Home Assistant releases may store a computed-name
-                    # sentinel in RegistryEntry.aliases. Only resolved strings
-                    # are safe to send to an AI parser.
                     if not isinstance(alias, str):
                         continue
                     alias_text = alias.strip()
@@ -5962,6 +6310,81 @@ class ConversationalAssistantManager(NoteManagerMixin):
                     supports_close_cover=supports_close_cover,
                     area_name=area_name,
                     device_class=device_class,
+                    supported_actions=tuple(sorted(advanced_actions)),
+                    hvac_modes=hvac_modes,
+                    fan_modes=fan_modes,
+                    swing_modes=swing_modes,
+                    swing_horizontal_modes=swing_horizontal_modes,
+                    preset_modes=preset_modes,
+                    min_temp=self._safe_float(state.attributes.get("min_temp")),
+                    max_temp=self._safe_float(state.attributes.get("max_temp")),
+                    target_temp_step=self._safe_float(
+                        state.attributes.get("target_temp_step")
+                    ),
+                    target_temperature=self._safe_float(
+                        state.attributes.get("temperature")
+                    ),
+                    temperature_unit=str(
+                        state.attributes.get("temperature_unit")
+                        or getattr(
+                            getattr(self.hass.config, "units", None),
+                            "temperature_unit",
+                            "°C",
+                        )
+                        or "°C"
+                    ).strip(),
+                    target_temp_low=self._safe_float(
+                        state.attributes.get("target_temp_low")
+                    ),
+                    target_temp_high=self._safe_float(
+                        state.attributes.get("target_temp_high")
+                    ),
+                    current_temperature=self._safe_float(
+                        state.attributes.get("current_temperature")
+                    ),
+                    min_humidity=self._safe_float(
+                        state.attributes.get("min_humidity")
+                    ),
+                    max_humidity=self._safe_float(
+                        state.attributes.get("max_humidity")
+                    ),
+                    target_humidity_step=self._safe_float(
+                        state.attributes.get("target_humidity_step")
+                    ),
+                    target_humidity=self._safe_float(
+                        state.attributes.get("humidity")
+                    ),
+                    percentage=(
+                        int(float(state.attributes.get("percentage")))
+                        if self._safe_float(
+                            state.attributes.get("percentage")
+                        ) is not None
+                        else None
+                    ),
+                    percentage_step=self._safe_float(
+                        state.attributes.get("percentage_step")
+                    ),
+                    current_hvac_mode=str(state.state or "").strip(),
+                    current_fan_mode=str(
+                        state.attributes.get("fan_mode", "") or ""
+                    ).strip(),
+                    current_swing_mode=str(
+                        state.attributes.get("swing_mode", "") or ""
+                    ).strip(),
+                    current_swing_horizontal_mode=str(
+                        state.attributes.get("swing_horizontal_mode", "") or ""
+                    ).strip(),
+                    current_preset_mode=str(
+                        state.attributes.get("preset_mode", "") or ""
+                    ).strip(),
+                    current_direction=str(
+                        state.attributes.get("direction", "") or ""
+                    ).strip(),
+                    current_oscillating=(
+                        bool(state.attributes.get("oscillating"))
+                        if "oscillating" in state.attributes
+                        else None
+                    ),
                 )
             )
 
@@ -5973,71 +6396,17 @@ class ConversationalAssistantManager(NoteManagerMixin):
             ),
         )
 
-    async def _async_native_home_assistant_converse(
-        self,
-        text: str,
-        *,
-        context: Context,
-        language: str,
-        conversation_id: str | None = None,
-        device_id: str | None = None,
-        satellite_id: str | None = None,
-    ) -> tuple[Any | None, str | None]:
-        """Run Home Assistant's built-in intents for a Zalo device command.
-
-        Calling the default agent's native intent handler directly avoids
-        sending the command back through this integration's sentence triggers.
-        """
-        agent_manager = get_agent_manager(self.hass)
-        default_agent = getattr(agent_manager, "default_agent", None)
-        native_handler = getattr(default_agent, "async_handle_intents", None)
-        if default_agent is None or not callable(native_handler):
-            _LOGGER.error(
-                "Home Assistant default agent does not expose native intent handling"
+    @staticmethod
+    def _device_timer_wording(text: str) -> bool:
+        """Return whether a request clearly includes a future execution time."""
+        normalized = normalize_text(text)
+        return bool(
+            re.search(
+                r"(?:\bhen\s*(?:gio|giơ)\b|\btimer\b|\bschedule\b|"
+                r"\bsau\s+\d|\btrong\s+\d|\d+\s*(?:giay|phut|gio|ngay)\s+nua|"
+                r"\b(?:luc|vao)\s+\d{1,2}(?::\d{2}|\s*gio))",
+                normalized,
             )
-            return None, "error"
-
-        native_conversation_id = (
-            conversation_id or f"native-device-{uuid.uuid4().hex}"
-        )
-        native_input = ConversationInput(
-            text=text,
-            context=context,
-            conversation_id=conversation_id,
-            device_id=device_id,
-            satellite_id=satellite_id,
-            language=language,
-            agent_id=HOME_ASSISTANT_AGENT,
-        )
-        chat_log = ChatLog(self.hass, native_conversation_id)
-
-        try:
-            async with asyncio.timeout(10):
-                response = await native_handler(native_input, chat_log)
-        except TimeoutError:
-            _LOGGER.warning(
-                "Home Assistant native intent handling timed out for %s", text
-            )
-            return None, "timeout"
-        except Exception:  # noqa: BLE001 - return a safe local-agent error
-            _LOGGER.exception(
-                "Home Assistant native intent handling failed for %s", text
-            )
-            return None, "error"
-
-        if response is None:
-            response = intent.IntentResponse(language=language)
-            response.async_set_error(
-                intent.IntentResponseErrorCode.NO_INTENT_MATCH,
-                "",
-            )
-
-        return (
-            ConversationResult(
-                response=response,
-                conversation_id=conversation_id,
-            ),
-            None,
         )
 
     async def _async_ai_device_power_interpretation(
@@ -6047,8 +6416,8 @@ class ConversationalAssistantManager(NoteManagerMixin):
         *,
         service_context: Context | None,
         language: str,
-    ) -> tuple[DevicePowerInterpretation | None, list[str]]:
-        """Use AI only to recover a malformed action and exact entity IDs."""
+    ) -> tuple[DeviceControlInterpretation | None, list[str]]:
+        """Use AI only as a strict device parser; never execute via AI."""
         candidates = [
             candidate
             for candidate in self._conversation_agent_candidates(
@@ -6059,6 +6428,7 @@ class ConversationalAssistantManager(NoteManagerMixin):
         if not candidates or not targets:
             return None, []
 
+        now = dt_util.now()
         ranked_targets = rank_power_targets(text, targets)
         inventory = [
             {
@@ -6067,34 +6437,71 @@ class ConversationalAssistantManager(NoteManagerMixin):
                 "domain": target.domain,
                 "aliases": list(target.aliases),
                 "area": target.area_name,
-                "turn_on": target.supports_turn_on,
-                "turn_off": target.supports_turn_off,
-                "open_cover": target.supports("open_cover"),
-                "close_cover": target.supports("close_cover"),
+                "actions": [
+                    action
+                    for action in CONTROL_ACTIONS
+                    if target.supports(action)
+                ],
+                "hvac_modes": list(target.hvac_modes),
+                "fan_modes": list(target.fan_modes),
+                "swing_modes": list(target.swing_modes),
+                "swing_horizontal_modes": list(
+                    target.swing_horizontal_modes
+                ),
+                "preset_modes": list(target.preset_modes),
+                "temperature_range": [target.min_temp, target.max_temp],
+                "temperature_unit": target.temperature_unit,
+                "humidity_range": [target.min_humidity, target.max_humidity],
+                "current": {
+                    "temperature": target.target_temperature,
+                    "target_temp_low": target.target_temp_low,
+                    "target_temp_high": target.target_temp_high,
+                    "hvac_mode": target.current_hvac_mode,
+                    "fan_mode": target.current_fan_mode,
+                    "percentage": target.percentage,
+                    "swing_mode": target.current_swing_mode,
+                    "swing_horizontal_mode": (
+                        target.current_swing_horizontal_mode
+                    ),
+                    "preset_mode": target.current_preset_mode,
+                    "direction": target.current_direction,
+                    "oscillating": target.current_oscillating,
+                },
                 "device_class": target.device_class,
             }
             for target in ranked_targets
         ]
+        action_names = sorted(CONTROL_ACTIONS)
         prompt = (
-            "You are a strict Home Assistant device-command parser. Do not "
-            "execute any tool or action. The user text may contain spelling "
-            "errors, repeated letters, missing spaces, or joined Vietnamese "
-            "words. Choose only exact entity_id values from the inventory. "
-            "Return exactly one JSON object and no explanation with fields: "
-            "action ('turn_on', 'turn_off', 'open_cover', or 'close_cover'), "
-            "entity_ids (array), and confidence (0 to 1). If the action or "
-            "target is ambiguous, return entity_ids=[]. Confirmation policy "
-            "is decided only by the integration. "
-            "Never invent an entity_id. Select multiple entities only when the "
-            "request clearly refers to all matching devices in a room, area, "
-            "category, or plural group.\n\n"
+            "You are a strict parser for Home Assistant device commands "
+            "received from Zalo or Voice Assist. Do not call tools, services, "
+            "or intents. Return exactly "
+            "one JSON object and no prose. Never invent an entity_id, action, "
+            "mode, preset, or schedule. If the user mentions only a generic "
+            "fan or air-conditioner category without an exact entity name, "
+            "leave entity_ids empty and set target_domain to 'fan' or "
+            "'climate'. If an action or required value is missing, use an empty "
+            "action or omit that parameter rather than guessing. Select more "
+            "than one entity only for an explicit all/plural request. Convert "
+            "relative times using the reference time and timezone below. "
+            "schedule_at must be a future ISO-8601 datetime or null. "
+            "parameters may contain only temperature, target_temp_low, "
+            "target_temp_high, amount, hvac_mode, "
+            "fan_mode, swing_mode, swing_horizontal_mode, preset_mode, "
+            "humidity, percentage, percentage_step, oscillating, direction. "
+            "For modes and presets, copy the exact option string from the "
+            "selected entity inventory. Keep temperature numbers exactly as "
+            "the user stated; the integration validates and converts an "
+            "explicit Celsius/Fahrenheit unit. JSON fields: action, entity_ids, "
+            "target_domain, parameters, schedule_at, confidence. Allowed "
+            f"actions: {action_names}.\n"
+            f"Reference local time: {now.isoformat()}\n"
             f"User text: {text!r}\n"
             "Entity inventory:\n"
             + json.dumps(inventory, ensure_ascii=False, separators=(",", ":"))
         )
 
         attempted_agents: list[str] = []
-        explicit_action = explicit_power_action(text)
         for agent_id, agent_name in candidates:
             attempted_agents.append(agent_name)
             try:
@@ -6122,36 +6529,125 @@ class ConversationalAssistantManager(NoteManagerMixin):
             if payload is None:
                 continue
             interpretation = interpretation_from_payload(
-                payload, ranked_targets
+                payload, ranked_targets, now=now
             )
             if interpretation is None:
-                continue
-            if explicit_action and interpretation.action != explicit_action:
-                _LOGGER.warning(
-                    "Rejected AI device parse because action changed from %s to %s",
-                    explicit_action,
-                    interpretation.action,
-                )
                 continue
             return interpretation, attempted_agents
         return None, attempted_agents
 
     @staticmethod
     def _device_power_action_label(action: str, language: str) -> str:
-        """Return a readable device action label."""
-        if language == "en":
-            return {
-                "turn_on": "Turn on",
-                "turn_off": "Turn off",
-                "open_cover": "Open",
-                "close_cover": "Close",
-            }.get(action, action)
-        return {
-            "turn_on": "Bật",
-            "turn_off": "Tắt",
-            "open_cover": "Mở",
-            "close_cover": "Đóng",
-        }.get(action, action)
+        """Return a readable label for every supported device action."""
+        labels_en = {
+            "turn_on": "turn on",
+            "turn_off": "turn off",
+            "open_cover": "open",
+            "close_cover": "close",
+            "climate_set_temperature": "set temperature",
+            "climate_set_temperature_range": "set temperature range",
+            "climate_increase_temperature": "increase temperature",
+            "climate_decrease_temperature": "decrease temperature",
+            "climate_set_hvac_mode": "set HVAC mode",
+            "climate_set_fan_mode": "set air-conditioner fan mode",
+            "climate_increase_fan_mode": "increase air-conditioner fan speed",
+            "climate_decrease_fan_mode": "decrease air-conditioner fan speed",
+            "climate_set_swing_mode": "set vertical swing mode",
+            "climate_set_swing_horizontal_mode": "set horizontal swing mode",
+            "climate_set_preset_mode": "set climate preset",
+            "climate_set_humidity": "set target humidity",
+            "fan_set_percentage": "set fan speed",
+            "fan_increase_speed": "increase fan speed",
+            "fan_decrease_speed": "decrease fan speed",
+            "fan_oscillate": "set fan oscillation",
+            "fan_set_direction": "set fan direction",
+            "fan_set_preset_mode": "set fan preset",
+        }
+        labels_vi = {
+            "turn_on": "bật",
+            "turn_off": "tắt",
+            "open_cover": "mở",
+            "close_cover": "đóng",
+            "climate_set_temperature": "đặt nhiệt độ",
+            "climate_set_temperature_range": "đặt khoảng nhiệt độ",
+            "climate_increase_temperature": "tăng nhiệt độ",
+            "climate_decrease_temperature": "giảm nhiệt độ",
+            "climate_set_hvac_mode": "chuyển chế độ điều hòa",
+            "climate_set_fan_mode": "đặt tốc độ gió điều hòa",
+            "climate_increase_fan_mode": "tăng tốc độ gió điều hòa",
+            "climate_decrease_fan_mode": "giảm tốc độ gió điều hòa",
+            "climate_set_swing_mode": "chuyển đảo gió dọc",
+            "climate_set_swing_horizontal_mode": "chuyển đảo gió ngang",
+            "climate_set_preset_mode": "chuyển chế độ đặt trước điều hòa",
+            "climate_set_humidity": "đặt độ ẩm mục tiêu",
+            "fan_set_percentage": "đặt tốc độ quạt",
+            "fan_increase_speed": "tăng tốc độ quạt",
+            "fan_decrease_speed": "giảm tốc độ quạt",
+            "fan_oscillate": "bật/tắt quay đảo của quạt",
+            "fan_set_direction": "đổi hướng quay của quạt",
+            "fan_set_preset_mode": "chuyển chế độ quạt",
+        }
+        labels = labels_en if language == "en" else labels_vi
+        return labels.get(action, action)
+
+    @staticmethod
+    def _format_control_value(value: Any) -> str:
+        """Format one numeric or textual service value."""
+        if isinstance(value, float) and value.is_integer():
+            return str(int(value))
+        return str(value)
+
+    def _device_control_action_summary(
+        self,
+        action: str,
+        parameters: dict[str, Any],
+        *,
+        language: str,
+    ) -> str:
+        """Return a concise action summary including its requested value."""
+        label = self._device_power_action_label(action, language)
+        key_units = {
+            "temperature": "°",
+            "amount": "°",
+            "humidity": "%",
+            "percentage": "%",
+            "percentage_step": "%",
+        }
+        if action == "climate_set_temperature_range":
+            low = parameters.get("target_temp_low")
+            high = parameters.get("target_temp_high")
+            if low is not None and high is not None:
+                return (
+                    f"{label} {self._format_control_value(low)}–"
+                    f"{self._format_control_value(high)}°"
+                )
+        preferred_keys = (
+            "temperature",
+            "amount",
+            "hvac_mode",
+            "fan_mode",
+            "swing_mode",
+            "swing_horizontal_mode",
+            "preset_mode",
+            "humidity",
+            "percentage",
+            "percentage_step",
+            "oscillating",
+            "direction",
+        )
+        for key in preferred_keys:
+            if key not in parameters or parameters[key] is None:
+                continue
+            value = parameters[key]
+            if key == "oscillating":
+                value = (
+                    ("on" if value else "off")
+                    if language == "en"
+                    else ("bật" if value else "tắt")
+                )
+            suffix = key_units.get(key, "")
+            return f"{label} {self._format_control_value(value)}{suffix}".strip()
+        return label
 
     def _device_power_confirmation_text(
         self,
@@ -6160,30 +6656,41 @@ class ConversationalAssistantManager(NoteManagerMixin):
         *,
         language: str,
         invalid: bool = False,
+        parameters: dict[str, Any] | None = None,
+        scheduled_for: datetime | None = None,
     ) -> str:
-        """Build the Zalo-only rolling-door opening confirmation prompt."""
-        action_label = self._device_power_action_label(action, language)
+        """Build the only mandatory confirmation: opening a rolling door."""
+        summary = self._device_control_action_summary(
+            action, parameters or {}, language=language
+        )
         names = ", ".join(target.display_name for target in targets)
+        schedule_line = ""
+        if scheduled_for is not None:
+            local_time = dt_util.as_local(scheduled_for)
+            schedule_line = (
+                f"\n**Scheduled:** {local_time:%H:%M %d/%m/%Y}"
+                if language == "en"
+                else f"\n**Hẹn lúc:** {local_time:%H:%M ngày %d/%m/%Y}"
+            )
         if language == "en":
             prefix = "I still need a clear confirmation.\n" if invalid else ""
             return (
-                f"⚠️ **Rolling-door opening confirmation required**\n\n"
-                f"{prefix}"
-                f"**Action:** {action_label}\n"
-                f"**Device:** {names}\n\n"
-                "Reply **Agree** to execute or **Cancel** to stop."
+                "⚠️ **Rolling-door opening confirmation required**\n\n"
+                f"{prefix}**Action:** {summary}\n"
+                f"**Device:** {names}{schedule_line}\n\n"
+                "Reply **Agree** to continue or **Cancel** to stop."
             )
         prefix = "Tôi vẫn cần bạn xác nhận rõ.\n" if invalid else ""
         return (
-            f"⚠️ **Cần xác nhận mở cửa cuốn**\n\n{prefix}"
-            f"**Thao tác:** {action_label}\n"
-            f"**Thiết bị:** {names}\n\n"
-            "Trả lời **Đồng ý** để thực hiện hoặc **Hủy** để dừng."
+            "⚠️ **Cần xác nhận mở cửa cuốn**\n\n"
+            f"{prefix}**Thao tác:** {summary}\n"
+            f"**Thiết bị:** {names}{schedule_line}\n\n"
+            "Trả lời **Đồng ý** để tiếp tục hoặc **Hủy** để dừng."
         )
 
     @staticmethod
     def _is_device_power_confirmation(text: str) -> bool:
-        """Return whether a reply clearly approves a pending power action."""
+        """Return whether a reply clearly approves a pending door action."""
         return normalize_text(text) in {
             "agree",
             "approved",
@@ -6206,6 +6713,783 @@ class ConversationalAssistantManager(NoteManagerMixin):
             "thuc hien",
         }
 
+    @staticmethod
+    def _numeric_parameter(
+        parameters: dict[str, Any], key: str
+    ) -> float | None:
+        """Return a finite numeric request parameter."""
+        try:
+            value = float(parameters.get(key))
+        except (TypeError, ValueError):
+            return None
+        return value if isfinite(value) else None
+
+    @staticmethod
+    def _requested_temperature_unit(text: str) -> str:
+        """Return an explicit Celsius/Fahrenheit unit, if the user gave one."""
+        raw = str(text or "").casefold()
+        normalized = normalize_text(text)
+        if re.search(r"°\s*f\b", raw) or re.search(
+            r"\b(?:do f|fahrenheit)\b", normalized
+        ):
+            return "°F"
+        if re.search(r"°\s*c\b", raw) or re.search(
+            r"\b(?:do c|celsius)\b", normalized
+        ):
+            return "°C"
+        return ""
+
+    @staticmethod
+    def _canonical_temperature_unit(value: str) -> str:
+        """Normalize Home Assistant temperature-unit labels."""
+        normalized = normalize_text(value)
+        if normalized in {"f", "fahrenheit"}:
+            return "°F"
+        return "°C" if normalized in {"c", "celsius"} else str(value or "°C")
+
+    def _temperature_for_target(
+        self,
+        value: float,
+        text: str,
+        target: DevicePowerTarget,
+        *,
+        delta: bool = False,
+    ) -> float:
+        """Convert an explicitly stated unit into the entity's HA unit."""
+        source = self._requested_temperature_unit(text)
+        destination = self._canonical_temperature_unit(target.temperature_unit)
+        if not source or source == destination:
+            return value
+        if source == "°C" and destination == "°F":
+            return value * 9 / 5 if delta else value * 9 / 5 + 32
+        if source == "°F" and destination == "°C":
+            return value * 5 / 9 if delta else (value - 32) * 5 / 9
+        return value
+
+    def _resolve_control_option(
+        self,
+        requested: Any,
+        text: str,
+        options: tuple[str, ...],
+        *,
+        allow_on_fallback: bool = False,
+    ) -> str | None:
+        """Resolve one user value to an exact entity option."""
+        requested_text = str(requested or "").strip()
+        if requested_text:
+            for option in options:
+                if option.casefold() == requested_text.casefold():
+                    return option
+            matched = match_supported_option(requested_text, options)
+            if matched is not None:
+                return matched
+        matched = match_supported_option(text, options)
+        if matched is not None:
+            return matched
+        if allow_on_fallback and normalize_text(requested_text or text) in {
+            "on",
+            "bat",
+            "dao",
+            "swing",
+        }:
+            for preferred in ("on", "both", "vertical", "horizontal"):
+                for option in options:
+                    if normalize_text(option) == preferred:
+                        return option
+            return next(
+                (option for option in options if normalize_text(option) != "off"),
+                None,
+            )
+        return None
+
+    def _build_device_service_call(
+        self,
+        target: DevicePowerTarget,
+        action: str,
+        parameters: dict[str, Any],
+        text: str,
+        *,
+        language: str,
+    ) -> tuple[str, str, dict[str, Any], str] | str:
+        """Validate and map one action to an official Home Assistant service."""
+        if not target.supports(action):
+            return (
+                "does not support this action"
+                if language == "en"
+                else "không hỗ trợ thao tác này"
+            )
+
+        data: dict[str, Any] = {"entity_id": target.entity_id}
+        detail = self._device_power_action_label(action, language)
+
+        if action in POWER_CONTROL_ACTIONS:
+            service_action = action
+            if (
+                action == "turn_on"
+                and is_rolling_door_target(target)
+                and target.supports_open_cover
+            ):
+                service_action = "open_cover"
+            elif (
+                action == "turn_off"
+                and is_rolling_door_target(target)
+                and target.supports_close_cover
+            ):
+                service_action = "close_cover"
+            elif action == "open_cover" and not target.supports_open_cover:
+                service_action = "turn_on"
+            elif action == "close_cover" and not target.supports_close_cover:
+                service_action = "turn_off"
+            service_domain = (
+                target.domain
+                if self.hass.services.has_service(target.domain, service_action)
+                else "homeassistant"
+            )
+            if not self.hass.services.has_service(service_domain, service_action):
+                return (
+                    "service is not available"
+                    if language == "en"
+                    else "action Home Assistant tương ứng không khả dụng"
+                )
+            return service_domain, service_action, data, detail
+
+        if action in CLIMATE_CONTROL_ACTIONS and target.domain != "climate":
+            return "not a climate entity" if language == "en" else "không phải điều hòa"
+        if action in FAN_CONTROL_ACTIONS and target.domain != "fan":
+            return "not a fan entity" if language == "en" else "không phải quạt"
+
+        if action == "climate_set_temperature":
+            value = self._numeric_parameter(parameters, "temperature")
+            if value is None:
+                return (
+                    "a target temperature is required"
+                    if language == "en"
+                    else "cần nêu nhiệt độ mục tiêu"
+                )
+            value = self._temperature_for_target(value, text, target)
+            unit = self._canonical_temperature_unit(target.temperature_unit)
+            if target.min_temp is not None and value < target.min_temp:
+                return (
+                    f"minimum temperature is {target.min_temp:g} {unit}"
+                    if language == "en"
+                    else f"nhiệt độ thấp nhất là {target.min_temp:g} {unit}"
+                )
+            if target.max_temp is not None and value > target.max_temp:
+                return (
+                    f"maximum temperature is {target.max_temp:g} {unit}"
+                    if language == "en"
+                    else f"nhiệt độ cao nhất là {target.max_temp:g} {unit}"
+                )
+            data["temperature"] = value
+            detail = (
+                f"set temperature to {value:g} {unit}"
+                if language == "en"
+                else f"đặt nhiệt độ {value:g} {unit}"
+            )
+            return "climate", "set_temperature", data, detail
+
+        if action == "climate_set_temperature_range":
+            low = self._numeric_parameter(parameters, "target_temp_low")
+            high = self._numeric_parameter(parameters, "target_temp_high")
+            if low is None or high is None or low >= high:
+                return (
+                    "both lower and upper temperatures are required"
+                    if language == "en"
+                    else "cần nêu đủ nhiệt độ thấp và cao, với mức thấp nhỏ hơn mức cao"
+                )
+            low = self._temperature_for_target(low, text, target)
+            high = self._temperature_for_target(high, text, target)
+            unit = self._canonical_temperature_unit(target.temperature_unit)
+            if low >= high:
+                return (
+                    "the converted lower temperature must remain below the upper temperature"
+                    if language == "en"
+                    else "sau khi đổi đơn vị, nhiệt độ thấp phải nhỏ hơn nhiệt độ cao"
+                )
+            if target.min_temp is not None and low < target.min_temp:
+                return (
+                    f"minimum temperature is {target.min_temp:g} {unit}"
+                    if language == "en"
+                    else f"nhiệt độ thấp nhất là {target.min_temp:g} {unit}"
+                )
+            if target.max_temp is not None and high > target.max_temp:
+                return (
+                    f"maximum temperature is {target.max_temp:g} {unit}"
+                    if language == "en"
+                    else f"nhiệt độ cao nhất là {target.max_temp:g} {unit}"
+                )
+            data["target_temp_low"] = low
+            data["target_temp_high"] = high
+            detail = (
+                f"set temperature range to {low:g}–{high:g} {unit}"
+                if language == "en"
+                else f"đặt khoảng nhiệt độ {low:g}–{high:g} {unit}"
+            )
+            return "climate", "set_temperature", data, detail
+
+        if action in {
+            "climate_increase_temperature",
+            "climate_decrease_temperature",
+        }:
+            current = target.target_temperature
+            if current is None:
+                return (
+                    "current target temperature is unavailable"
+                    if language == "en"
+                    else "không đọc được nhiệt độ mục tiêu hiện tại"
+                )
+            amount = self._numeric_parameter(parameters, "amount")
+            if amount is None or amount <= 0:
+                amount = target.target_temp_step or 1.0
+            else:
+                amount = self._temperature_for_target(
+                    amount, text, target, delta=True
+                )
+            unit = self._canonical_temperature_unit(target.temperature_unit)
+            value = current + (
+                amount if action == "climate_increase_temperature" else -amount
+            )
+            if target.min_temp is not None:
+                value = max(value, target.min_temp)
+            if target.max_temp is not None:
+                value = min(value, target.max_temp)
+            if abs(value - current) < 0.001:
+                return (
+                    "temperature is already at the supported limit"
+                    if language == "en"
+                    else "nhiệt độ đã ở giới hạn thiết bị hỗ trợ"
+                )
+            data["temperature"] = value
+            detail = (
+                f"set temperature to {value:g} {unit}"
+                if language == "en"
+                else f"đặt nhiệt độ thành {value:g} {unit}"
+            )
+            return "climate", "set_temperature", data, detail
+
+        if action == "climate_set_hvac_mode":
+            option = self._resolve_control_option(
+                parameters.get("hvac_mode"), text, target.hvac_modes
+            )
+            if option is None:
+                return (
+                    "a supported HVAC mode is required"
+                    if language == "en"
+                    else "cần nêu đúng chế độ điều hòa được hỗ trợ"
+                )
+            data["hvac_mode"] = option
+            detail = (
+                f"set HVAC mode to {option}"
+                if language == "en"
+                else f"chuyển chế độ điều hòa sang {option}"
+            )
+            return "climate", "set_hvac_mode", data, detail
+
+        if action == "climate_set_fan_mode":
+            option = self._resolve_control_option(
+                parameters.get("fan_mode"), text, target.fan_modes
+            )
+            if option is None:
+                return (
+                    "a supported fan mode is required"
+                    if language == "en"
+                    else "cần nêu đúng tốc độ/chế độ gió được hỗ trợ"
+                )
+            data["fan_mode"] = option
+            detail = (
+                f"set fan mode to {option}"
+                if language == "en"
+                else f"đặt tốc độ gió thành {option}"
+            )
+            return "climate", "set_fan_mode", data, detail
+
+        if action in {
+            "climate_increase_fan_mode",
+            "climate_decrease_fan_mode",
+        }:
+            ordered = [
+                item
+                for item in target.fan_modes
+                if normalize_text(item) != "auto"
+            ] or list(target.fan_modes)
+            current = target.current_fan_mode
+            try:
+                index = next(
+                    i
+                    for i, item in enumerate(ordered)
+                    if item.casefold() == current.casefold()
+                )
+            except StopIteration:
+                return (
+                    "current fan mode cannot be stepped safely; choose an exact supported mode"
+                    if language == "en"
+                    else "không xác định được thứ tự tăng/giảm an toàn từ tốc độ hiện tại; hãy chọn một tốc độ được hỗ trợ"
+                )
+            next_index = index + (
+                1 if action == "climate_increase_fan_mode" else -1
+            )
+            if not 0 <= next_index < len(ordered):
+                return (
+                    "fan mode is already at the supported limit"
+                    if language == "en"
+                    else "tốc độ gió đã ở giới hạn thiết bị hỗ trợ"
+                )
+            option = ordered[next_index]
+            data["fan_mode"] = option
+            detail = (
+                f"set fan mode to {option}"
+                if language == "en"
+                else f"đặt tốc độ gió thành {option}"
+            )
+            return "climate", "set_fan_mode", data, detail
+
+        if action == "climate_set_swing_mode":
+            option = self._resolve_control_option(
+                parameters.get("swing_mode"),
+                text,
+                target.swing_modes,
+                allow_on_fallback=True,
+            )
+            if option is None:
+                return (
+                    "a supported swing mode is required"
+                    if language == "en"
+                    else "cần nêu đúng chế độ đảo gió dọc được hỗ trợ"
+                )
+            data["swing_mode"] = option
+            detail = (
+                f"set swing mode to {option}"
+                if language == "en"
+                else f"đặt đảo gió dọc thành {option}"
+            )
+            return "climate", "set_swing_mode", data, detail
+
+        if action == "climate_set_swing_horizontal_mode":
+            option = self._resolve_control_option(
+                parameters.get("swing_horizontal_mode"),
+                text,
+                target.swing_horizontal_modes,
+                allow_on_fallback=True,
+            )
+            if option is None:
+                return (
+                    "a supported horizontal swing mode is required"
+                    if language == "en"
+                    else "cần nêu đúng chế độ đảo gió ngang được hỗ trợ"
+                )
+            data["swing_horizontal_mode"] = option
+            detail = (
+                f"set horizontal swing to {option}"
+                if language == "en"
+                else f"đặt đảo gió ngang thành {option}"
+            )
+            return "climate", "set_swing_horizontal_mode", data, detail
+
+        if action == "climate_set_preset_mode":
+            option = self._resolve_control_option(
+                parameters.get("preset_mode"), text, target.preset_modes
+            )
+            if option is None:
+                return (
+                    "a supported preset mode is required"
+                    if language == "en"
+                    else "cần nêu đúng chế độ đặt trước được hỗ trợ"
+                )
+            data["preset_mode"] = option
+            detail = (
+                f"set preset to {option}"
+                if language == "en"
+                else f"chuyển chế độ đặt trước sang {option}"
+            )
+            return "climate", "set_preset_mode", data, detail
+
+        if action == "climate_set_humidity":
+            value = self._numeric_parameter(parameters, "humidity")
+            if value is None:
+                return (
+                    "a target humidity is required"
+                    if language == "en"
+                    else "cần nêu độ ẩm mục tiêu"
+                )
+            # climate.set_humidity uses an integer percentage in Home
+            # Assistant. Normalize spoken decimals before validating the live
+            # entity's advertised limits.
+            humidity = int(value + 0.5)
+            if target.min_humidity is not None and humidity < target.min_humidity:
+                return (
+                    f"minimum humidity is {target.min_humidity:g}%"
+                    if language == "en"
+                    else f"độ ẩm thấp nhất là {target.min_humidity:g}%"
+                )
+            if target.max_humidity is not None and humidity > target.max_humidity:
+                return (
+                    f"maximum humidity is {target.max_humidity:g}%"
+                    if language == "en"
+                    else f"độ ẩm cao nhất là {target.max_humidity:g}%"
+                )
+            data["humidity"] = humidity
+            detail = (
+                f"set humidity to {humidity}%"
+                if language == "en"
+                else f"đặt độ ẩm mục tiêu {humidity}%"
+            )
+            return "climate", "set_humidity", data, detail
+
+        if action == "fan_set_percentage":
+            value = self._numeric_parameter(parameters, "percentage")
+            if value is None:
+                return (
+                    "a speed percentage is required"
+                    if language == "en"
+                    else "cần nêu tốc độ quạt theo phần trăm"
+                )
+            if not 0 <= value <= 100:
+                return (
+                    "speed must be between 0 and 100%"
+                    if language == "en"
+                    else "tốc độ quạt phải từ 0 đến 100%"
+                )
+            percentage = int(value + 0.5)
+            data["percentage"] = percentage
+            detail = (
+                f"set speed to {percentage}%"
+                if language == "en"
+                else f"đặt tốc độ quạt {percentage}%"
+            )
+            return "fan", "set_percentage", data, detail
+
+        if action in {"fan_increase_speed", "fan_decrease_speed"}:
+            step = self._numeric_parameter(parameters, "percentage_step")
+            step_int: int | None = None
+            if step is not None:
+                if not 0 < step <= 100:
+                    return (
+                        "speed step must be between 1 and 100%"
+                        if language == "en"
+                        else "mức tăng/giảm phải từ 1 đến 100%"
+                    )
+                # Home Assistant's fan increase/decrease actions accept an
+                # integer percentage_step. Normalize a spoken decimal safely
+                # instead of passing a schema-invalid float to the service.
+                step_int = int(step + 0.5)
+                if step_int < 1:
+                    return (
+                        "speed step must round to at least 1%"
+                        if language == "en"
+                        else "mức tăng/giảm sau khi làm tròn phải từ 1% trở lên"
+                    )
+                data["percentage_step"] = step_int
+            service = (
+                "increase_speed"
+                if action == "fan_increase_speed"
+                else "decrease_speed"
+            )
+            detail = self._device_power_action_label(action, language)
+            if step_int is not None:
+                detail += f" {step_int}%"
+            return "fan", service, data, detail
+
+        if action == "fan_oscillate":
+            value = parameters.get("oscillating")
+            if not isinstance(value, bool):
+                normalized = normalize_text(text)
+                if any(word in normalized for word in ("tat", "dung", "off", "stop")):
+                    value = False
+                elif any(word in normalized for word in ("bat", "quay", "on", "oscillat")):
+                    value = True
+                else:
+                    return (
+                        "say whether oscillation should be on or off"
+                        if language == "en"
+                        else "cần nói rõ bật hay tắt quay đảo"
+                    )
+            data["oscillating"] = value
+            detail = (
+                "turn oscillation on" if value else "turn oscillation off"
+            ) if language == "en" else (
+                "bật quay đảo" if value else "tắt quay đảo"
+            )
+            return "fan", "oscillate", data, detail
+
+        if action == "fan_set_direction":
+            requested = str(parameters.get("direction", "") or "")
+            normalized = normalize_text(requested or text)
+            if any(word in normalized for word in ("reverse", "nguoc", "dao chieu")):
+                direction = "reverse"
+            elif any(word in normalized for word in ("forward", "xuoi", "thuan", "cung chieu")):
+                direction = "forward"
+            else:
+                return (
+                    "direction must be forward or reverse"
+                    if language == "en"
+                    else "cần nói rõ quay xuôi hay quay ngược"
+                )
+            data["direction"] = direction
+            detail = (
+                f"set direction to {direction}"
+                if language == "en"
+                else f"đổi hướng quay sang {direction}"
+            )
+            return "fan", "set_direction", data, detail
+
+        if action == "fan_set_preset_mode":
+            option = self._resolve_control_option(
+                parameters.get("preset_mode"), text, target.preset_modes
+            )
+            if option is None:
+                return (
+                    "a supported fan preset is required"
+                    if language == "en"
+                    else "cần nêu đúng chế độ quạt được hỗ trợ"
+                )
+            data["preset_mode"] = option
+            detail = (
+                f"set preset to {option}"
+                if language == "en"
+                else f"chuyển chế độ quạt sang {option}"
+            )
+            return "fan", "set_preset_mode", data, detail
+
+        return (
+            "unsupported action"
+            if language == "en"
+            else "thao tác chưa được hỗ trợ"
+        )
+
+    def _device_control_capabilities_text(
+        self,
+        targets: list[DevicePowerTarget],
+        *,
+        language: str,
+        reason: str | None = None,
+    ) -> str:
+        """List only official actions actually exposed by selected entities."""
+        if language == "en":
+            lines = [
+                "🧭 **Supported Home Assistant actions**",
+                "",
+            ]
+            if reason:
+                lines.extend((f"The request is incomplete: {reason}.", ""))
+        else:
+            lines = [
+                "🧭 **Các thao tác Home Assistant thiết bị đang hỗ trợ**",
+                "",
+            ]
+            if reason:
+                lines.extend((f"Yêu cầu chưa thể thực hiện: {reason}.", ""))
+
+        for target in targets:
+            actions: list[str] = []
+            if target.supports("turn_on"):
+                actions.append("bật" if language != "en" else "turn on")
+            if target.supports("turn_off"):
+                actions.append("tắt" if language != "en" else "turn off")
+            if target.supports("open_cover"):
+                actions.append("mở" if language != "en" else "open")
+            if target.supports("close_cover"):
+                actions.append("đóng" if language != "en" else "close")
+            if target.domain == "climate":
+                if target.supports("climate_set_temperature"):
+                    range_text = ""
+                    if target.min_temp is not None and target.max_temp is not None:
+                        unit = self._canonical_temperature_unit(
+                            target.temperature_unit
+                        )
+                        range_text = f" ({target.min_temp:g}–{target.max_temp:g} {unit})"
+                    actions.append(
+                        ("đặt/tăng/giảm nhiệt độ" if language != "en" else "set/increase/decrease temperature")
+                        + range_text
+                    )
+                if target.supports("climate_set_temperature_range"):
+                    actions.append(
+                        "đặt khoảng nhiệt độ thấp–cao"
+                        if language != "en"
+                        else "set a lower–upper temperature range"
+                    )
+                if target.supports("climate_set_hvac_mode"):
+                    actions.append(
+                        ("chế độ điều hòa: " if language != "en" else "HVAC modes: ")
+                        + ", ".join(target.hvac_modes)
+                    )
+                if target.supports("climate_set_fan_mode"):
+                    actions.append(
+                        ("tốc độ gió: " if language != "en" else "fan modes: ")
+                        + ", ".join(target.fan_modes)
+                    )
+                if target.supports("climate_set_swing_mode"):
+                    actions.append(
+                        ("đảo gió dọc: " if language != "en" else "vertical swing: ")
+                        + ", ".join(target.swing_modes)
+                    )
+                if target.supports("climate_set_swing_horizontal_mode"):
+                    actions.append(
+                        ("đảo gió ngang: " if language != "en" else "horizontal swing: ")
+                        + ", ".join(target.swing_horizontal_modes)
+                    )
+                if target.supports("climate_set_preset_mode"):
+                    actions.append(
+                        ("chế độ đặt trước: " if language != "en" else "presets: ")
+                        + ", ".join(target.preset_modes)
+                    )
+                if target.supports("climate_set_humidity"):
+                    actions.append(
+                        "đặt độ ẩm mục tiêu"
+                        if language != "en"
+                        else "set target humidity"
+                    )
+            elif target.domain == "fan":
+                speed_operations: list[str] = []
+                if target.supports("fan_set_percentage"):
+                    speed_operations.append("set" if language == "en" else "đặt")
+                if target.supports("fan_increase_speed"):
+                    speed_operations.append(
+                        "increase" if language == "en" else "tăng"
+                    )
+                if target.supports("fan_decrease_speed"):
+                    speed_operations.append(
+                        "decrease" if language == "en" else "giảm"
+                    )
+                if speed_operations:
+                    actions.append(
+                        "/".join(speed_operations)
+                        + (" speed 0–100%" if language == "en" else " tốc độ 0–100%")
+                    )
+                if target.supports("fan_oscillate"):
+                    actions.append(
+                        "bật/tắt quay đảo"
+                        if language != "en"
+                        else "turn oscillation on/off"
+                    )
+                if target.supports("fan_set_direction"):
+                    actions.append(
+                        "quay xuôi/quay ngược"
+                        if language != "en"
+                        else "forward/reverse direction"
+                    )
+                if target.supports("fan_set_preset_mode"):
+                    actions.append(
+                        ("chế độ: " if language != "en" else "presets: ")
+                        + ", ".join(target.preset_modes)
+                    )
+            lines.append(f"**{target.display_name}**")
+            lines.append("• " + ("; ".join(actions) if actions else "—"))
+            lines.append("")
+
+        lines.append(
+            "Bạn có thể yêu cầu lại trong **120 giây**, ví dụ: “đặt 25 độ”, “tăng tốc độ 20%”, “bật quay đảo” hoặc “hẹn giờ tắt sau 30 phút”."
+            if language != "en"
+            else "Reply within **120 seconds**, for example: “set 25 degrees”, “increase speed 20%”, “turn oscillation on”, or “turn off in 30 minutes”."
+        )
+        return "\n".join(lines).strip()
+
+    def _device_selection_prompt(
+        self,
+        pending: PendingZaloDevicePower | PendingVoiceDeviceControl,
+        *,
+        language: str,
+        invalid: bool = False,
+    ) -> str:
+        """List all climate/fan entities when no exact name was found."""
+        category = (
+            "air conditioner"
+            if pending.target_domain == "climate" and language == "en"
+            else "fan"
+            if pending.target_domain == "fan" and language == "en"
+            else "điều hòa"
+            if pending.target_domain == "climate"
+            else "quạt"
+        )
+        if language == "en":
+            heading = (
+                f"🔎 **I could not identify the exact {category}**\n\n"
+                if not invalid
+                else "🔎 **That selection was not valid**\n\n"
+            )
+            instruction = (
+                "Reply with a number, name, or multiple numbers."
+            )
+        else:
+            heading = (
+                f"🔎 **Tôi chưa xác định được đúng {category}**\n\n"
+                if not invalid
+                else "🔎 **Lựa chọn chưa hợp lệ**\n\n"
+            )
+            instruction = "Trả lời số, tên thiết bị hoặc nhiều số cần chọn."
+        lines = [heading.rstrip()]
+        for index, target in enumerate(pending.targets, start=1):
+            area = f" — {target.area_name}" if target.area_name else ""
+            lines.append(f"{index}. **{target.display_name}**{area}")
+        if pending.action:
+            summary = self._device_control_action_summary(
+                pending.action, pending.parameters, language=language
+            )
+            lines.extend(
+                (
+                    "",
+                    ("Requested action: " if language == "en" else "Thao tác đang chờ: ")
+                    + f"**{summary}**",
+                )
+            )
+        lines.extend(("", instruction))
+        return "\n".join(lines)
+
+    def _device_power_clarification_text(self, language: str) -> str:
+        """Ask for an exact device name without guessing."""
+        if language == "en":
+            return (
+                "I could not identify the device confidently enough. Include "
+                "the exact entity, room, or area name."
+            )
+        return (
+            "Tôi chưa tìm thấy đúng tên thiết bị nên không đoán bừa. Hãy gửi "
+            "lại tên thiết bị, phòng hoặc khu vực chính xác."
+        )
+
+    def _device_power_requires_confirmation(
+        self,
+        action: str,
+        targets: list[DevicePowerTarget],
+    ) -> bool:
+        """Require confirmation only when opening a rolling/garage door."""
+        return action in {"open_cover", "turn_on"} and any(
+            is_rolling_door_target(target) for target in targets
+        )
+
+    def _validate_device_control_request(
+        self,
+        action: str,
+        targets: list[DevicePowerTarget],
+        parameters: dict[str, Any],
+        text: str,
+        *,
+        language: str,
+    ) -> str | None:
+        """Return the first capability/value problem without executing."""
+        if action not in CONTROL_ACTIONS:
+            return (
+                "no supported action was identified"
+                if language == "en"
+                else "chưa xác định được thao tác cần thực hiện"
+            )
+        if not targets:
+            return (
+                "no exact target was identified"
+                if language == "en"
+                else "chưa xác định được thiết bị cụ thể"
+            )
+        for target in targets:
+            built = self._build_device_service_call(
+                target,
+                action,
+                parameters,
+                text,
+                language=language,
+            )
+            if isinstance(built, str):
+                return f"{target.display_name}: {built}"
+        return None
+
     async def _async_execute_device_power(
         self,
         action: str,
@@ -6213,147 +7497,769 @@ class ConversationalAssistantManager(NoteManagerMixin):
         service_context: Context | None,
         *,
         language: str,
-    ) -> tuple[list[DevicePowerTarget], list[str]]:
-        """Execute validated entity IDs through Home Assistant services."""
-        succeeded: list[DevicePowerTarget] = []
+        parameters: dict[str, Any] | None = None,
+        request_text: str = "",
+    ) -> tuple[list[tuple[DevicePowerTarget, str]], list[str]]:
+        """Execute exact entity IDs through official Home Assistant services."""
+        succeeded: list[tuple[DevicePowerTarget, str]] = []
         failures: list[str] = []
+        parameters = dict(parameters or {})
         live_targets = {
             target.entity_id: target for target in self._device_power_targets()
         }
 
-        for target in targets:
-            current = live_targets.get(target.entity_id)
-            if current is None or not current.supports(action):
+        for requested_target in targets:
+            target = live_targets.get(requested_target.entity_id)
+            if target is None:
                 reason = (
-                    "no longer available"
+                    "is no longer available"
                     if language == "en"
                     else "không còn khả dụng"
                 )
-                failures.append(f"{target.display_name}: {reason}")
+                failures.append(f"{requested_target.display_name}: {reason}")
                 continue
-            domain = current.domain
-            service_action = action
-            if (
-                action == "turn_on"
-                and is_rolling_door_target(current)
-                and current.supports_open_cover
-            ):
-                service_action = "open_cover"
-            elif (
-                action == "turn_off"
-                and is_rolling_door_target(current)
-                and current.supports_close_cover
-            ):
-                service_action = "close_cover"
-            elif action == "open_cover" and not current.supports_open_cover:
-                service_action = "turn_on"
-            elif action == "close_cover" and not current.supports_close_cover:
-                service_action = "turn_off"
-            service_domain = (
-                domain
-                if self.hass.services.has_service(domain, service_action)
-                else "homeassistant"
+            built = self._build_device_service_call(
+                target,
+                action,
+                parameters,
+                request_text,
+                language=language,
             )
-            if not self.hass.services.has_service(
-                service_domain, service_action
-            ):
-                reason = (
-                    "does not support this action"
-                    if language == "en"
-                    else "không hỗ trợ thao tác này"
-                )
-                failures.append(f"{current.display_name}: {reason}")
+            if isinstance(built, str):
+                failures.append(f"{target.display_name}: {built}")
                 continue
+            service_domain, service_action, data, detail = built
             try:
                 await self.hass.services.async_call(
                     service_domain,
                     service_action,
-                    {"entity_id": current.entity_id},
+                    data,
                     blocking=True,
                     context=service_context,
                 )
             except Exception:  # noqa: BLE001 - continue other exact targets
                 _LOGGER.exception(
-                    "Failed %s for %s", service_action, current.entity_id
+                    "Failed %s.%s for %s",
+                    service_domain,
+                    service_action,
+                    target.entity_id,
                 )
                 reason = (
                     "action failed"
                     if language == "en"
                     else "thực hiện thất bại"
                 )
-                failures.append(f"{current.display_name}: {reason}")
+                failures.append(f"{target.display_name}: {reason}")
                 continue
-            succeeded.append(current)
+            succeeded.append((target, detail))
         return succeeded, failures
 
     def _device_power_result_text(
         self,
         action: str,
-        succeeded: list[DevicePowerTarget],
+        succeeded: list[tuple[DevicePowerTarget, str]],
         failures: list[str],
         *,
         language: str,
     ) -> str:
-        """Format a Zalo result without claiming failed actions succeeded."""
-        action_label = self._device_power_action_label(action, language)
+        """Format a truthful result using the exact values actually applied."""
         if language == "en":
             if succeeded:
-                message = (
-                    f"✅ **{action_label} completed**: "
-                    + ", ".join(target.display_name for target in succeeded)
-                    + "."
+                lines = ["✅ **Device action completed**", ""]
+                lines.extend(
+                    f"• **{target.display_name}:** {detail}"
+                    for target, detail in succeeded
                 )
             else:
-                message = "The device action could not be completed."
+                lines = ["⚠️ The device action could not be completed."]
             if failures:
-                message += " Failed: " + "; ".join(failures) + "."
-            return message
+                lines.extend(("", "**Not completed:**"))
+                lines.extend(f"• {failure}" for failure in failures)
+            return "\n".join(lines)
 
         if succeeded:
-            message = (
-                f"✅ **Đã {action_label.lower()} thiết bị**\n\n"
-                + ", ".join(target.display_name for target in succeeded)
-                + "."
+            lines = ["✅ **Đã thực hiện điều khiển thiết bị**", ""]
+            lines.extend(
+                f"• **{target.display_name}:** {detail}"
+                for target, detail in succeeded
             )
         else:
-            message = "Chưa thể thực hiện thao tác với thiết bị."
+            lines = ["⚠️ Chưa thể thực hiện thao tác với thiết bị."]
         if failures:
-            message += " Không hoàn tất: " + "; ".join(failures) + "."
-        return message
+            lines.extend(("", "**Không hoàn tất:**"))
+            lines.extend(f"• {failure}" for failure in failures)
+        return "\n".join(lines)
 
-    @staticmethod
-    def _can_execute_ai_device_power(
-        text: str,
-        interpretation: DevicePowerInterpretation,
-    ) -> bool:
-        """Allow a validated Zalo interpretation to execute without a prompt."""
-        return bool(
-            interpretation.targets
-            and interpretation.confidence >= 0.80
-            and explicit_power_action(text) == interpretation.action
+    def _scheduled_action_context(
+        self, item: ScheduledDeviceAction
+    ) -> ZaloWebhookContext:
+        """Rebuild a minimal Zalo context for scheduled delivery."""
+        value = item.zalo_context
+        return ZaloWebhookContext(
+            account_id=value.get("account_id", ""),
+            sender_id=value.get("sender_id", ""),
+            thread_id=value.get("thread_id", ""),
+            thread_type=value.get("thread_type", ZALO_TYPE_USER),
+            display_name=value.get("display_name", ""),
+            owner_key=value.get("owner_key", ""),
+            message_id="",
+            text="",
         )
 
-    @staticmethod
-    def _device_power_requires_confirmation(
+    @callback
+    def _schedule_one_device_action(self, item: ScheduledDeviceAction) -> None:
+        """Register one persistent point-in-time callback."""
+        previous = self._scheduled_device_action_unsubs.pop(
+            item.action_id, None
+        )
+        if previous is not None:
+            previous()
+
+        now = dt_util.now()
+        if item.run_at <= now:
+            self.hass.async_create_task(
+                self._async_run_scheduled_device_action(item.action_id)
+            )
+            return
+
+        @callback
+        def _due(_now: datetime) -> None:
+            self._scheduled_device_action_unsubs.pop(item.action_id, None)
+            self.hass.async_create_task(
+                self._async_run_scheduled_device_action(item.action_id)
+            )
+
+        self._scheduled_device_action_unsubs[item.action_id] = (
+            async_track_point_in_time(self.hass, _due, item.run_at)
+        )
+
+    @callback
+    def _schedule_all_device_actions(self) -> None:
+        """Restore all pending device timers after startup/reload."""
+        for item in tuple(self._scheduled_device_actions.values()):
+            self._schedule_one_device_action(item)
+
+    async def _async_run_scheduled_device_action(self, action_id: str) -> None:
+        """Execute one due action once and report the real result to Zalo."""
+        item = self._scheduled_device_actions.get(action_id)
+        if item is None:
+            return
+        live = {target.entity_id: target for target in self._device_power_targets()}
+        language = item.zalo_context.get("language", "vi")
+        targets: list[DevicePowerTarget] = []
+        missing: list[str] = []
+        for entity_id in item.entity_ids:
+            target = live.get(entity_id)
+            if target is None:
+                reason = (
+                    "is no longer available"
+                    if language == "en"
+                    else "không còn khả dụng"
+                )
+                missing.append(
+                    f"{item.target_names.get(entity_id, entity_id)}: {reason}"
+                )
+            else:
+                targets.append(target)
+
+        succeeded, failures = await self._async_execute_device_power(
+            item.action,
+            targets,
+            None,
+            language=language,
+            parameters=item.parameters,
+            request_text=item.request_text,
+        )
+        failures = [*missing, *failures]
+        message = self._device_power_result_text(
+            item.action, succeeded, failures, language=language
+        )
+        local_time = dt_util.as_local(item.run_at)
+        if language == "en":
+            message = (
+                f"⏰ **Scheduled device action is due**\n"
+                f"**Time:** {local_time:%H:%M on %d/%m/%Y}\n\n{message}"
+            )
+        else:
+            message = (
+                f"⏰ **Đến giờ thực hiện điều khiển thiết bị**\n"
+                f"**Thời gian:** {local_time:%H:%M ngày %d/%m/%Y}\n\n{message}"
+            )
+        delivery_source = item.zalo_context.get("source", "zalo")
+        try:
+            if (
+                delivery_source == "zalo"
+                and item.zalo_context.get("thread_id")
+            ):
+                context = self._scheduled_action_context(item)
+                await self._async_send_zalo_typing_event(context, None)
+                await self._async_send_zalo_webhook_reply(context, message)
+            else:
+                # Voice Assist has no durable proactive reply channel. Surface
+                # the truthful execution result in Home Assistant while the
+                # requested device action itself is performed at the due time.
+                persistent_notification.async_create(
+                    self.hass,
+                    message,
+                    title=(
+                        "⏰ Scheduled device action"
+                        if language == "en"
+                        else "⏰ Hẹn giờ điều khiển thiết bị"
+                    ),
+                    notification_id=f"{DOMAIN}_device_action_{action_id}",
+                )
+        finally:
+            self._scheduled_device_actions.pop(action_id, None)
+            self._scheduled_device_action_unsubs.pop(action_id, None)
+            self._save_later()
+
+    async def _async_schedule_device_control(
+        self,
+        context: ZaloWebhookContext,
         action: str,
         targets: list[DevicePowerTarget],
-    ) -> bool:
-        """Require confirmation only when Zalo is opening a rolling door."""
-        return action in {"open_cover", "turn_on"} and any(
-            is_rolling_door_target(target) for target in targets
+        parameters: dict[str, Any],
+        run_at: datetime,
+        *,
+        language: str,
+        request_text: str = "",
+    ) -> str:
+        """Persist and register one future device action."""
+        action_id = uuid.uuid4().hex
+        item = ScheduledDeviceAction(
+            action_id=action_id,
+            action=action,
+            entity_ids=[target.entity_id for target in targets],
+            target_names={
+                target.entity_id: target.display_name for target in targets
+            },
+            parameters=dict(parameters),
+            run_at=run_at,
+            created_at=dt_util.now(),
+            zalo_context={
+                "source": "zalo",
+                "language": language,
+                "account_id": context.account_id,
+                "sender_id": context.sender_id,
+                "thread_id": context.thread_id,
+                "thread_type": context.thread_type,
+                "display_name": context.display_name,
+                "owner_key": context.owner_key,
+            },
+            request_text=request_text,
+        )
+        self._scheduled_device_actions[action_id] = item
+        self._schedule_one_device_action(item)
+        self._save_later()
+        local_time = dt_util.as_local(run_at)
+        names = ", ".join(target.display_name for target in targets)
+        summary = self._device_control_action_summary(
+            action, parameters, language=language
+        )
+        if language == "en":
+            return (
+                "⏰ **Device timer created**\n\n"
+                f"**Time:** {local_time:%H:%M on %d/%m/%Y}\n"
+                f"**Action:** {summary}\n"
+                f"**Device:** {names}"
+            )
+        return (
+            "⏰ **Đã tạo hẹn giờ điều khiển thiết bị**\n\n"
+            f"**Thời gian:** {local_time:%H:%M ngày %d/%m/%Y}\n"
+            f"**Thao tác:** {summary}\n"
+            f"**Thiết bị:** {names}"
+        )
+
+    async def _async_schedule_device_control_from_voice(
+        self,
+        user_input: ConversationInput,
+        action: str,
+        targets: list[DevicePowerTarget],
+        parameters: dict[str, Any],
+        run_at: datetime,
+        *,
+        language: str,
+        request_text: str = "",
+    ) -> str:
+        """Persist one future device action requested through Voice Assist."""
+        action_id = uuid.uuid4().hex
+        item = ScheduledDeviceAction(
+            action_id=action_id,
+            action=action,
+            entity_ids=[target.entity_id for target in targets],
+            target_names={
+                target.entity_id: target.display_name for target in targets
+            },
+            parameters=dict(parameters),
+            run_at=run_at,
+            created_at=dt_util.now(),
+            zalo_context={
+                "source": "voice",
+                "language": language,
+                "user_id": str(user_input.context.user_id or ""),
+                "satellite_id": str(user_input.satellite_id or ""),
+                "device_id": str(user_input.device_id or ""),
+            },
+            request_text=request_text,
+        )
+        self._scheduled_device_actions[action_id] = item
+        self._schedule_one_device_action(item)
+        self._save_later()
+        local_time = dt_util.as_local(run_at)
+        names = ", ".join(target.display_name for target in targets)
+        summary = self._device_control_action_summary(
+            action, parameters, language=language
+        )
+        if language == "en":
+            return (
+                "Device timer created. "
+                f"At {local_time:%H:%M on %d/%m/%Y}, I will {summary} "
+                f"for {names}."
+            )
+        return (
+            "Đã tạo hẹn giờ điều khiển thiết bị. "
+            f"Lúc {local_time:%H:%M ngày %d/%m/%Y}, tôi sẽ {summary} "
+            f"cho {names}."
+        )
+
+    def _set_pending_voice_device_control(
+        self,
+        user_input: ConversationInput,
+        interpretation: DeviceControlInterpretation,
+        attempted_agents: list[str],
+        *,
+        phase: str,
+        targets: list[DevicePowerTarget] | None = None,
+    ) -> PendingVoiceDeviceControl:
+        """Store one Voice Assist device follow-up for exactly 120 seconds."""
+        self._purge_expired_pending()
+        source_keys = self._source_keys(user_input)
+        self._clear_pending_for_source(source_keys)
+        now = dt_util.now()
+        pending = PendingVoiceDeviceControl(
+            pending_id=uuid.uuid4().hex,
+            action=interpretation.action,
+            targets=list(
+                targets if targets is not None else interpretation.targets
+            ),
+            source_keys=source_keys,
+            created_at=now,
+            expires_at=now
+            + timedelta(seconds=PENDING_CONFIRMATION_TIMEOUT_SECONDS),
+            attempted_agents=list(attempted_agents),
+            parameters=dict(interpretation.parameters),
+            scheduled_for=interpretation.scheduled_for,
+            phase=phase,
+            original_text=str(user_input.text or ""),
+            target_domain=interpretation.target_domain,
+        )
+        self._pending_voice_device_controls[pending.pending_id] = pending
+        self._sync_pending_followup_trigger()
+        return pending
+
+    def _find_pending_voice_device_control(
+        self, user_input: ConversationInput
+    ) -> PendingVoiceDeviceControl | None:
+        """Find a Voice Assist device request belonging to this source."""
+        self._purge_expired_pending()
+        source_keys = self._source_keys(user_input)
+        matching = [
+            pending
+            for pending in self._pending_voice_device_controls.values()
+            if source_keys & pending.source_keys
+        ]
+        if matching:
+            return max(matching, key=lambda item: item.created_at)
+        if (
+            len(self._pending_voice_device_controls) == 1
+            and not self._pending
+            and not self._pending_deletions
+            and not self._pending_voice_cameras
+            and not self._has_pending_notes()
+        ):
+            return next(iter(self._pending_voice_device_controls.values()))
+        return None
+
+    async def _async_execute_or_confirm_voice_device_control(
+        self,
+        user_input: ConversationInput,
+        interpretation: DeviceControlInterpretation,
+        attempted_agents: list[str],
+        *,
+        language: str,
+        confirmed: bool = False,
+    ) -> str:
+        """Execute, schedule, or ask for rolling-door confirmation on Voice."""
+        targets = list(interpretation.targets)
+        if (
+            not confirmed
+            and self._device_power_requires_confirmation(
+                interpretation.action, targets
+            )
+        ):
+            self._set_pending_voice_device_control(
+                user_input,
+                interpretation,
+                attempted_agents,
+                phase="confirm_door",
+            )
+            response = self._device_power_confirmation_text(
+                interpretation.action,
+                targets,
+                language=language,
+                parameters=interpretation.parameters,
+                scheduled_for=interpretation.scheduled_for,
+            )
+            return await self._async_voice_response(user_input, response)
+
+        if interpretation.scheduled_for is not None:
+            response = await self._async_schedule_device_control_from_voice(
+                user_input,
+                interpretation.action,
+                targets,
+                interpretation.parameters,
+                interpretation.scheduled_for,
+                language=language,
+                request_text=str(user_input.text or ""),
+            )
+            return await self._async_voice_response(user_input, response)
+
+        succeeded, failures = await self._async_execute_device_power(
+            interpretation.action,
+            targets,
+            user_input.context,
+            language=language,
+            parameters=interpretation.parameters,
+            request_text=str(user_input.text or ""),
+        )
+        response = self._device_power_result_text(
+            interpretation.action,
+            succeeded,
+            failures,
+            language=language,
+        )
+        return await self._async_voice_response(user_input, response)
+
+    async def _async_process_voice_device_interpretation(
+        self,
+        user_input: ConversationInput,
+        interpretation: DeviceControlInterpretation,
+        attempted_agents: list[str],
+        *,
+        language: str,
+    ) -> str:
+        """Apply target, capability, confirmation, and scheduling policy."""
+        targets = list(interpretation.targets)
+        if not targets:
+            target_domain = interpretation.target_domain
+            if not target_domain:
+                hints = requested_device_domains(user_input.text)
+                if len(hints) == 1:
+                    target_domain = next(iter(hints))
+                    interpretation.target_domain = target_domain
+            if target_domain in {"climate", "fan"}:
+                candidates = [
+                    target
+                    for target in self._device_power_targets()
+                    if target.domain == target_domain
+                ]
+                if candidates:
+                    pending = self._set_pending_voice_device_control(
+                        user_input,
+                        interpretation,
+                        attempted_agents,
+                        phase="select_target",
+                        targets=candidates,
+                    )
+                    return await self._async_voice_response(
+                        user_input,
+                        self._device_selection_prompt(
+                            pending, language=language
+                        ),
+                    )
+            return await self._async_voice_response(
+                user_input,
+                self._device_power_clarification_text(language),
+            )
+
+        if (
+            self._device_timer_wording(user_input.text)
+            and interpretation.scheduled_for is None
+        ):
+            reason = (
+                "the timer time is missing or invalid"
+                if language == "en"
+                else "thời điểm hẹn giờ chưa rõ hoặc không hợp lệ"
+            )
+            self._set_pending_voice_device_control(
+                user_input,
+                interpretation,
+                attempted_agents,
+                phase="rephrase",
+            )
+            return await self._async_voice_response(
+                user_input,
+                self._device_control_capabilities_text(
+                    targets, language=language, reason=reason
+                ),
+            )
+
+        problem = self._validate_device_control_request(
+            interpretation.action,
+            targets,
+            interpretation.parameters,
+            user_input.text,
+            language=language,
+        )
+        if problem is not None:
+            self._set_pending_voice_device_control(
+                user_input,
+                interpretation,
+                attempted_agents,
+                phase="rephrase",
+            )
+            return await self._async_voice_response(
+                user_input,
+                self._device_control_capabilities_text(
+                    targets, language=language, reason=problem
+                ),
+            )
+
+        return await self._async_execute_or_confirm_voice_device_control(
+            user_input,
+            interpretation,
+            attempted_agents,
+            language=language,
         )
 
     @staticmethod
-    def _device_power_clarification_text(language: str) -> str:
-        """Ask for a clearer target without creating a confirmation flow."""
-        if language == "en":
-            return (
-                "I could not identify the device confidently enough to control "
-                "it. Please include the exact device or room name."
-            )
+    def _voice_should_defer_to_native_device_intent(
+        interpretation: DeviceControlInterpretation,
+    ) -> bool:
+        """Keep ordinary built-in Assist intents owned by Home Assistant."""
         return (
-            "Tôi chưa xác định đủ chắc chắn thiết bị cần điều khiển. Hãy nhập "
-            "đúng tên thiết bị hoặc kèm tên phòng/khu vực."
+            interpretation.scheduled_for is None
+            and bool(interpretation.targets)
+            and interpretation.action
+            in {
+                "turn_on",
+                "turn_off",
+                "open_cover",
+                "close_cover",
+                "climate_set_temperature",
+                "fan_set_percentage",
+            }
+        )
+
+    async def _async_device_control_from_voice(
+        self, user_input: ConversationInput, _result: RecognizeResult
+    ) -> str | None:
+        """Fill gaps in native Assist climate, fan, and scheduling intents."""
+        language_code = str(user_input.language or "vi")
+        language = (
+            "en"
+            if language_code.casefold().startswith("en")
+            else _request_language(user_input.text)
+        )
+        if not device_power_request_hint(user_input.text):
+            return None
+
+        targets = self._device_power_targets()
+        local = deterministic_interpretation(
+            user_input.text, targets, dt_util.now()
+        )
+
+        # Home Assistant already owns immediate generic power, target
+        # temperature, and fan-percentage intents. Returning None allows its
+        # native sentence handler to respond without duplicate execution.
+        if self._voice_should_defer_to_native_device_intent(local):
+            return None
+
+        attempted: list[str] = []
+        interpretation = local
+        if not (local.action and local.targets):
+            ai_interpretation, attempted = (
+                await self._async_ai_device_power_interpretation(
+                    user_input.text,
+                    targets,
+                    service_context=user_input.context,
+                    language=language,
+                )
+            )
+            if (
+                ai_interpretation is not None
+                and ai_interpretation.confidence >= 0.70
+            ):
+                if ai_interpretation.scheduled_for is None:
+                    ai_interpretation.scheduled_for = local.scheduled_for
+                merged = dict(local.parameters)
+                merged.update(ai_interpretation.parameters)
+                ai_interpretation.parameters = merged
+                if not ai_interpretation.action:
+                    ai_interpretation.action = local.action
+                # AI parses action/value/time only; exact entity matching stays
+                # local and capability-aware to prevent fabricated device IDs.
+                ai_interpretation.targets = local.targets
+                if not ai_interpretation.target_domain:
+                    ai_interpretation.target_domain = local.target_domain
+                interpretation = ai_interpretation
+
+        if self._voice_should_defer_to_native_device_intent(interpretation):
+            return None
+        return await self._async_process_voice_device_interpretation(
+            user_input,
+            interpretation,
+            attempted,
+            language=language,
+        )
+
+    async def _async_pending_voice_device_control_reply(
+        self,
+        user_input: ConversationInput,
+        pending: PendingVoiceDeviceControl,
+    ) -> str:
+        """Continue target selection, rephrase, or door confirmation on Voice."""
+        language_code = str(user_input.language or "vi")
+        language = (
+            "en"
+            if language_code.casefold().startswith("en")
+            else _request_language(user_input.text)
+        )
+        if self._is_cancel_pending_text(user_input.text):
+            self._pending_voice_device_controls.pop(pending.pending_id, None)
+            self._sync_pending_followup_trigger()
+            response = (
+                "Cancelled the pending device request."
+                if language == "en"
+                else "Đã hủy yêu cầu điều khiển thiết bị đang chờ."
+            )
+            return await self._async_voice_response(user_input, response)
+
+        if pending.phase == "confirm_door":
+            if not self._is_device_power_confirmation(user_input.text):
+                pending.expires_at = dt_util.now() + timedelta(
+                    seconds=PENDING_CONFIRMATION_TIMEOUT_SECONDS
+                )
+                self._sync_pending_followup_trigger()
+                return await self._async_voice_response(
+                    user_input,
+                    self._device_power_confirmation_text(
+                        pending.action,
+                        pending.targets,
+                        language=language,
+                        invalid=True,
+                        parameters=pending.parameters,
+                        scheduled_for=pending.scheduled_for,
+                    ),
+                )
+            self._pending_voice_device_controls.pop(pending.pending_id, None)
+            self._sync_pending_followup_trigger()
+            interpretation = DeviceControlInterpretation(
+                action=pending.action,
+                targets=tuple(pending.targets),
+                parameters=dict(pending.parameters),
+                scheduled_for=pending.scheduled_for,
+                confidence=1.0,
+                target_domain=pending.target_domain,
+            )
+            return await self._async_execute_or_confirm_voice_device_control(
+                user_input,
+                interpretation,
+                pending.attempted_agents,
+                language=language,
+                confirmed=True,
+            )
+
+        if pending.phase == "select_target":
+            selected = parse_device_target_selection(
+                user_input.text, pending.targets
+            )
+            if not selected:
+                pending.expires_at = dt_util.now() + timedelta(
+                    seconds=PENDING_CONFIRMATION_TIMEOUT_SECONDS
+                )
+                self._sync_pending_followup_trigger()
+                return await self._async_voice_response(
+                    user_input,
+                    self._device_selection_prompt(
+                        pending, language=language, invalid=True
+                    ),
+                )
+            selected_targets = [pending.targets[index] for index in selected]
+            reply_action, reply_parameters = deterministic_action_and_parameters(
+                user_input.text, selected_targets
+            )
+            scheduled_for = (
+                parse_scheduled_for(user_input.text, dt_util.now())
+                or pending.scheduled_for
+            )
+            interpretation = DeviceControlInterpretation(
+                action=reply_action or pending.action,
+                targets=tuple(selected_targets),
+                parameters={**pending.parameters, **reply_parameters},
+                scheduled_for=scheduled_for,
+                confidence=1.0,
+                target_domain=pending.target_domain,
+            )
+            self._pending_voice_device_controls.pop(pending.pending_id, None)
+            self._sync_pending_followup_trigger()
+            proxy = _ConversationInputTextProxy(
+                user_input, f"{pending.original_text} {user_input.text}"
+            )
+            return await self._async_process_voice_device_interpretation(
+                proxy,
+                interpretation,
+                pending.attempted_agents,
+                language=language,
+            )
+
+        selected_targets = list(pending.targets)
+        action, reply_parameters = deterministic_action_and_parameters(
+            user_input.text, selected_targets
+        )
+        scheduled_for = parse_scheduled_for(user_input.text, dt_util.now())
+        interpretation = DeviceControlInterpretation(
+            action=action or pending.action,
+            targets=tuple(selected_targets),
+            parameters={**pending.parameters, **reply_parameters},
+            scheduled_for=scheduled_for or pending.scheduled_for,
+            confidence=1.0,
+            target_domain=pending.target_domain,
+        )
+        attempted = list(pending.attempted_agents)
+        if not action:
+            ai_interpretation, ai_attempted = (
+                await self._async_ai_device_power_interpretation(
+                    f"{user_input.text} for "
+                    + ", ".join(
+                        target.display_name for target in selected_targets
+                    ),
+                    selected_targets,
+                    service_context=user_input.context,
+                    language=language,
+                )
+            )
+            attempted.extend(
+                name for name in ai_attempted if name not in attempted
+            )
+            if (
+                ai_interpretation is not None
+                and ai_interpretation.confidence >= 0.70
+            ):
+                if ai_interpretation.action:
+                    interpretation.action = ai_interpretation.action
+                interpretation.parameters.update(ai_interpretation.parameters)
+                if ai_interpretation.scheduled_for is not None:
+                    interpretation.scheduled_for = (
+                        ai_interpretation.scheduled_for
+                    )
+        self._pending_voice_device_controls.pop(pending.pending_id, None)
+        self._sync_pending_followup_trigger()
+        return await self._async_process_voice_device_interpretation(
+            user_input,
+            interpretation,
+            attempted,
+            language=language,
         )
 
     async def _async_execute_or_confirm_zalo_device_power(
@@ -6365,9 +8271,17 @@ class ConversationalAssistantManager(NoteManagerMixin):
         service_context: Context | None,
         *,
         language: str,
+        parameters: dict[str, Any] | None = None,
+        scheduled_for: datetime | None = None,
+        request_text: str = "",
+        confirmed: bool = False,
     ) -> str:
-        """Execute immediately, except when Zalo is opening a rolling door."""
-        if self._device_power_requires_confirmation(action, targets):
+        """Execute, schedule, or request the rolling-door confirmation."""
+        parameters = dict(parameters or {})
+        if (
+            not confirmed
+            and self._device_power_requires_confirmation(action, targets)
+        ):
             self._zalo_pending_device_powers[context.owner_key] = (
                 PendingZaloDevicePower(
                     action=action,
@@ -6375,14 +8289,38 @@ class ConversationalAssistantManager(NoteManagerMixin):
                     expires_at=dt_util.now()
                     + timedelta(seconds=PENDING_CONFIRMATION_TIMEOUT_SECONDS),
                     attempted_agents=list(attempted_agents),
+                    parameters=parameters,
+                    scheduled_for=scheduled_for,
+                    phase="confirm_door",
+                    original_text=request_text,
                 )
             )
+            self._schedule_pending_expiry()
             return self._append_ai_attempt_summary(
                 self._device_power_confirmation_text(
                     action,
                     targets,
                     language=language,
+                    parameters=parameters,
+                    scheduled_for=scheduled_for,
                 ),
+                attempted_agents,
+                language=language,
+                zalo=True,
+            )
+
+        if scheduled_for is not None:
+            result = await self._async_schedule_device_control(
+                context,
+                action,
+                targets,
+                parameters,
+                scheduled_for,
+                language=language,
+                request_text=request_text,
+            )
+            return self._append_ai_attempt_summary(
+                result,
                 attempted_agents,
                 language=language,
                 zalo=True,
@@ -6393,6 +8331,8 @@ class ConversationalAssistantManager(NoteManagerMixin):
             targets,
             service_context,
             language=language,
+            parameters=parameters,
+            request_text=request_text,
         )
         return self._append_ai_attempt_summary(
             self._device_power_result_text(
@@ -6406,35 +8346,173 @@ class ConversationalAssistantManager(NoteManagerMixin):
             zalo=True,
         )
 
+    def _start_device_selection_pending(
+        self,
+        context: ZaloWebhookContext,
+        interpretation: DeviceControlInterpretation,
+        candidates: list[DevicePowerTarget],
+        attempted_agents: list[str],
+        *,
+        language: str,
+        invalid: bool = False,
+    ) -> str:
+        """Store a fan/climate selection flow for exactly 120 seconds."""
+        pending = PendingZaloDevicePower(
+            action=interpretation.action,
+            targets=list(candidates),
+            expires_at=dt_util.now()
+            + timedelta(seconds=PENDING_CONFIRMATION_TIMEOUT_SECONDS),
+            attempted_agents=list(attempted_agents),
+            parameters=dict(interpretation.parameters),
+            scheduled_for=interpretation.scheduled_for,
+            phase="select_target",
+            original_text=context.text,
+            target_domain=interpretation.target_domain,
+        )
+        self._zalo_pending_device_powers[context.owner_key] = pending
+        self._schedule_pending_expiry()
+        return self._append_ai_attempt_summary(
+            self._device_selection_prompt(
+                pending, language=language, invalid=invalid
+            ),
+            attempted_agents,
+            language=language,
+            zalo=True,
+        )
+
+    def _start_device_rephrase_pending(
+        self,
+        context: ZaloWebhookContext,
+        interpretation: DeviceControlInterpretation,
+        attempted_agents: list[str],
+        *,
+        language: str,
+        reason: str,
+    ) -> str:
+        """Keep selected targets while asking for a supported action/value."""
+        self._zalo_pending_device_powers[context.owner_key] = (
+            PendingZaloDevicePower(
+                action=interpretation.action,
+                targets=list(interpretation.targets),
+                expires_at=dt_util.now()
+                + timedelta(seconds=PENDING_CONFIRMATION_TIMEOUT_SECONDS),
+                attempted_agents=list(attempted_agents),
+                parameters=dict(interpretation.parameters),
+                scheduled_for=interpretation.scheduled_for,
+                phase="rephrase",
+                original_text=context.text,
+                target_domain=interpretation.target_domain,
+            )
+        )
+        self._schedule_pending_expiry()
+        return self._append_ai_attempt_summary(
+            self._device_control_capabilities_text(
+                list(interpretation.targets),
+                language=language,
+                reason=reason,
+            ),
+            attempted_agents,
+            language=language,
+            zalo=True,
+        )
+
+    async def _async_process_device_interpretation(
+        self,
+        context: ZaloWebhookContext,
+        interpretation: DeviceControlInterpretation,
+        attempted_agents: list[str],
+        service_context: Context | None,
+        *,
+        language: str,
+    ) -> str:
+        """Apply selection, capability, confirmation, and scheduling policy."""
+        targets = list(interpretation.targets)
+        if not targets:
+            target_domain = interpretation.target_domain
+            if not target_domain:
+                hints = requested_device_domains(context.text)
+                if len(hints) == 1:
+                    target_domain = next(iter(hints))
+                    interpretation.target_domain = target_domain
+            if target_domain in {"climate", "fan"}:
+                candidates = [
+                    target
+                    for target in self._device_power_targets()
+                    if target.domain == target_domain
+                ]
+                if candidates:
+                    return self._start_device_selection_pending(
+                        context,
+                        interpretation,
+                        candidates,
+                        attempted_agents,
+                        language=language,
+                    )
+            return self._append_ai_attempt_summary(
+                self._device_power_clarification_text(language),
+                attempted_agents,
+                language=language,
+                zalo=True,
+            )
+
+        if self._device_timer_wording(context.text) and interpretation.scheduled_for is None:
+            return self._start_device_rephrase_pending(
+                context,
+                interpretation,
+                attempted_agents,
+                language=language,
+                reason=(
+                    "the timer time is missing or invalid"
+                    if language == "en"
+                    else "thời điểm hẹn giờ chưa rõ hoặc không hợp lệ"
+                ),
+            )
+
+        problem = self._validate_device_control_request(
+            interpretation.action,
+            targets,
+            interpretation.parameters,
+            context.text,
+            language=language,
+        )
+        if problem is not None:
+            return self._start_device_rephrase_pending(
+                context,
+                interpretation,
+                attempted_agents,
+                language=language,
+                reason=problem,
+            )
+
+        self._zalo_pending_device_powers.pop(context.owner_key, None)
+        return await self._async_execute_or_confirm_zalo_device_power(
+            context,
+            interpretation.action,
+            targets,
+            attempted_agents,
+            service_context,
+            language=language,
+            parameters=interpretation.parameters,
+            scheduled_for=interpretation.scheduled_for,
+            request_text=context.text,
+        )
+
     async def _async_device_power_from_zalo(
         self,
         context: ZaloWebhookContext,
         service_context: Context | None,
     ) -> str:
-        """Control devices from Zalo without duplicating Voice Assist logic."""
+        """Control and schedule devices from one Zalo request."""
         language = _request_language(context.text)
         targets = self._device_power_targets()
-        explicit_action = explicit_power_action(context.text)
-        if explicit_action is not None:
-            exact_targets = exact_power_targets(
-                context.text,
-                explicit_action,
-                targets,
-            )
-            if exact_targets:
-                return await self._async_execute_or_confirm_zalo_device_power(
-                    context,
-                    explicit_action,
-                    exact_targets,
-                    [],
-                    service_context,
-                    language=language,
-                )
+        local = deterministic_interpretation(
+            context.text, targets, dt_util.now()
+        )
+        attempted: list[str] = []
+        interpretation = local
 
-        # Never let the native agent open a rolling door before this
-        # integration has applied its explicit Zalo confirmation policy.
-        if rolling_door_open_request_hint(context.text):
-            interpretation, attempted = (
+        if not (local.action and local.targets):
+            ai_interpretation, attempted = (
                 await self._async_ai_device_power_interpretation(
                     context.text,
                     targets,
@@ -6442,88 +8520,29 @@ class ConversationalAssistantManager(NoteManagerMixin):
                     language=language,
                 )
             )
-            if interpretation is None or not self._can_execute_ai_device_power(
-                context.text, interpretation
-            ):
-                return self._append_ai_attempt_summary(
-                    self._device_power_clarification_text(language),
-                    attempted,
-                    language=language,
-                    zalo=True,
-                )
-            return await self._async_execute_or_confirm_zalo_device_power(
-                context,
-                interpretation.action,
-                list(interpretation.targets),
-                attempted,
-                service_context,
-                language=language,
-            )
+            if ai_interpretation is not None and ai_interpretation.confidence >= 0.70:
+                if ai_interpretation.scheduled_for is None:
+                    ai_interpretation.scheduled_for = local.scheduled_for
+                if not ai_interpretation.parameters:
+                    ai_interpretation.parameters = dict(local.parameters)
+                else:
+                    merged = dict(local.parameters)
+                    merged.update(ai_interpretation.parameters)
+                    ai_interpretation.parameters = merged
+                if not ai_interpretation.action:
+                    ai_interpretation.action = local.action
+                # AI may parse the action/value/time, but it must never guess
+                # a device. Exact entity selection is always resolved locally
+                # from the live exposed inventory. Missing fan/climate names
+                # therefore enter the required 120-second selection flow.
+                ai_interpretation.targets = local.targets
+                if not ai_interpretation.target_domain:
+                    ai_interpretation.target_domain = local.target_domain
+                interpretation = ai_interpretation
 
-        native_result, native_failure = (
-            await self._async_native_home_assistant_converse(
-                context.text,
-                context=service_context or Context(),
-                language=language,
-            )
-        )
-        if native_result is None:
-            if language == "en":
-                return (
-                    "The local Home Assistant agent timed out. AI was not used "
-                    "to avoid running the device action twice."
-                    if native_failure == "timeout"
-                    else "The local Home Assistant agent failed. AI was not "
-                    "used because the device action status is unknown."
-                )
-            return (
-                "Home Assistant cục bộ phản hồi quá lâu. Tôi không dùng AI để "
-                "tránh thực hiện lặp thao tác thiết bị."
-                if native_failure == "timeout"
-                else "Home Assistant cục bộ gặp lỗi. Tôi không dùng AI vì "
-                "chưa xác định được trạng thái thao tác thiết bị."
-            )
-
-        native_error = self._conversation_result_error_code(native_result)
-        native_reply = self._conversation_reply_text(native_result)
-        if not native_error:
-            return native_reply or (
-                "Home Assistant completed the device action."
-                if language == "en"
-                else "Home Assistant đã thực hiện thao tác thiết bị."
-            )
-        if native_error and native_error not in {
-            "no_intent_match",
-            "no_valid_targets",
-        }:
-            return native_reply or (
-                "Home Assistant could not complete the device action."
-                if language == "en"
-                else "Home Assistant chưa thể hoàn tất thao tác thiết bị."
-            )
-
-        interpretation, attempted = (
-            await self._async_ai_device_power_interpretation(
-                context.text,
-                targets,
-                service_context=service_context,
-                language=language,
-            )
-        )
-        if interpretation is None or not self._can_execute_ai_device_power(
-            context.text, interpretation
-        ):
-            return self._append_ai_attempt_summary(
-                self._device_power_clarification_text(language),
-                attempted,
-                language=language,
-                zalo=True,
-            )
-
-        return await self._async_execute_or_confirm_zalo_device_power(
+        return await self._async_process_device_interpretation(
             context,
-            interpretation.action,
-            list(interpretation.targets),
+            interpretation,
             attempted,
             service_context,
             language=language,
@@ -6535,53 +8554,136 @@ class ConversationalAssistantManager(NoteManagerMixin):
         pending: PendingZaloDevicePower,
         service_context: Context | None,
     ) -> str:
-        """Confirm or cancel one Zalo rolling-door opening command."""
+        """Continue a rolling-door, target-selection, or action-help flow."""
         language = _request_language(context.text)
         if self._is_cancel_pending_text(context.text):
             self._zalo_pending_device_powers.pop(context.owner_key, None)
             return (
-                "Cancelled the pending rolling-door opening."
+                "Cancelled the pending device request."
                 if language == "en"
-                else "Đã hủy yêu cầu mở cửa cuốn đang chờ xác nhận."
+                else "Đã hủy yêu cầu điều khiển thiết bị đang chờ."
             )
 
-        if not self._is_device_power_confirmation(context.text):
-            pending.expires_at = dt_util.now() + timedelta(
-                seconds=PENDING_CONFIRMATION_TIMEOUT_SECONDS
-            )
-            return self._device_power_confirmation_text(
+        if pending.phase == "confirm_door":
+            if not self._is_device_power_confirmation(context.text):
+                pending.expires_at = dt_util.now() + timedelta(
+                    seconds=PENDING_CONFIRMATION_TIMEOUT_SECONDS
+                )
+                self._schedule_pending_expiry()
+                return self._device_power_confirmation_text(
+                    pending.action,
+                    pending.targets,
+                    language=language,
+                    invalid=True,
+                    parameters=pending.parameters,
+                    scheduled_for=pending.scheduled_for,
+                )
+            self._zalo_pending_device_powers.pop(context.owner_key, None)
+            if not self._device_power_requires_confirmation(
+                pending.action, pending.targets
+            ):
+                _LOGGER.warning(
+                    "Discarded unexpected non-door Zalo confirmation for %s",
+                    context.owner_key,
+                )
+                return self._device_power_clarification_text(language)
+            return await self._async_execute_or_confirm_zalo_device_power(
+                context,
                 pending.action,
                 pending.targets,
+                pending.attempted_agents,
+                service_context,
                 language=language,
-                invalid=True,
+                parameters=pending.parameters,
+                scheduled_for=pending.scheduled_for,
+                request_text=pending.original_text,
+                confirmed=True,
             )
 
-        self._zalo_pending_device_powers.pop(context.owner_key, None)
-        if not self._device_power_requires_confirmation(
-            pending.action, pending.targets
-        ):
-            _LOGGER.warning(
-                "Discarded unexpected non-door Zalo confirmation for %s",
-                context.owner_key,
+        if pending.phase == "select_target":
+            selected = parse_device_target_selection(
+                context.text, pending.targets
             )
-            return self._device_power_clarification_text(language)
-        succeeded, failures = await self._async_execute_device_power(
-            pending.action,
-            pending.targets,
+            if not selected:
+                pending.expires_at = dt_util.now() + timedelta(
+                    seconds=PENDING_CONFIRMATION_TIMEOUT_SECONDS
+                )
+                self._schedule_pending_expiry()
+                return self._device_selection_prompt(
+                    pending, language=language, invalid=True
+                )
+            selected_targets = [pending.targets[index] for index in selected]
+            reply_action, reply_parameters = deterministic_action_and_parameters(
+                context.text, selected_targets
+            )
+            action = reply_action or pending.action
+            parameters = dict(pending.parameters)
+            parameters.update(reply_parameters)
+            scheduled_for = (
+                parse_scheduled_for(context.text, dt_util.now())
+                or pending.scheduled_for
+            )
+            interpretation = DeviceControlInterpretation(
+                action=action,
+                targets=tuple(selected_targets),
+                parameters=parameters,
+                scheduled_for=scheduled_for,
+                confidence=1.0,
+                target_domain=pending.target_domain,
+            )
+            self._zalo_pending_device_powers.pop(context.owner_key, None)
+            return await self._async_process_device_interpretation(
+                replace(context, text=f"{pending.original_text} {context.text}"),
+                interpretation,
+                pending.attempted_agents,
+                service_context,
+                language=language,
+            )
+
+        # Rephrase phase keeps the already selected device(s). Parse the next
+        # turn locally first, then use the strict AI parser only when needed.
+        selected_targets = list(pending.targets)
+        action, reply_parameters = deterministic_action_and_parameters(
+            context.text, selected_targets
+        )
+        scheduled_for = parse_scheduled_for(context.text, dt_util.now())
+        interpretation = DeviceControlInterpretation(
+            action=action or pending.action,
+            targets=tuple(selected_targets),
+            parameters={**pending.parameters, **reply_parameters},
+            scheduled_for=scheduled_for or pending.scheduled_for,
+            confidence=1.0,
+            target_domain=pending.target_domain,
+        )
+        attempted = list(pending.attempted_agents)
+        if not action:
+            ai_interpretation, ai_attempted = (
+                await self._async_ai_device_power_interpretation(
+                    f"{context.text} for "
+                    + ", ".join(target.display_name for target in selected_targets),
+                    selected_targets,
+                    service_context=service_context,
+                    language=language,
+                )
+            )
+            attempted.extend(
+                name for name in ai_attempted if name not in attempted
+            )
+            if ai_interpretation is not None and ai_interpretation.confidence >= 0.70:
+                if ai_interpretation.action:
+                    interpretation.action = ai_interpretation.action
+                interpretation.parameters.update(ai_interpretation.parameters)
+                if ai_interpretation.scheduled_for is not None:
+                    interpretation.scheduled_for = ai_interpretation.scheduled_for
+        self._zalo_pending_device_powers.pop(context.owner_key, None)
+        return await self._async_process_device_interpretation(
+            context,
+            interpretation,
+            attempted,
             service_context,
             language=language,
         )
-        return self._append_ai_attempt_summary(
-            self._device_power_result_text(
-                pending.action,
-                succeeded,
-                failures,
-                language=language,
-            ),
-            pending.attempted_agents,
-            language=language,
-            zalo=True,
-        )
+
 
     async def _async_home_assistant_conversation_from_zalo(
         self,
@@ -8382,21 +10484,23 @@ class ConversationalAssistantManager(NoteManagerMixin):
             return await self._async_zalo_pending_camera_reply(
                 context, pending_camera, service_context
             )
-        if (
+        pending_device_followup = (
             pending_device_power is not None
             and command is None
-            and explicit_ha_kind is None
-        ):
+            and self._is_zalo_pending_device_power_followup(
+                context, pending_device_power, explicit_ha_kind
+            )
+        )
+        if pending_device_followup:
             return await self._async_zalo_pending_device_power_reply(
                 context, pending_device_power, service_context
             )
-        if pending_device_power is not None and (
-            command is not None or explicit_ha_kind is not None
-        ):
-            # A new explicit request replaces the older unconfirmed device
-            # action. This prevents a later generic "Đồng ý" from executing a
-            # stale command after the user has already moved on.
+        if pending_device_power is not None:
+            # A genuinely new feature/device request replaces the older
+            # pending action. Relevant action/value replies stay attached to
+            # the selected device for the full 120-second flow.
             self._zalo_pending_device_powers.pop(context.owner_key, None)
+            self._schedule_pending_expiry()
         if (
             pending_note is not None
             and command is None
@@ -9503,6 +11607,7 @@ class ConversationalAssistantManager(NoteManagerMixin):
             *self._pending.values(),
             *self._pending_deletions.values(),
             *self._pending_voice_cameras.values(),
+            *self._pending_voice_device_controls.values(),
             *self._note_pending_items(),
             *self._zalo_pending_notes.values(),
             *self._zalo_pending_creations.values(),
@@ -9529,6 +11634,7 @@ class ConversationalAssistantManager(NoteManagerMixin):
             self._pending
             or self._pending_deletions
             or self._pending_voice_cameras
+            or self._pending_voice_device_controls
             or self._has_pending_notes()
         )
         if has_pending and self._unsub_pending_trigger is None:
@@ -9563,6 +11669,11 @@ class ConversationalAssistantManager(NoteManagerMixin):
         for pending_id, pending in list(self._pending_voice_cameras.items()):
             if pending.expires_at <= now:
                 del self._pending_voice_cameras[pending_id]
+        for pending_id, pending in list(
+            self._pending_voice_device_controls.items()
+        ):
+            if pending.expires_at <= now:
+                del self._pending_voice_device_controls[pending_id]
         for owner_key, pending in list(self._zalo_pending_creations.items()):
             if pending.expires_at <= now:
                 del self._zalo_pending_creations[owner_key]
@@ -9599,6 +11710,11 @@ class ConversationalAssistantManager(NoteManagerMixin):
         for pending_id, pending in list(self._pending_voice_cameras.items()):
             if source_keys & pending.source_keys:
                 del self._pending_voice_cameras[pending_id]
+        for pending_id, pending in list(
+            self._pending_voice_device_controls.items()
+        ):
+            if source_keys & pending.source_keys:
+                del self._pending_voice_device_controls[pending_id]
 
     def _set_pending(
         self,
@@ -9693,6 +11809,7 @@ class ConversationalAssistantManager(NoteManagerMixin):
             len(self._pending) == 1
             and not self._pending_deletions
             and not self._pending_voice_cameras
+            and not self._pending_voice_device_controls
             and not self._has_pending_notes()
         ):
             return next(iter(self._pending.values()))
@@ -9715,6 +11832,7 @@ class ConversationalAssistantManager(NoteManagerMixin):
             len(self._pending_deletions) == 1
             and not self._pending
             and not self._pending_voice_cameras
+            and not self._pending_voice_device_controls
             and not self._has_pending_notes()
         ):
             return next(iter(self._pending_deletions.values()))
@@ -9737,6 +11855,7 @@ class ConversationalAssistantManager(NoteManagerMixin):
             len(self._pending_voice_cameras) == 1
             and not self._pending
             and not self._pending_deletions
+            and not self._pending_voice_device_controls
             and not self._has_pending_notes()
         ):
             return next(iter(self._pending_voice_cameras.values()))
@@ -10292,9 +12411,30 @@ class ConversationalAssistantManager(NoteManagerMixin):
     async def _async_pending_followup_from_voice(
         self, user_input: ConversationInput, result: RecognizeResult
     ) -> str | None:
-        """Handle follow-up selections for creation or deletion."""
+        """Handle active Voice Assist selections and confirmations."""
+        device_pending = self._find_pending_voice_device_control(user_input)
+        if device_pending is not None:
+            # Values such as “đặt 25 độ” overlap reminder trigger prefixes but
+            # are valid replies for a selected climate device. Yield only a
+            # clearly unrelated top-level command to its dedicated workflow.
+            device_followup = (
+                device_power_request_hint(user_input.text)
+                or parse_scheduled_for(user_input.text, dt_util.now())
+                is not None
+                or self._is_device_power_confirmation(user_input.text)
+                or self._is_cancel_pending_text(user_input.text)
+            )
+            if (
+                self._is_primary_voice_command(user_input.text)
+                and not device_followup
+            ):
+                return None
+            return await self._async_pending_voice_device_control_reply(
+                user_input, device_pending
+            )
+
         if self._is_primary_voice_command(user_input.text):
-            # Let the dedicated create/list/delete sentence trigger respond.
+            # Let the dedicated create/list/delete/search/help trigger respond.
             return None
 
         note_pending = self._find_pending_note(user_input)
