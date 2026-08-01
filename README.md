@@ -11,7 +11,7 @@
 Tích hợp kết hợp quản lý nhắc hẹn, ghi chú bảo mật, thông báo đa kênh và điều khiển nhà thông minh trong cùng một cấu hình. Người dùng có thể tạo nhắc hẹn bằng giọng nói, nhận thông báo trên điện thoại, Zalo hoặc loa, đồng thời hỏi trạng thái thiết bị, thời tiết và lịch sự kiện trực tiếp từ Zalo.
 
 > [!IMPORTANT]
-> Cài tích hợp rồi thêm Automation dưới nếu muốn dùng Zalo để tương tác.
+> Cài tích hợp rồi thêm Automation dưới nếu muốn dùng Zalo để tương tác. [Tham Khảo Cài Zalo và cách sử dụng](https://github.com/smarthomeblack/zalo_bot)
 > 
 
 ```
