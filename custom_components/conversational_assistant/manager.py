@@ -189,9 +189,12 @@ from .device_control import (
     DevicePowerTarget,
     POWER_CONTROL_DOMAINS,
     device_power_request_hint,
+    exact_power_targets,
     explicit_power_action,
     interpretation_from_payload,
+    is_rolling_door_target,
     rank_power_targets,
+    rolling_door_open_request_hint,
 )
 from .models import Reminder
 from .note_flow import (
@@ -552,21 +555,8 @@ class PendingVoiceCamera:
 
 
 @dataclass(slots=True)
-class PendingVoiceDevicePower:
-    """AI-recovered voice device command waiting for confirmation."""
-
-    pending_id: str
-    action: str
-    targets: list[DevicePowerTarget]
-    source_keys: set[str]
-    created_at: datetime
-    expires_at: datetime
-    attempted_agents: list[str]
-
-
-@dataclass(slots=True)
 class PendingZaloDevicePower:
-    """AI-recovered Zalo device command waiting for confirmation."""
+    """Rolling-door open command waiting for confirmation in one Zalo chat."""
 
     action: str
     targets: list[DevicePowerTarget]
@@ -737,9 +727,6 @@ class ConversationalAssistantManager(NoteManagerMixin):
         self._pending: dict[str, PendingReminder] = {}
         self._pending_deletions: dict[str, PendingDeletion] = {}
         self._pending_voice_cameras: dict[str, PendingVoiceCamera] = {}
-        self._pending_voice_device_power: dict[
-            str, PendingVoiceDevicePower
-        ] = {}
         self._zalo_pending_creations: dict[str, PendingZaloReminder] = {}
         self._zalo_pending_deletions: dict[str, PendingZaloDeletion] = {}
         self._zalo_pending_cameras: dict[str, PendingZaloCamera] = {}
@@ -2113,7 +2100,6 @@ class ConversationalAssistantManager(NoteManagerMixin):
         self._pending.clear()
         self._pending_deletions.clear()
         self._pending_voice_cameras.clear()
-        self._pending_voice_device_power.clear()
         self._zalo_pending_creations.clear()
         self._zalo_pending_deletions.clear()
         self._zalo_pending_cameras.clear()
@@ -2973,13 +2959,14 @@ class ConversationalAssistantManager(NoteManagerMixin):
             "📘 **HƯỚNG DẪN SỬ DỤNG CONVERSATIONAL ASSISTANT**\n"
             "🇻🇳 Dùng tiếng Việt hoặc 🇬🇧 English trên Voice Assist và Zalo.\n\n"
             "1️⃣ **🏠 NHÀ THÔNG MINH**\n"
-            "• Lệnh bật/tắt luôn thử công cụ Home Assistant cục bộ "
-            "trước để phản hồi nhanh.\n"
-            "• Chỉ khi Home Assistant không hiểu do sai hoặc dính từ, "
-            "AI mới phân tích; yêu cầu chưa chắc chắn sẽ hỏi **Đồng ý** "
-            "hoặc **Hủy** trong 120 giây.\n"
+            "• Điều khiển bật/tắt/mở/đóng của integration chỉ chạy trong "
+            "Zalo; Voice Assist dùng trực tiếp tính năng sẵn có của Home "
+            "Assistant để tránh xung đột.\n"
+            "• Trên Zalo, lệnh thiết bị hợp lệ được thực hiện ngay. Chỉ lệnh "
+            "**mở cửa cuốn/cửa gara** mới yêu cầu **Đồng ý** hoặc **Hủy** "
+            "trong 120 giây.\n"
             "• Ví dụ: `Bật đèn phòng khách`; `Tắtquạt phòng ngủ`; "
-            "`Kiểm tra thiết bị đang bật ở tầng 2`.\n\n"
+            "`Mở cửa cuốn`; `Kiểm tra thiết bị đang bật ở tầng 2`.\n\n"
             "2️⃣ **🌦️ THỜI TIẾT BẰNG AI SEARCH**\n"
             "• AI Search tự hiểu đúng địa điểm và mốc thời gian, rồi tra cứu dự báo Internet mới nhất.\n"
             "• Ví dụ: `Thời tiết Hà Nội chiều mai`; `Will it rain in Bangkok this weekend?`.\n\n"
@@ -5471,7 +5458,7 @@ class ConversationalAssistantManager(NoteManagerMixin):
         return ZaloDirectResponse(sent=True, response_type="generated_image")
 
     def _device_power_targets(self) -> list[DevicePowerTarget]:
-        """Return exposed entities with live Home Assistant power services."""
+        """Return exposed entities with live Zalo device-control services."""
         entity_registry = er.async_get(self.hass)
         device_registry = dr.async_get(self.hass)
         area_registry = ar.async_get(self.hass)
@@ -5484,13 +5471,28 @@ class ConversationalAssistantManager(NoteManagerMixin):
             if state.state == STATE_UNAVAILABLE:
                 continue
 
-            supports_turn_on = self.hass.services.has_service(
-                domain, "turn_on"
-            ) or self.hass.services.has_service("homeassistant", "turn_on")
-            supports_turn_off = self.hass.services.has_service(
-                domain, "turn_off"
-            ) or self.hass.services.has_service("homeassistant", "turn_off")
-            if not supports_turn_on and not supports_turn_off:
+            supports_turn_on = domain != "cover" and (
+                self.hass.services.has_service(domain, "turn_on")
+            )
+            supports_turn_off = domain != "cover" and (
+                self.hass.services.has_service(domain, "turn_off")
+            )
+            supports_open_cover = (
+                domain == "cover"
+                and self.hass.services.has_service("cover", "open_cover")
+            )
+            supports_close_cover = (
+                domain == "cover"
+                and self.hass.services.has_service("cover", "close_cover")
+            )
+            if not any(
+                (
+                    supports_turn_on,
+                    supports_turn_off,
+                    supports_open_cover,
+                    supports_close_cover,
+                )
+            ):
                 continue
 
             try:
@@ -5506,6 +5508,9 @@ class ConversationalAssistantManager(NoteManagerMixin):
                 continue
 
             display_name = str(state.name or state.entity_id).strip()
+            device_class = str(
+                state.attributes.get("device_class", "") or ""
+            ).strip()
             aliases = {
                 display_name,
                 state.entity_id,
@@ -5561,7 +5566,10 @@ class ConversationalAssistantManager(NoteManagerMixin):
                     aliases=tuple(sorted(aliases, key=str.casefold)),
                     supports_turn_on=supports_turn_on,
                     supports_turn_off=supports_turn_off,
+                    supports_open_cover=supports_open_cover,
+                    supports_close_cover=supports_close_cover,
                     area_name=area_name,
+                    device_class=device_class,
                 )
             )
 
@@ -5583,14 +5591,10 @@ class ConversationalAssistantManager(NoteManagerMixin):
         device_id: str | None = None,
         satellite_id: str | None = None,
     ) -> tuple[Any | None, str | None]:
-        """Run built-in Home Assistant intents before considering any AI.
+        """Run Home Assistant's built-in intents for a Zalo device command.
 
-        This intentionally bypasses sentence triggers registered by this
-        integration. A temporary catch-all trigger is active while Voice
-        Assist is waiting for confirmation; sending the command through the
-        full default-agent pipeline could therefore consume the command as a
-        confirmation response instead of running Home Assistant's native
-        device intent.
+        Calling the default agent's native intent handler directly avoids
+        sending the command back through this integration's sentence triggers.
         """
         agent_manager = get_agent_manager(self.hass)
         default_agent = getattr(agent_manager, "default_agent", None)
@@ -5673,6 +5677,9 @@ class ConversationalAssistantManager(NoteManagerMixin):
                 "area": target.area_name,
                 "turn_on": target.supports_turn_on,
                 "turn_off": target.supports_turn_off,
+                "open_cover": target.supports("open_cover"),
+                "close_cover": target.supports("close_cover"),
+                "device_class": target.device_class,
             }
             for target in ranked_targets
         ]
@@ -5682,9 +5689,10 @@ class ConversationalAssistantManager(NoteManagerMixin):
             "errors, repeated letters, missing spaces, or joined Vietnamese "
             "words. Choose only exact entity_id values from the inventory. "
             "Return exactly one JSON object and no explanation with fields: "
-            "action ('turn_on' or 'turn_off'), entity_ids (array), confidence "
-            "(0 to 1), needs_confirmation (boolean). If the action or target "
-            "is ambiguous, return entity_ids=[] and needs_confirmation=true. "
+            "action ('turn_on', 'turn_off', 'open_cover', or 'close_cover'), "
+            "entity_ids (array), and confidence (0 to 1). If the action or "
+            "target is ambiguous, return entity_ids=[]. Confirmation policy "
+            "is decided only by the integration. "
             "Never invent an entity_id. Select multiple entities only when the "
             "request clearly refers to all matching devices in a room, area, "
             "category, or plural group.\n\n"
@@ -5740,8 +5748,18 @@ class ConversationalAssistantManager(NoteManagerMixin):
     def _device_power_action_label(action: str, language: str) -> str:
         """Return a readable device action label."""
         if language == "en":
-            return "Turn on" if action == "turn_on" else "Turn off"
-        return "Bật" if action == "turn_on" else "Tắt"
+            return {
+                "turn_on": "Turn on",
+                "turn_off": "Turn off",
+                "open_cover": "Open",
+                "close_cover": "Close",
+            }.get(action, action)
+        return {
+            "turn_on": "Bật",
+            "turn_off": "Tắt",
+            "open_cover": "Mở",
+            "close_cover": "Đóng",
+        }.get(action, action)
 
     def _device_power_confirmation_text(
         self,
@@ -5749,36 +5767,26 @@ class ConversationalAssistantManager(NoteManagerMixin):
         targets: list[DevicePowerTarget],
         *,
         language: str,
-        zalo: bool,
         invalid: bool = False,
     ) -> str:
-        """Build a safe confirmation prompt for an AI-recovered command."""
+        """Build the Zalo-only rolling-door opening confirmation prompt."""
         action_label = self._device_power_action_label(action, language)
         names = ", ".join(target.display_name for target in targets)
         if language == "en":
             prefix = "I still need a clear confirmation.\n" if invalid else ""
-            if zalo:
-                return (
-                    f"⚠️ **Device-control confirmation required**\n\n{prefix}"
-                    f"**Action:** {action_label}\n"
-                    f"**Device:** {names}\n\n"
-                    "Reply **Agree** to execute or **Cancel** to stop."
-                )
             return (
-                f"{prefix}I understood the request as: {action_label} {names}. "
-                "Say agree to execute or cancel to stop."
+                f"⚠️ **Rolling-door opening confirmation required**\n\n"
+                f"{prefix}"
+                f"**Action:** {action_label}\n"
+                f"**Device:** {names}\n\n"
+                "Reply **Agree** to execute or **Cancel** to stop."
             )
         prefix = "Tôi vẫn cần bạn xác nhận rõ.\n" if invalid else ""
-        if zalo:
-            return (
-                f"⚠️ **Cần xác nhận điều khiển thiết bị**\n\n{prefix}"
-                f"**Thao tác:** {action_label}\n"
-                f"**Thiết bị:** {names}\n\n"
-                "Trả lời **Đồng ý** để thực hiện hoặc **Hủy** để dừng."
-            )
         return (
-            f"{prefix}Tôi hiểu yêu cầu là {action_label.lower()} {names}. "
-            "Hãy nói đồng ý để thực hiện hoặc hủy để dừng."
+            f"⚠️ **Cần xác nhận mở cửa cuốn**\n\n{prefix}"
+            f"**Thao tác:** {action_label}\n"
+            f"**Thiết bị:** {names}\n\n"
+            "Trả lời **Đồng ý** để thực hiện hoặc **Hủy** để dừng."
         )
 
     @staticmethod
@@ -5832,12 +5840,31 @@ class ConversationalAssistantManager(NoteManagerMixin):
                 failures.append(f"{target.display_name}: {reason}")
                 continue
             domain = current.domain
+            service_action = action
+            if (
+                action == "turn_on"
+                and is_rolling_door_target(current)
+                and current.supports_open_cover
+            ):
+                service_action = "open_cover"
+            elif (
+                action == "turn_off"
+                and is_rolling_door_target(current)
+                and current.supports_close_cover
+            ):
+                service_action = "close_cover"
+            elif action == "open_cover" and not current.supports_open_cover:
+                service_action = "turn_on"
+            elif action == "close_cover" and not current.supports_close_cover:
+                service_action = "turn_off"
             service_domain = (
                 domain
-                if self.hass.services.has_service(domain, action)
+                if self.hass.services.has_service(domain, service_action)
                 else "homeassistant"
             )
-            if not self.hass.services.has_service(service_domain, action):
+            if not self.hass.services.has_service(
+                service_domain, service_action
+            ):
                 reason = (
                     "does not support this action"
                     if language == "en"
@@ -5848,14 +5875,14 @@ class ConversationalAssistantManager(NoteManagerMixin):
             try:
                 await self.hass.services.async_call(
                     service_domain,
-                    action,
+                    service_action,
                     {"entity_id": current.entity_id},
                     blocking=True,
                     context=service_context,
                 )
             except Exception:  # noqa: BLE001 - continue other exact targets
                 _LOGGER.exception(
-                    "Failed %s for %s", action, current.entity_id
+                    "Failed %s for %s", service_action, current.entity_id
                 )
                 reason = (
                     "action failed"
@@ -5874,15 +5901,13 @@ class ConversationalAssistantManager(NoteManagerMixin):
         failures: list[str],
         *,
         language: str,
-        zalo: bool,
     ) -> str:
-        """Format an exact result without claiming failed actions succeeded."""
+        """Format a Zalo result without claiming failed actions succeeded."""
         action_label = self._device_power_action_label(action, language)
         if language == "en":
             if succeeded:
                 message = (
-                    f"{'✅ **' if zalo else ''}{action_label} completed"
-                    f"{'**' if zalo else ''}: "
+                    f"✅ **{action_label} completed**: "
                     + ", ".join(target.display_name for target in succeeded)
                     + "."
                 )
@@ -5893,18 +5918,11 @@ class ConversationalAssistantManager(NoteManagerMixin):
             return message
 
         if succeeded:
-            if zalo:
-                message = (
-                    f"✅ **Đã {action_label.lower()} thiết bị**\n\n"
-                    + ", ".join(target.display_name for target in succeeded)
-                    + "."
-                )
-            else:
-                message = (
-                    f"Đã {action_label.lower()} "
-                    + ", ".join(target.display_name for target in succeeded)
-                    + "."
-                )
+            message = (
+                f"✅ **Đã {action_label.lower()} thiết bị**\n\n"
+                + ", ".join(target.display_name for target in succeeded)
+                + "."
+            )
         else:
             message = "Chưa thể thực hiện thao tác với thiết bị."
         if failures:
@@ -5912,46 +5930,144 @@ class ConversationalAssistantManager(NoteManagerMixin):
         return message
 
     @staticmethod
-    def _can_auto_execute_ai_device_power(
+    def _can_execute_ai_device_power(
         text: str,
         interpretation: DevicePowerInterpretation,
-        all_targets: list[DevicePowerTarget],
     ) -> bool:
-        """Allow automatic execution only for a unique, exact AI recovery."""
-        if (
-            interpretation.needs_confirmation
-            or interpretation.confidence < 0.98
-            or explicit_power_action(text) != interpretation.action
-            or len(interpretation.targets) != 1
-        ):
-            return False
-
-        compact_text = normalize_text(text).replace(" ", "")
-        selected = interpretation.targets[0]
-        alias_targets: dict[str, set[str]] = {}
-        for target in all_targets:
-            for alias in target.aliases:
-                compact_alias = normalize_text(alias).replace(" ", "")
-                if compact_alias:
-                    alias_targets.setdefault(compact_alias, set()).add(
-                        target.entity_id
-                    )
-
-        return any(
-            compact_alias in compact_text
-            and len(alias_targets.get(compact_alias, set())) == 1
-            for alias in selected.aliases
-            if (compact_alias := normalize_text(alias).replace(" ", ""))
+        """Allow a validated Zalo interpretation to execute without a prompt."""
+        return bool(
+            interpretation.targets
+            and interpretation.confidence >= 0.80
+            and explicit_power_action(text) == interpretation.action
         )
 
+    @staticmethod
+    def _device_power_requires_confirmation(
+        action: str,
+        targets: list[DevicePowerTarget],
+    ) -> bool:
+        """Require confirmation only when Zalo is opening a rolling door."""
+        return action in {"open_cover", "turn_on"} and any(
+            is_rolling_door_target(target) for target in targets
+        )
+
+    @staticmethod
+    def _device_power_clarification_text(language: str) -> str:
+        """Ask for a clearer target without creating a confirmation flow."""
+        if language == "en":
+            return (
+                "I could not identify the device confidently enough to control "
+                "it. Please include the exact device or room name."
+            )
+        return (
+            "Tôi chưa xác định đủ chắc chắn thiết bị cần điều khiển. Hãy nhập "
+            "đúng tên thiết bị hoặc kèm tên phòng/khu vực."
+        )
+
+    async def _async_execute_or_confirm_zalo_device_power(
+        self,
+        context: ZaloWebhookContext,
+        action: str,
+        targets: list[DevicePowerTarget],
+        attempted_agents: list[str],
+        service_context: Context | None,
+        *,
+        language: str,
+    ) -> str:
+        """Execute immediately, except when Zalo is opening a rolling door."""
+        if self._device_power_requires_confirmation(action, targets):
+            self._zalo_pending_device_powers[context.owner_key] = (
+                PendingZaloDevicePower(
+                    action=action,
+                    targets=list(targets),
+                    expires_at=dt_util.now()
+                    + timedelta(seconds=PENDING_CONFIRMATION_TIMEOUT_SECONDS),
+                    attempted_agents=list(attempted_agents),
+                )
+            )
+            return self._append_ai_attempt_summary(
+                self._device_power_confirmation_text(
+                    action,
+                    targets,
+                    language=language,
+                ),
+                attempted_agents,
+                language=language,
+                zalo=True,
+            )
+
+        succeeded, failures = await self._async_execute_device_power(
+            action,
+            targets,
+            service_context,
+            language=language,
+        )
+        return self._append_ai_attempt_summary(
+            self._device_power_result_text(
+                action,
+                succeeded,
+                failures,
+                language=language,
+            ),
+            attempted_agents,
+            language=language,
+            zalo=True,
+        )
 
     async def _async_device_power_from_zalo(
         self,
         context: ZaloWebhookContext,
         service_context: Context | None,
     ) -> str:
-        """Use native Home Assistant first, then AI parsing only on failure."""
+        """Control devices from Zalo without duplicating Voice Assist logic."""
         language = _request_language(context.text)
+        targets = self._device_power_targets()
+        explicit_action = explicit_power_action(context.text)
+        if explicit_action is not None:
+            exact_targets = exact_power_targets(
+                context.text,
+                explicit_action,
+                targets,
+            )
+            if exact_targets:
+                return await self._async_execute_or_confirm_zalo_device_power(
+                    context,
+                    explicit_action,
+                    exact_targets,
+                    [],
+                    service_context,
+                    language=language,
+                )
+
+        # Never let the native agent open a rolling door before this
+        # integration has applied its explicit Zalo confirmation policy.
+        if rolling_door_open_request_hint(context.text):
+            interpretation, attempted = (
+                await self._async_ai_device_power_interpretation(
+                    context.text,
+                    targets,
+                    service_context=service_context,
+                    language=language,
+                )
+            )
+            if interpretation is None or not self._can_execute_ai_device_power(
+                context.text, interpretation
+            ):
+                return self._append_ai_attempt_summary(
+                    self._device_power_clarification_text(language),
+                    attempted,
+                    language=language,
+                    zalo=True,
+                )
+            return await self._async_execute_or_confirm_zalo_device_power(
+                context,
+                interpretation.action,
+                list(interpretation.targets),
+                attempted,
+                service_context,
+                language=language,
+            )
+
         native_result, native_failure = (
             await self._async_native_home_assistant_converse(
                 context.text,
@@ -5994,7 +6110,6 @@ class ConversationalAssistantManager(NoteManagerMixin):
                 else "Home Assistant chưa thể hoàn tất thao tác thiết bị."
             )
 
-        targets = self._device_power_targets()
         interpretation, attempted = (
             await self._async_ai_device_power_interpretation(
                 context.text,
@@ -6003,60 +6118,23 @@ class ConversationalAssistantManager(NoteManagerMixin):
                 language=language,
             )
         )
-        if interpretation is None:
-            message = (
-                "I could not identify both the action and device. Please type "
-                "the device name more clearly."
-                if language == "en"
-                else "Tôi chưa xác định chắc chắn cả thao tác và thiết bị. Hãy "
-                "nhập rõ hơn tên thiết bị cần bật hoặc tắt."
-            )
-            return self._append_ai_attempt_summary(
-                message, attempted, language=language, zalo=True
-            )
-
-        selected = list(interpretation.targets)
-        if self._can_auto_execute_ai_device_power(
-            context.text, interpretation, targets
+        if interpretation is None or not self._can_execute_ai_device_power(
+            context.text, interpretation
         ):
-            succeeded, failures = await self._async_execute_device_power(
-                interpretation.action,
-                selected,
-                service_context,
-                language=language,
-            )
             return self._append_ai_attempt_summary(
-                self._device_power_result_text(
-                    interpretation.action,
-                    succeeded,
-                    failures,
-                    language=language,
-                    zalo=True,
-                ),
+                self._device_power_clarification_text(language),
                 attempted,
                 language=language,
                 zalo=True,
             )
 
-        self._zalo_pending_device_powers[context.owner_key] = (
-            PendingZaloDevicePower(
-                action=interpretation.action,
-                targets=selected,
-                expires_at=dt_util.now()
-                + timedelta(seconds=PENDING_CONFIRMATION_TIMEOUT_SECONDS),
-                attempted_agents=attempted,
-            )
-        )
-        return self._append_ai_attempt_summary(
-            self._device_power_confirmation_text(
-                interpretation.action,
-                selected,
-                language=language,
-                zalo=True,
-            ),
+        return await self._async_execute_or_confirm_zalo_device_power(
+            context,
+            interpretation.action,
+            list(interpretation.targets),
             attempted,
+            service_context,
             language=language,
-            zalo=True,
         )
 
     async def _async_zalo_pending_device_power_reply(
@@ -6065,14 +6143,14 @@ class ConversationalAssistantManager(NoteManagerMixin):
         pending: PendingZaloDevicePower,
         service_context: Context | None,
     ) -> str:
-        """Confirm or cancel one AI-recovered Zalo power command."""
+        """Confirm or cancel one Zalo rolling-door opening command."""
         language = _request_language(context.text)
         if self._is_cancel_pending_text(context.text):
             self._zalo_pending_device_powers.pop(context.owner_key, None)
             return (
-                "Cancelled the pending device action."
+                "Cancelled the pending rolling-door opening."
                 if language == "en"
-                else "Đã hủy thao tác thiết bị đang chờ xác nhận."
+                else "Đã hủy yêu cầu mở cửa cuốn đang chờ xác nhận."
             )
 
         if not self._is_device_power_confirmation(context.text):
@@ -6083,11 +6161,18 @@ class ConversationalAssistantManager(NoteManagerMixin):
                 pending.action,
                 pending.targets,
                 language=language,
-                zalo=True,
                 invalid=True,
             )
 
         self._zalo_pending_device_powers.pop(context.owner_key, None)
+        if not self._device_power_requires_confirmation(
+            pending.action, pending.targets
+        ):
+            _LOGGER.warning(
+                "Discarded unexpected non-door Zalo confirmation for %s",
+                context.owner_key,
+            )
+            return self._device_power_clarification_text(language)
         succeeded, failures = await self._async_execute_device_power(
             pending.action,
             pending.targets,
@@ -6100,208 +6185,11 @@ class ConversationalAssistantManager(NoteManagerMixin):
                 succeeded,
                 failures,
                 language=language,
-                zalo=True,
             ),
             pending.attempted_agents,
             language=language,
             zalo=True,
         )
-
-    async def _async_device_power_from_voice(
-        self,
-        user_input: ConversationInput,
-        text: str,
-    ) -> str:
-        """Apply the same native-first policy to routed Voice Assist commands."""
-        conversation_language = str(
-            getattr(user_input, "language", "vi") or "vi"
-        )
-        language = (
-            "en"
-            if conversation_language.casefold().startswith("en")
-            else _request_language(text)
-        )
-        native_result, native_failure = (
-            await self._async_native_home_assistant_converse(
-                text,
-                context=user_input.context,
-                language=conversation_language,
-                conversation_id=user_input.conversation_id,
-                device_id=user_input.device_id,
-                satellite_id=user_input.satellite_id,
-            )
-        )
-        if native_result is None:
-            if language == "en":
-                reply = (
-                    "The local Home Assistant agent timed out. AI was not used "
-                    "to avoid running the device action twice."
-                    if native_failure == "timeout"
-                    else "The local Home Assistant agent failed. AI was not "
-                    "used because the device action status is unknown."
-                )
-            else:
-                reply = (
-                    "Home Assistant cục bộ phản hồi quá lâu. Tôi không dùng AI "
-                    "để tránh thực hiện lặp thao tác thiết bị."
-                    if native_failure == "timeout"
-                    else "Home Assistant cục bộ gặp lỗi. Tôi không dùng AI vì "
-                    "chưa xác định được trạng thái thao tác thiết bị."
-                )
-            return await self._async_voice_response(user_input, reply)
-
-        native_error = self._conversation_result_error_code(native_result)
-        native_reply = self._conversation_reply_text(native_result)
-        if not native_error:
-            reply = native_reply or (
-                "Home Assistant completed the device action."
-                if language == "en"
-                else "Home Assistant đã thực hiện thao tác thiết bị."
-            )
-            return await self._async_voice_response(user_input, reply)
-        if native_error and native_error not in {
-            "no_intent_match",
-            "no_valid_targets",
-        }:
-            return await self._async_voice_response(
-                user_input,
-                native_reply
-                or (
-                    "Home Assistant could not complete the device action."
-                    if language == "en"
-                    else "Home Assistant chưa thể hoàn tất thao tác thiết bị."
-                ),
-            )
-
-        targets = self._device_power_targets()
-        interpretation, attempted = (
-            await self._async_ai_device_power_interpretation(
-                text,
-                targets,
-                service_context=user_input.context,
-                language=language,
-            )
-        )
-        if interpretation is None:
-            reply = (
-                "I could not identify both the action and device. Please say "
-                "the device name more clearly."
-                if language == "en"
-                else "Tôi chưa xác định chắc chắn cả thao tác và thiết bị. Hãy "
-                "nói rõ hơn tên thiết bị cần bật hoặc tắt."
-            )
-            reply = self._append_ai_attempt_summary(
-                reply, attempted, language=language, zalo=False
-            )
-            return await self._async_voice_response(
-                user_input, reply, ai_generated=bool(attempted)
-            )
-
-        selected = list(interpretation.targets)
-        if self._can_auto_execute_ai_device_power(
-            text, interpretation, targets
-        ):
-            succeeded, failures = await self._async_execute_device_power(
-                interpretation.action,
-                selected,
-                user_input.context,
-                language=language,
-            )
-            reply = self._device_power_result_text(
-                interpretation.action,
-                succeeded,
-                failures,
-                language=language,
-                zalo=False,
-            )
-            reply = self._append_ai_attempt_summary(
-                reply, attempted, language=language, zalo=False
-            )
-            return await self._async_voice_response(
-                user_input, reply, ai_generated=bool(attempted)
-            )
-
-        self._set_pending_voice_device_power(
-            user_input,
-            interpretation.action,
-            selected,
-            attempted,
-        )
-        reply = self._device_power_confirmation_text(
-            interpretation.action,
-            selected,
-            language=language,
-            zalo=False,
-        )
-        reply = self._append_ai_attempt_summary(
-            reply, attempted, language=language, zalo=False
-        )
-        return await self._async_voice_response(
-            user_input, reply, ai_generated=bool(attempted)
-        )
-
-    async def _async_confirm_device_power_from_voice(
-        self,
-        user_input: ConversationInput,
-        pending: PendingVoiceDevicePower,
-    ) -> str:
-        """Confirm or cancel one AI-recovered Voice Assist power command."""
-        conversation_language = str(
-            getattr(user_input, "language", "vi") or "vi"
-        )
-        language = (
-            "en"
-            if conversation_language.casefold().startswith("en")
-            else _request_language(user_input.text)
-        )
-        if self._is_cancel_pending_text(user_input.text):
-            self._pending_voice_device_power.pop(pending.pending_id, None)
-            self._sync_pending_followup_trigger()
-            reply = (
-                "Cancelled the pending device action."
-                if language == "en"
-                else "Đã hủy thao tác thiết bị đang chờ xác nhận."
-            )
-            return await self._async_voice_response(user_input, reply)
-
-        if not self._is_device_power_confirmation(user_input.text):
-            pending.expires_at = dt_util.now() + timedelta(
-                seconds=PENDING_CONFIRMATION_TIMEOUT_SECONDS
-            )
-            self._sync_pending_followup_trigger()
-            return await self._async_voice_response(
-                user_input,
-                self._device_power_confirmation_text(
-                    pending.action,
-                    pending.targets,
-                    language=language,
-                    zalo=False,
-                    invalid=True,
-                ),
-            )
-
-        self._pending_voice_device_power.pop(pending.pending_id, None)
-        self._sync_pending_followup_trigger()
-        succeeded, failures = await self._async_execute_device_power(
-            pending.action,
-            pending.targets,
-            user_input.context,
-            language=language,
-        )
-        reply = self._device_power_result_text(
-            pending.action,
-            succeeded,
-            failures,
-            language=language,
-            zalo=False,
-        )
-        reply = self._append_ai_attempt_summary(
-            reply,
-            pending.attempted_agents,
-            language=language,
-            zalo=False,
-        )
-        return await self._async_voice_response(user_input, reply)
 
     async def _async_home_assistant_conversation_from_zalo(
         self,
@@ -6423,9 +6311,6 @@ class ConversationalAssistantManager(NoteManagerMixin):
         text: str,
     ) -> str:
         """Run a learned HA macro with per-agent timeout and AI failover."""
-        if device_power_request_hint(text):
-            return await self._async_device_power_from_voice(user_input, text)
-
         conversation_language = str(
             getattr(user_input, "language", "vi") or "vi"
         )
@@ -9123,7 +9008,6 @@ class ConversationalAssistantManager(NoteManagerMixin):
             *self._pending.values(),
             *self._pending_deletions.values(),
             *self._pending_voice_cameras.values(),
-            *self._pending_voice_device_power.values(),
             *self._note_pending_items(),
             *self._zalo_pending_notes.values(),
             *self._zalo_pending_creations.values(),
@@ -9150,7 +9034,6 @@ class ConversationalAssistantManager(NoteManagerMixin):
             self._pending
             or self._pending_deletions
             or self._pending_voice_cameras
-            or self._pending_voice_device_power
             or self._has_pending_notes()
         )
         if has_pending and self._unsub_pending_trigger is None:
@@ -9185,11 +9068,6 @@ class ConversationalAssistantManager(NoteManagerMixin):
         for pending_id, pending in list(self._pending_voice_cameras.items()):
             if pending.expires_at <= now:
                 del self._pending_voice_cameras[pending_id]
-        for pending_id, pending in list(
-            self._pending_voice_device_power.items()
-        ):
-            if pending.expires_at <= now:
-                del self._pending_voice_device_power[pending_id]
         for owner_key, pending in list(self._zalo_pending_creations.items()):
             if pending.expires_at <= now:
                 del self._zalo_pending_creations[owner_key]
@@ -9226,11 +9104,6 @@ class ConversationalAssistantManager(NoteManagerMixin):
         for pending_id, pending in list(self._pending_voice_cameras.items()):
             if source_keys & pending.source_keys:
                 del self._pending_voice_cameras[pending_id]
-        for pending_id, pending in list(
-            self._pending_voice_device_power.items()
-        ):
-            if source_keys & pending.source_keys:
-                del self._pending_voice_device_power[pending_id]
 
     def _set_pending(
         self,
@@ -9308,32 +9181,6 @@ class ConversationalAssistantManager(NoteManagerMixin):
         self._sync_pending_followup_trigger()
         return pending
 
-    def _set_pending_voice_device_power(
-        self,
-        user_input: ConversationInput,
-        action: str,
-        targets: list[DevicePowerTarget],
-        attempted_agents: list[str],
-    ) -> PendingVoiceDevicePower:
-        """Store an AI-recovered device command waiting for confirmation."""
-        self._purge_expired_pending()
-        source_keys = self._source_keys(user_input)
-        self._clear_pending_for_source(source_keys)
-        now = dt_util.now()
-        pending = PendingVoiceDevicePower(
-            pending_id=uuid.uuid4().hex,
-            action=action,
-            targets=list(targets),
-            source_keys=source_keys,
-            created_at=now,
-            expires_at=now
-            + timedelta(seconds=PENDING_CONFIRMATION_TIMEOUT_SECONDS),
-            attempted_agents=list(attempted_agents),
-        )
-        self._pending_voice_device_power[pending.pending_id] = pending
-        self._sync_pending_followup_trigger()
-        return pending
-
     def _find_pending(
         self, user_input: ConversationInput
     ) -> PendingReminder | None:
@@ -9351,7 +9198,6 @@ class ConversationalAssistantManager(NoteManagerMixin):
             len(self._pending) == 1
             and not self._pending_deletions
             and not self._pending_voice_cameras
-            and not self._pending_voice_device_power
             and not self._has_pending_notes()
         ):
             return next(iter(self._pending.values()))
@@ -9374,7 +9220,6 @@ class ConversationalAssistantManager(NoteManagerMixin):
             len(self._pending_deletions) == 1
             and not self._pending
             and not self._pending_voice_cameras
-            and not self._pending_voice_device_power
             and not self._has_pending_notes()
         ):
             return next(iter(self._pending_deletions.values()))
@@ -9397,33 +9242,9 @@ class ConversationalAssistantManager(NoteManagerMixin):
             len(self._pending_voice_cameras) == 1
             and not self._pending
             and not self._pending_deletions
-            and not self._pending_voice_device_power
             and not self._has_pending_notes()
         ):
             return next(iter(self._pending_voice_cameras.values()))
-        return None
-
-    def _find_pending_voice_device_power(
-        self, user_input: ConversationInput
-    ) -> PendingVoiceDevicePower | None:
-        """Find a pending device-control confirmation for this source."""
-        self._purge_expired_pending()
-        source_keys = self._source_keys(user_input)
-        matching = [
-            pending
-            for pending in self._pending_voice_device_power.values()
-            if source_keys & pending.source_keys
-        ]
-        if matching:
-            return max(matching, key=lambda item: item.created_at)
-        if (
-            len(self._pending_voice_device_power) == 1
-            and not self._pending
-            and not self._pending_deletions
-            and not self._pending_voice_cameras
-            and not self._has_pending_notes()
-        ):
-            return next(iter(self._pending_voice_device_power.values()))
         return None
 
     @staticmethod
@@ -9983,22 +9804,6 @@ class ConversationalAssistantManager(NoteManagerMixin):
 
         note_pending = self._find_pending_note(user_input)
         camera_pending = self._find_pending_voice_camera(user_input)
-        device_power_pending = self._find_pending_voice_device_power(
-            user_input
-        )
-        if device_power_pending is not None and device_power_request_hint(
-            user_input.text
-        ):
-            # Replace the old unconfirmed action before invoking the native
-            # agent. Unregistering the temporary catch-all first also avoids
-            # recursively matching the same device command.
-            self._pending_voice_device_power.pop(
-                device_power_pending.pending_id, None
-            )
-            self._sync_pending_followup_trigger()
-            return await self._async_device_power_from_voice(
-                user_input, user_input.text
-            )
         creation = self._find_pending(user_input)
         deletion = self._find_pending_deletion(user_input)
         if note_pending is not None:
@@ -10007,7 +9812,6 @@ class ConversationalAssistantManager(NoteManagerMixin):
             )
         if (
             camera_pending is None
-            and device_power_pending is None
             and creation is None
             and deletion is None
         ):
@@ -10034,11 +9838,6 @@ class ConversationalAssistantManager(NoteManagerMixin):
                     response = "Đã hủy yêu cầu phân tích camera."
                 else:
                     response = "Đã hủy yêu cầu chụp ảnh camera."
-            elif device_power_pending is not None:
-                self._pending_voice_device_power.pop(
-                    device_power_pending.pending_id, None
-                )
-                response = "Đã hủy thao tác thiết bị đang chờ xác nhận."
             elif creation is not None:
                 self._pending.pop(creation.pending_id, None)
                 response = "Đã hủy nhắc nhở đang tạo."
@@ -10052,10 +9851,6 @@ class ConversationalAssistantManager(NoteManagerMixin):
         if camera_pending is not None:
             return await self._async_confirm_camera_from_voice(
                 user_input, result, camera_pending
-            )
-        if device_power_pending is not None:
-            return await self._async_confirm_device_power_from_voice(
-                user_input, device_power_pending
             )
         if deletion is not None:
             return await self._async_confirm_deletion_from_voice(
@@ -10495,14 +10290,12 @@ class ConversationalAssistantManager(NoteManagerMixin):
     async def _async_cancel_pending_from_voice(
         self, user_input: ConversationInput, _result: RecognizeResult
     ) -> str:
-        """Cancel a pending creation, deletion, camera, or device request."""
+        """Cancel a pending creation, deletion, or camera request."""
         camera = self._find_pending_voice_camera(user_input)
-        device_power = self._find_pending_voice_device_power(user_input)
         creation = self._find_pending(user_input)
         deletion = self._find_pending_deletion(user_input)
         if (
             camera is None
-            and device_power is None
             and creation is None
             and deletion is None
         ):
@@ -10515,11 +10308,6 @@ class ConversationalAssistantManager(NoteManagerMixin):
                 response = "Đã hủy yêu cầu phân tích camera."
             else:
                 response = "Đã hủy yêu cầu chụp ảnh camera."
-        elif device_power is not None:
-            self._pending_voice_device_power.pop(
-                device_power.pending_id, None
-            )
-            response = "Đã hủy thao tác thiết bị đang chờ xác nhận."
         elif creation is not None:
             self._pending.pop(creation.pending_id, None)
             response = "Đã hủy nhắc nhở đang tạo."

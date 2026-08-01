@@ -1,4 +1,4 @@
-"""Safe helpers for fast Home Assistant device power control."""
+"""Safe helpers for Zalo-only Home Assistant device control."""
 
 from __future__ import annotations
 
@@ -16,6 +16,7 @@ POWER_CONTROL_DOMAINS = frozenset(
     {
         "automation",
         "climate",
+        "cover",
         "fan",
         "humidifier",
         "input_boolean",
@@ -28,6 +29,20 @@ POWER_CONTROL_DOMAINS = frozenset(
         "vacuum",
         "water_heater",
     }
+)
+
+CONTROL_ACTIONS = frozenset(
+    {"turn_on", "turn_off", "open_cover", "close_cover"}
+)
+
+_ROLLING_DOOR_CUES = (
+    "cua cuon",
+    "cua gara",
+    "cua garage",
+    "cua nha xe",
+    "garage door",
+    "rolling door",
+    "roller door",
 )
 
 _POLITE_PREFIXES = (
@@ -70,6 +85,11 @@ _NON_ACTION_PREFIXES = (
     "batch",
     "battery",
     "battle",
+    "mo khoa",
+    "mo nhac",
+    "mo video",
+    "mo ung dung",
+    "dong ung dung",
     "tat ca",
     "tat nhien",
     "tat yeu",
@@ -85,6 +105,12 @@ _RAW_NON_POWER_PREFIXES = (
     "tắt âm thanh",
     "bật video",
     "tắt video",
+    "mở khóa",
+    "mở khoá",
+    "mở nhạc",
+    "mở video",
+    "mở ứng dụng",
+    "đóng ứng dụng",
 )
 
 _ASCII_JOINED_DEVICE_CUES = (
@@ -105,12 +131,17 @@ _ASCII_JOINED_DEVICE_CUES = (
     "binhnonglanh",
     "taoam",
     "hutbui",
+    "cuacuon",
+    "cuagara",
+    "garagedoor",
+    "rollingdoor",
+    "cong",
 )
 
 
 @dataclass(slots=True, frozen=True)
 class DevicePowerTarget:
-    """One exposed Home Assistant entity that can be powered on or off."""
+    """One exposed Home Assistant entity supported by Zalo device control."""
 
     entity_id: str
     display_name: str
@@ -118,14 +149,29 @@ class DevicePowerTarget:
     aliases: tuple[str, ...]
     supports_turn_on: bool
     supports_turn_off: bool
+    supports_open_cover: bool = False
+    supports_close_cover: bool = False
     area_name: str = ""
+    device_class: str = ""
 
     def supports(self, action: str) -> bool:
         """Return whether this entity supports the requested action."""
         if action == "turn_on":
-            return self.supports_turn_on
+            return self.supports_turn_on or (
+                is_rolling_door_target(self) and self.supports_open_cover
+            )
         if action == "turn_off":
-            return self.supports_turn_off
+            return self.supports_turn_off or (
+                is_rolling_door_target(self) and self.supports_close_cover
+            )
+        if action == "open_cover":
+            return self.supports_open_cover or (
+                is_rolling_door_target(self) and self.supports_turn_on
+            )
+        if action == "close_cover":
+            return self.supports_close_cover or (
+                is_rolling_door_target(self) and self.supports_turn_off
+            )
         return False
 
 
@@ -136,7 +182,35 @@ class DevicePowerInterpretation:
     action: str
     targets: tuple[DevicePowerTarget, ...]
     confidence: float
-    needs_confirmation: bool
+
+
+def is_rolling_door_target(target: DevicePowerTarget) -> bool:
+    """Return whether a target represents a rolling/garage-style door."""
+    device_class = normalize_text(target.device_class)
+    if device_class == "garage":
+        return True
+
+    searchable = normalize_text(
+        " ".join(
+            (
+                target.display_name,
+                target.area_name,
+                *target.aliases,
+            )
+        )
+    )
+    return any(cue in searchable for cue in _ROLLING_DOOR_CUES)
+
+
+def rolling_door_open_request_hint(text: str) -> bool:
+    """Return whether text explicitly asks to open a rolling-style door."""
+    action = explicit_power_action(text)
+    if action not in {"open_cover", "turn_on"}:
+        return False
+    normalized = normalize_text(text)
+    return any(cue in normalized for cue in _ROLLING_DOOR_CUES) or bool(
+        re.search(r"\b(?:gara|garage)\b", normalized)
+    )
 
 
 def explicit_power_action(text: str) -> str | None:
@@ -156,12 +230,20 @@ def explicit_power_action(text: str) -> str | None:
     negative_prefixes = (
         "khong bat",
         "khong tat",
+        "khong mo",
+        "khong dong",
         "dung bat",
         "dung tat",
+        "dung mo",
+        "dung dong",
         "do not turn on",
         "do not turn off",
+        "do not open",
+        "do not close",
         "dont turn on",
         "dont turn off",
+        "dont open",
+        "dont close",
     )
     if normalized.startswith(negative_prefixes):
         return None
@@ -177,6 +259,10 @@ def explicit_power_action(text: str) -> str | None:
         return "turn_on"
     if raw.startswith("tắt") and len(raw) > len("tắt"):
         return "turn_off"
+    if raw.startswith("mở") and len(raw) > len("mở"):
+        return "open_cover"
+    if raw.startswith("đóng") and len(raw) > len("đóng"):
+        return "close_cover"
 
     # Text without Vietnamese diacritics is more ambiguous, so reject common
     # non-command prefixes before accepting an ASCII action word.
@@ -201,10 +287,22 @@ def explicit_power_action(text: str) -> str | None:
         "power off ",
         "deactivate ",
     )
+    exact_open = (
+        "mo ",
+        "open ",
+    )
+    exact_close = (
+        "dong ",
+        "close ",
+    )
     if normalized.startswith(exact_on):
         return "turn_on"
     if normalized.startswith(exact_off):
         return "turn_off"
+    if normalized.startswith(exact_open):
+        return "open_cover"
+    if normalized.startswith(exact_close):
+        return "close_cover"
 
     if re.match(
         r"^(?:turn|switch|power)\s+.+\s+on(?:\s+please)?$",
@@ -216,6 +314,10 @@ def explicit_power_action(text: str) -> str | None:
         normalized,
     ):
         return "turn_off"
+    if re.match(r"^open\s+.+(?:\s+please)?$", normalized):
+        return "open_cover"
+    if re.match(r"^close\s+.+(?:\s+please)?$", normalized):
+        return "close_cover"
 
     compact = normalized.replace(" ", "")
     if re.match(r"^(?:kichhoat)(?=.+)", compact):
@@ -226,6 +328,10 @@ def explicit_power_action(text: str) -> str | None:
         return "turn_on"
     if re.match(r"^(?:turnoff|switchoff|poweroff|deactivate)(?=.+)", compact):
         return "turn_off"
+    if re.match(r"^(?:open)(?=.+)", compact):
+        return "open_cover"
+    if re.match(r"^(?:close)(?=.+)", compact):
+        return "close_cover"
 
     # Without Vietnamese diacritics, only accept joined/repeated action words
     # when the remainder begins with a common device cue. This keeps typo
@@ -236,13 +342,32 @@ def explicit_power_action(text: str) -> str | None:
     off_match = re.match(r"^ta+t+(?P<target>.+)", compact)
     if off_match and off_match.group("target").startswith(_ASCII_JOINED_DEVICE_CUES):
         return "turn_off"
+    open_match = re.match(r"^mo+(?P<target>.+)", compact)
+    if open_match and open_match.group("target").startswith(
+        _ASCII_JOINED_DEVICE_CUES
+    ):
+        return "open_cover"
+    close_match = re.match(r"^dong(?P<target>.+)", compact)
+    if close_match and close_match.group("target").startswith(
+        _ASCII_JOINED_DEVICE_CUES
+    ):
+        return "close_cover"
     return None
 
 
 def device_power_request_hint(text: str) -> bool:
-    """Return whether text plausibly asks to turn a device on or off."""
+    """Return whether text plausibly asks to control a supported device."""
     normalized = normalize_text(text)
-    if not normalized or normalized in {"bat", "tat", "turn on", "turn off"}:
+    if not normalized or normalized in {
+        "bat",
+        "tat",
+        "mo",
+        "dong",
+        "turn on",
+        "turn off",
+        "open",
+        "close",
+    }:
         return False
     return explicit_power_action(text) is not None
 
@@ -280,6 +405,15 @@ def _target_score(text: str, target: DevicePowerTarget) -> float:
         "light": ("den", "light", "lamp"),
         "fan": ("quat", "fan"),
         "switch": ("cong tac", "switch", "o cam", "plug"),
+        "cover": (
+            "cua cuon",
+            "cua gara",
+            "garage door",
+            "rolling door",
+            "rem",
+            "curtain",
+            "cover",
+        ),
         "media_player": ("loa", "tv", "tivi", "nhac", "speaker"),
         "climate": ("dieu hoa", "may lanh", "climate", "air conditioner"),
         "vacuum": ("robot", "hut bui", "vacuum"),
@@ -289,6 +423,59 @@ def _target_score(text: str, target: DevicePowerTarget) -> float:
     if any(cue in normalized for cue in domain_cues.get(target.domain, ())):
         best += 0.35
     return best
+
+
+def exact_power_targets(
+    text: str,
+    action: str,
+    targets: Iterable[DevicePowerTarget],
+) -> list[DevicePowerTarget]:
+    """Resolve a unique exact alias match without asking an AI model.
+
+    The longest matching alias wins. If multiple entities share the same best
+    alias, return no match so the caller can use Home Assistant's native intent
+    resolver or ask the user to be more specific instead of guessing.
+    """
+    if action not in CONTROL_ACTIONS:
+        return []
+
+    normalized = normalize_text(text)
+    if re.search(
+        r"\b(?:all|every|tat ca|toan bo|cac|nhung)\b",
+        normalized,
+    ):
+        return []
+    compact = normalized.replace(" ", "")
+    scored: list[tuple[int, DevicePowerTarget]] = []
+    for target in targets:
+        if not target.supports(action):
+            continue
+        best_length = 0
+        for alias in target.aliases:
+            alias_normalized = normalize_text(alias)
+            if not alias_normalized:
+                continue
+            alias_compact = alias_normalized.replace(" ", "")
+            if (
+                re.search(
+                    rf"(?<!\w){re.escape(alias_normalized)}(?!\w)",
+                    normalized,
+                )
+                or (
+                    " " in alias_normalized
+                    and len(alias_compact) >= 4
+                    and alias_compact in compact
+                )
+            ):
+                best_length = max(best_length, len(alias_compact))
+        if best_length:
+            scored.append((best_length, target))
+
+    if not scored:
+        return []
+    best_length = max(score for score, _target in scored)
+    matches = [target for score, target in scored if score == best_length]
+    return matches if len(matches) == 1 else []
 
 
 def rank_power_targets(
@@ -329,7 +516,7 @@ def interpretation_from_payload(
 ) -> DevicePowerInterpretation | None:
     """Validate a strict AI JSON payload against the live target inventory."""
     action = str(payload.get("action", "") or "").strip().casefold()
-    if action not in {"turn_on", "turn_off"}:
+    if action not in CONTROL_ACTIONS:
         return None
 
     raw_entity_ids = payload.get("entity_ids")
@@ -365,13 +552,8 @@ def interpretation_from_payload(
     if not isfinite(confidence):
         confidence = 0.0
     confidence = max(0.0, min(confidence, 1.0))
-    raw_confirmation = payload.get("needs_confirmation", True)
-    needs_confirmation = (
-        raw_confirmation if isinstance(raw_confirmation, bool) else True
-    )
     return DevicePowerInterpretation(
         action=action,
         targets=tuple(selected),
         confidence=confidence,
-        needs_confirmation=needs_confirmation,
     )

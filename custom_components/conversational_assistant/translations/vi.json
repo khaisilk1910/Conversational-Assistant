@@ -28,7 +28,7 @@
           "zalo_webhook_enabled": "Không tạo endpoint mới. Webhook hoặc automation hiện có gọi action conversational_assistant.process_zalo_webhook và truyền payload JSON vào trường payload.",
           "zalo_webhook_bot_account_id": "Bắt buộc khi bật xử lý webhook Zalo. Hãy nhập ID tài khoản bot từ payload webhook Zalo của chính bạn; giá trị này được kết hợp với isSelf và uidFrom để bỏ qua tin nhắn do bot gửi.",
           "zalo_webhook_account_selection": "Giá trị account_selection của dịch vụ zalo_bot.send_message, thường là số điện thoại bot. Nếu để trống, integration dùng tài khoản của nơi nhận Zalo đầu tiên đã cấu hình.",
-          "zalo_home_assistant_enabled": "Chuyển các yêu cầu điều khiển thiết bị, trạng thái, phòng, khu vực, sàn và lịch từ Zalo vào Home Assistant. Tra cứu thời tiết dùng AI Agent Search riêng. Chỉ các entity đã expose cho Assist mới có thể sử dụng.",
+          "zalo_home_assistant_enabled": "Chuyển các yêu cầu trạng thái, phòng, khu vực, sàn, lịch và điều khiển thiết bị chỉ từ Zalo vào Home Assistant. Lệnh thiết bị được thực hiện ngay, riêng mở cửa cuốn/cửa gara phải xác nhận. Voice Assist tiếp tục dùng điều khiển thiết bị gốc của Home Assistant để tránh xung đột. Tra cứu thời tiết dùng AI Agent Search riêng. Chỉ entity đã expose cho Assist mới có thể sử dụng.",
           "zalo_conversation_agent_id": "Chọn Home Assistant hoặc Conversation agent tùy chỉnh để hiểu lệnh Zalo. Cấu hình expose của Assist vẫn được áp dụng cho lịch và các điều khiển tích hợp sẵn.",
           "ai_search_agent_id": "Chọn Conversation agent có khả năng truy cập Internet. Agent này xử lý tìm kiếm và tra cứu thời tiết bằng tiếng Việt hoặc tiếng Anh, tách riêng với agent điều khiển Home Assistant.",
           "ai_image_task_entity_id": "Chọn AI Task entity hỗ trợ action ai_task.generate_image. Khi người dùng yêu cầu tạo ảnh trên Zalo, integration gọi agent này và gửi ảnh hoàn thành trở lại đúng cuộc trò chuyện.",
@@ -111,7 +111,7 @@
           "zalo_webhook_enabled": "Không tạo endpoint mới. Webhook hoặc automation hiện có gọi action conversational_assistant.process_zalo_webhook và truyền payload JSON vào trường payload.",
           "zalo_webhook_bot_account_id": "Bắt buộc khi bật xử lý webhook Zalo. Nhập ID tài khoản bot từ payload webhook để bỏ qua tin nhắn do chính bot gửi.",
           "zalo_webhook_account_selection": "Giá trị account_selection của zalo_bot, thường là số điện thoại bot. Nếu để trống, integration dùng tài khoản của nơi nhận Zalo đầu tiên đã cấu hình.",
-          "zalo_home_assistant_enabled": "Chuyển yêu cầu điều khiển thiết bị, trạng thái, phòng, khu vực, sàn và lịch từ Zalo vào Home Assistant. Tra cứu thời tiết dùng AI Agent Search riêng. Chỉ entity đã expose cho Assist mới có thể sử dụng."
+          "zalo_home_assistant_enabled": "Chuyển các yêu cầu trạng thái, phòng, khu vực, sàn, lịch và điều khiển thiết bị chỉ từ Zalo vào Home Assistant. Lệnh thiết bị được thực hiện ngay, riêng mở cửa cuốn/cửa gara phải xác nhận. Voice Assist tiếp tục dùng điều khiển thiết bị gốc của Home Assistant để tránh xung đột. Tra cứu thời tiết dùng AI Agent Search riêng. Chỉ entity đã expose cho Assist mới có thể sử dụng."
         }
       },
       "ai": {

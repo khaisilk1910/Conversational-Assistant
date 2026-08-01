@@ -28,7 +28,7 @@
           "zalo_webhook_enabled": "Does not create a new endpoint. Your existing webhook or automation calls conversational_assistant.process_zalo_webhook and passes its JSON body in the payload field.",
           "zalo_webhook_bot_account_id": "Required when Zalo webhook processing is enabled. Enter the bot account ID from your own Zalo webhook payload; it is used with isSelf and uidFrom to ignore messages sent by the bot itself.",
           "zalo_webhook_account_selection": "The account selector expected by zalo_bot.send_message, usually the bot phone number. If empty, the first configured Zalo destination account is used.",
-          "zalo_home_assistant_enabled": "Routes device control, state, room, area, floor, and calendar requests from Zalo into Home Assistant. Weather lookup uses the separate AI Search agent. Only entities exposed to Assist can be used.",
+          "zalo_home_assistant_enabled": "Routes state, room, area, floor, calendar, and Zalo-only device-control requests into Home Assistant. Device actions execute immediately except opening a rolling or garage door, which requires confirmation. Voice Assist keeps Home Assistant's native device control to avoid conflicts. Weather lookup uses the separate AI Search agent. Only entities exposed to Assist can be used.",
           "zalo_conversation_agent_id": "Choose the Home Assistant or custom Conversation agent that should interpret Zalo commands. Home Assistant Assist exposure settings are still enforced for calendars and built-in controls.",
           "ai_search_agent_id": "Choose an Internet-capable Conversation agent. It handles Vietnamese and English Internet search and weather lookup requests separately from the agent used to control Home Assistant.",
           "ai_image_task_entity_id": "Choose an AI Task entity that supports ai_task.generate_image. Image requests received from Zalo are sent to this agent and the completed image is returned to the same conversation.",
@@ -111,7 +111,7 @@
           "zalo_webhook_enabled": "Does not create a new endpoint. Your existing webhook or automation calls conversational_assistant.process_zalo_webhook and passes its JSON body in the payload field.",
           "zalo_webhook_bot_account_id": "Required when webhook processing is enabled. Enter the bot account ID from your payload so messages sent by the bot itself can be ignored.",
           "zalo_webhook_account_selection": "The account_selection value expected by zalo_bot, usually the bot phone number. If empty, the first configured Zalo destination account is used.",
-          "zalo_home_assistant_enabled": "Routes device control, state, room, area, floor, and calendar requests from Zalo into Home Assistant. Weather lookup uses the separate AI Search agent. Only entities exposed to Assist can be used."
+          "zalo_home_assistant_enabled": "Routes state, room, area, floor, calendar, and Zalo-only device-control requests into Home Assistant. Device actions execute immediately except opening a rolling or garage door, which requires confirmation. Voice Assist keeps Home Assistant's native device control to avoid conflicts. Weather lookup uses the separate AI Search agent. Only entities exposed to Assist can be used."
         }
       },
       "ai": {
