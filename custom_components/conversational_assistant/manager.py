@@ -100,6 +100,8 @@ from .const import (
     CONF_DISMISS_ON_CLEAR,
     CONF_SPEAKER_ENABLED,
     CONF_TTS_ENTITY_ID,
+    CONF_TTS_LANGUAGE,
+    CONF_TTS_VOICE,
     CONF_USER_ADDRESS,
     CONF_ZALO_ACCOUNT_SELECTION,
     CONF_ZALO_CONVERSATION_AGENT_ID,
@@ -126,6 +128,8 @@ from .const import (
     DEFAULT_CONFIRM_TARGETS,
     DEFAULT_DISMISS_ON_CLEAR,
     DEFAULT_SPEAKER_ENABLED,
+    DEFAULT_TTS_LANGUAGE,
+    DEFAULT_TTS_VOICE,
     DEFAULT_USER_ADDRESS,
     DEFAULT_SNOOZE_MINUTES,
     DEFAULT_ZALO_ENABLED,
@@ -3248,6 +3252,12 @@ class ConversationalAssistantManager(NoteManagerMixin):
             "• Ví dụ: chọn 30 ngày, giờ 07:00 và bật thông báo khi có sự kiện.\n\n"
             "5️⃣ **⏰ NHẮC HẸN**\n"
             "• Tạo một lần hoặc lặp lại; gửi tới Mobile, Zalo và loa TTS; có thể xem hoặc xóa.\n"
+            "• Tại **Configure > TTS settings**, có thể chọn TTS entity và nhập "
+            "tùy chọn `language` cùng tên `voice` mà bộ máy TTS đang dùng hỗ trợ. "
+            "Phải nhập đúng mã ngôn ngữ và đúng tên giọng; không sử dụng thì để trống.\n"
+            "• Khi cả hai ô để trống, integration gọi `tts.speak` theo cấu hình mặc định "
+            "như trước đây. Khi có giá trị, `language` được gửi trực tiếp và `voice` được "
+            "gửi trong `options.voice`.\n"
             "• Ví dụ: `Nhắc tôi uống thuốc sau 30 phút`; `Nhắc tập thể dục mỗi thứ Hai lúc 7 giờ`.\n\n"
             "6️⃣ **📝 GHI CHÚ BẢO MẬT**\n"
             "• Thêm, xem, sửa, xóa; chọn Mức 1 bảo mật bằng pass hoặc Mức 2 công khai.\n"
@@ -11483,6 +11493,27 @@ class ConversationalAssistantManager(NoteManagerMixin):
         self._tts_entity_id_cache_until = now + DISCOVERY_CACHE_SECONDS
         return self._tts_entity_id_cache
 
+    def _tts_speak_service_data(
+        self, speaker_entity_id: str, message: str
+    ) -> dict[str, Any]:
+        """Build tts.speak data while preserving the default blank behavior."""
+        data: dict[str, Any] = {
+            "media_player_entity_id": speaker_entity_id,
+            "message": message,
+            "cache": True,
+        }
+        language = str(
+            self._option(CONF_TTS_LANGUAGE, DEFAULT_TTS_LANGUAGE) or ""
+        ).strip()
+        voice = str(
+            self._option(CONF_TTS_VOICE, DEFAULT_TTS_VOICE) or ""
+        ).strip()
+        if language:
+            data["language"] = language
+        if voice:
+            data["options"] = {"voice": voice}
+        return data
+
     def _configured_speaker_targets(self) -> list[NotificationTarget]:
         """Auto-discover announcement speakers lazily with a short cache."""
         if not bool(
@@ -11769,11 +11800,9 @@ class ConversationalAssistantManager(NoteManagerMixin):
                 await self.hass.services.async_call(
                     TTS_DOMAIN,
                     TTS_SERVICE_SPEAK,
-                    {
-                        "media_player_entity_id": speaker_entity_id,
-                        "message": spoken_message,
-                        "cache": True,
-                    },
+                    self._tts_speak_service_data(
+                        speaker_entity_id, spoken_message
+                    ),
                     blocking=True,
                     target={"entity_id": tts_entity_id},
                 )

@@ -34,6 +34,8 @@ from .const import (
     CONF_DISMISS_ON_CLEAR,
     CONF_SPEAKER_ENABLED,
     CONF_TTS_ENTITY_ID,
+    CONF_TTS_LANGUAGE,
+    CONF_TTS_VOICE,
     CONF_USER_ADDRESS,
     CONF_ZALO_ACCOUNT_SELECTION,
     CONF_ZALO_CONVERSATION_AGENT_ID,
@@ -59,6 +61,8 @@ from .const import (
     DEFAULT_CONFIRM_TARGETS,
     DEFAULT_DISMISS_ON_CLEAR,
     DEFAULT_SPEAKER_ENABLED,
+    DEFAULT_TTS_LANGUAGE,
+    DEFAULT_TTS_VOICE,
     DEFAULT_USER_ADDRESS,
     DEFAULT_ZALO_ENABLED,
     DEFAULT_ZALO_CONVERSATION_AGENT_ID,
@@ -230,6 +234,8 @@ def _ai_settings_schema(
 def _tts_settings_schema(
     speaker_enabled: bool,
     tts_entity_id: str | None,
+    tts_language: str,
+    tts_voice: str,
 ) -> vol.Schema:
     """Build speaker and TTS settings."""
     fields: dict[Any, Any] = {
@@ -247,6 +253,22 @@ def _tts_settings_schema(
         )
     else:
         fields[vol.Optional(CONF_TTS_ENTITY_ID)] = tts_selector
+    fields[
+        vol.Optional(
+            CONF_TTS_LANGUAGE,
+            default=tts_language,
+        )
+    ] = selector.TextSelector(
+        selector.TextSelectorConfig(type=selector.TextSelectorType.TEXT)
+    )
+    fields[
+        vol.Optional(
+            CONF_TTS_VOICE,
+            default=tts_voice,
+        )
+    ] = selector.TextSelector(
+        selector.TextSelectorConfig(type=selector.TextSelectorType.TEXT)
+    )
     return vol.Schema(fields)
 
 
@@ -474,6 +496,8 @@ def _initial_schema(
     user_address: str,
     speaker_enabled: bool,
     tts_entity_id: str | None,
+    tts_language: str,
+    tts_voice: str,
     zalo_webhook_enabled: bool,
     zalo_webhook_bot_account_id: str,
     zalo_webhook_account_selection: str,
@@ -502,7 +526,12 @@ def _initial_schema(
             ai_camera_instructions,
             ai_agent_failover_enabled,
         ),
-        _tts_settings_schema(speaker_enabled, tts_entity_id),
+        _tts_settings_schema(
+            speaker_enabled,
+            tts_entity_id,
+            tts_language,
+            tts_voice,
+        ),
     )
 
 
@@ -583,10 +612,24 @@ def _normalize_general_settings(
     return normalized
 
 
+def _normalize_tts_settings(user_input: dict[str, Any]) -> dict[str, Any]:
+    """Normalize optional TTS language and voice values."""
+    normalized = dict(user_input)
+    normalized[CONF_TTS_LANGUAGE] = str(
+        normalized.get(CONF_TTS_LANGUAGE, DEFAULT_TTS_LANGUAGE) or ""
+    ).strip()
+    normalized[CONF_TTS_VOICE] = str(
+        normalized.get(CONF_TTS_VOICE, DEFAULT_TTS_VOICE) or ""
+    ).strip()
+    return normalized
+
+
 def _normalize_initial(user_input: dict[str, Any]) -> dict[str, Any]:
     """Normalize all text values from the initial installation form."""
     return _normalize_general_settings(
-        _normalize_ai_settings(_normalize_zalo_settings(user_input))
+        _normalize_tts_settings(
+            _normalize_ai_settings(_normalize_zalo_settings(user_input))
+        )
     )
 
 
@@ -719,6 +762,14 @@ class ConversationalAssistantConfigFlow(config_entries.ConfigFlow, domain=DOMAIN
                 ),
                 str(values.get(CONF_TTS_ENTITY_ID) or "").strip()
                 or _first_tts_entity_id(self.hass),
+                str(
+                    values.get(CONF_TTS_LANGUAGE, DEFAULT_TTS_LANGUAGE)
+                    or ""
+                ).strip(),
+                str(
+                    values.get(CONF_TTS_VOICE, DEFAULT_TTS_VOICE)
+                    or ""
+                ).strip(),
                 bool(
                     values.get(
                         CONF_ZALO_WEBHOOK_ENABLED,
@@ -910,6 +961,16 @@ class ConversationalAssistantOptionsFlow(config_entries.OptionsFlow):
             self.config_entry.data.get(
                 CONF_TTS_ENTITY_ID, _first_tts_entity_id(self.hass)
             ),
+        )
+        options.setdefault(
+            CONF_TTS_LANGUAGE,
+            self.config_entry.data.get(
+                CONF_TTS_LANGUAGE, DEFAULT_TTS_LANGUAGE
+            ),
+        )
+        options.setdefault(
+            CONF_TTS_VOICE,
+            self.config_entry.data.get(CONF_TTS_VOICE, DEFAULT_TTS_VOICE),
         )
         options.setdefault(
             CONF_ZALO_WEBHOOK_ENABLED,
@@ -1205,7 +1266,8 @@ class ConversationalAssistantOptionsFlow(config_entries.OptionsFlow):
         """Edit speaker discovery and TTS settings."""
         options = self._ensure_options()
         if user_input is not None:
-            options.update(user_input)
+            normalized = _normalize_tts_settings(user_input)
+            options.update(normalized)
             if CONF_TTS_ENTITY_ID not in user_input:
                 options.pop(CONF_TTS_ENTITY_ID, None)
             return await self.async_step_init()
@@ -1221,6 +1283,14 @@ class ConversationalAssistantOptionsFlow(config_entries.OptionsFlow):
                 ),
                 str(values.get(CONF_TTS_ENTITY_ID) or "").strip()
                 or _first_tts_entity_id(self.hass),
+                str(
+                    values.get(CONF_TTS_LANGUAGE, DEFAULT_TTS_LANGUAGE)
+                    or ""
+                ).strip(),
+                str(
+                    values.get(CONF_TTS_VOICE, DEFAULT_TTS_VOICE)
+                    or ""
+                ).strip(),
             ),
         )
 

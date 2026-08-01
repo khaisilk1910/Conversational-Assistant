@@ -20,7 +20,9 @@
           "ai_agent_failover_enabled": "Automatically try other AI agents when the preferred agent fails",
           "ai_camera_task_entity_id": "AI Task agent for camera analysis",
           "ai_camera_instructions": "Camera analysis instructions",
-          "user_address": "Form of address"
+          "user_address": "Form of address",
+          "tts_language": "TTS language",
+          "tts_voice": "TTS voice name"
         },
         "data_description": {
           "confirm_targets": "Voice Assist and Zalo commands discover phones and speakers on demand, list them with Zalo destinations, then wait for a reply such as: choose 1 and 3.",
@@ -36,7 +38,9 @@
           "ai_agent_failover_enabled": "Enabled by default. The integration always tries the selected agent first. If it errors, returns no usable result, or times out, compatible agents available in Home Assistant are tried in sequence. Every agent receives a fresh timeout window, and Zalo reports the switch and total number of attempted agents.",
           "ai_camera_task_entity_id": "Choose an AI Task entity that supports ai_task.generate_data with camera attachments. It analyzes selected cameras for Voice Assist and Zalo.",
           "ai_camera_instructions": "Instructions sent to ai_task.generate_data for every selected camera. The default is the same camera-analysis prompt used in earlier versions; leaving it empty restores that default.",
-          "user_address": "How the integration addresses the user in every reply. Default: Sếp Khải."
+          "user_address": "How the integration addresses the user in every reply. Default: Sếp Khải.",
+          "tts_language": "Optional. Enter the exact language code supported by the selected TTS engine, for example vi. Leave blank to use the engine default.",
+          "tts_voice": "Optional. Enter the exact voice name supported by the selected TTS engine. The value is sent as options.voice. Leave blank to use the engine default."
         }
       }
     },
@@ -140,14 +144,18 @@
       },
       "tts": {
         "title": "TTS settings",
-        "description": "Configure speaker discovery and the voice used for reminders.",
+        "description": "Configure speaker discovery, TTS engine, language, and voice used for reminders.",
         "data": {
           "speaker_enabled": "Offer discovered speakers as reminder destinations",
-          "tts_entity_id": "TTS engine for speaker announcements"
+          "tts_entity_id": "TTS engine for speaker announcements",
+          "tts_language": "TTS language",
+          "tts_voice": "TTS voice name"
         },
         "data_description": {
           "speaker_enabled": "When a destination list is needed, compatible media players are scanned while unavailable TVs and projectors are excluded.",
-          "tts_entity_id": "If no engine is selected, the first available TTS entity is used automatically."
+          "tts_entity_id": "If no engine is selected, the first available TTS entity is used automatically.",
+          "tts_language": "Optional. Enter the exact language code supported by the selected TTS engine, for example vi. Leave blank to use the engine default.",
+          "tts_voice": "Optional. Enter the exact voice name supported by the selected TTS engine. The value is sent as options.voice. Leave blank to use the engine default."
         }
       },
       "add_zalo": {

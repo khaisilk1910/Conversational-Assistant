@@ -20,7 +20,9 @@
           "ai_agent_failover_enabled": "Tự động chuyển sang AI agent khác khi agent ưu tiên lỗi",
           "ai_camera_task_entity_id": "AI Task agent phân tích camera",
           "ai_camera_instructions": "Nội dung hướng dẫn AI phân tích camera",
-          "user_address": "Xưng hô"
+          "user_address": "Xưng hô",
+          "tts_language": "Ngôn ngữ TTS (language)",
+          "tts_voice": "Tên giọng TTS (voice)"
         },
         "data_description": {
           "confirm_targets": "Cả Voice Assist và lệnh Zalo sẽ quét theo yêu cầu rồi liệt kê điện thoại, nơi nhận Zalo và loa, sau đó chờ câu trả lời như: chọn 1 và 3.",
@@ -36,7 +38,9 @@
           "ai_agent_failover_enabled": "Mặc định bật. Tích hợp luôn thử agent đã chọn trước. Nếu agent lỗi, không trả kết quả hợp lệ hoặc hết thời gian chờ, tích hợp sẽ quét các agent tương thích đang có trong Home Assistant và thử lần lượt. Mỗi agent được tính lại thời gian chờ từ đầu; Zalo sẽ thông báo quá trình chuyển agent và tổng số agent đã thử.",
           "ai_camera_task_entity_id": "Chọn AI Task entity hỗ trợ ai_task.generate_data và tệp đính kèm camera. Agent này phân tích camera được chọn từ Voice Assist và Zalo.",
           "ai_camera_instructions": "Instructions được gửi tới action ai_task.generate_data cho mọi camera đã chọn. Mặc định giữ nguyên nội dung phân tích camera của phiên bản trước; để trống sẽ tự khôi phục mặc định.",
-          "user_address": "Cách tích hợp gọi người dùng trong mọi phản hồi. Mặc định: Sếp Khải."
+          "user_address": "Cách tích hợp gọi người dùng trong mọi phản hồi. Mặc định: Sếp Khải.",
+          "tts_language": "Không bắt buộc. Nhập đúng mã ngôn ngữ mà bộ máy TTS đã chọn hỗ trợ, ví dụ vi. Không sử dụng thì để trống để dùng mặc định của TTS.",
+          "tts_voice": "Không bắt buộc. Nhập đúng tên voice mà bộ máy TTS đã chọn hỗ trợ. Giá trị được gửi vào options.voice. Không sử dụng thì để trống để dùng mặc định của TTS."
         }
       }
     },
@@ -140,14 +144,18 @@
       },
       "tts": {
         "title": "Cài đặt TTS",
-        "description": "Thiết lập việc quét loa và bộ máy đọc thông báo nhắc nhở.",
+        "description": "Thiết lập việc quét loa, bộ máy TTS, ngôn ngữ và giọng đọc cho nhắc hẹn.",
         "data": {
           "speaker_enabled": "Đưa các loa tự quét vào danh sách nơi nhận",
-          "tts_entity_id": "Bộ máy TTS dùng để đọc nhắc nhở"
+          "tts_entity_id": "Bộ máy TTS dùng để đọc nhắc nhở",
+          "tts_language": "Ngôn ngữ TTS (language)",
+          "tts_voice": "Tên giọng TTS (voice)"
         },
         "data_description": {
           "speaker_enabled": "Khi cần danh sách nơi nhận, integration quét media_player hỗ trợ play_media, bỏ qua TV, máy chiếu và thiết bị unavailable.",
-          "tts_entity_id": "Nếu không chọn, integration tự dùng TTS entity đầu tiên đang có."
+          "tts_entity_id": "Nếu không chọn, integration tự dùng TTS entity đầu tiên đang có.",
+          "tts_language": "Không bắt buộc. Nhập đúng mã ngôn ngữ mà bộ máy TTS đã chọn hỗ trợ, ví dụ vi. Không sử dụng thì để trống để dùng mặc định của TTS.",
+          "tts_voice": "Không bắt buộc. Nhập đúng tên voice mà bộ máy TTS đã chọn hỗ trợ. Giá trị được gửi vào options.voice. Không sử dụng thì để trống để dùng mặc định của TTS."
         }
       },
       "add_zalo": {
