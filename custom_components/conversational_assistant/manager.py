@@ -3036,7 +3036,7 @@ class ConversationalAssistantManager(NoteManagerMixin):
             "• Ví dụ: `Học câu lệnh xem cổng để chụp ảnh camera`; `Xóa câu lệnh xem cổng`.\n\n"
             "1️⃣3️⃣ **🤖 AI DỰ PHÒNG VÀ TRẠNG THÁI XỬ LÝ**\n"
             "• Agent đã chọn luôn được thử trước; khi lỗi có thể tự chuyển agent khác.\n"
-            "• Yêu cầu lâu sẽ báo: ⏳ **Đang xử lý thông tin yêu cầu. Hãy chờ phản hồi.**\n\n"
+            "• Yêu cầu lâu ngoài chế độ trò chuyện sẽ báo: ⏳ **Đang xử lý thông tin yêu cầu. Hãy chờ phản hồi.**\n\n"
             "1️⃣4️⃣ **✅ CHỌN VÀ XÁC NHẬN**\n"
             "• Có thể chọn nhiều mục bằng `1 3 10`, tên mục hoặc **Tất cả**.\n"
             "• Dùng đúng từ khóa bôi đậm như **Có**, **Không**, **Hủy**, **Bỏ qua**; mỗi bước có hiệu lực 120 giây.\n\n"
@@ -8659,6 +8659,8 @@ class ConversationalAssistantManager(NoteManagerMixin):
         context: ZaloWebhookContext,
         service_context: Context | None,
         action: str,
+        *,
+        initial_typing_sent: bool = False,
     ) -> None:
         """Finish a slow Zalo request after the webhook action has returned."""
         language = _request_language(context.text)
@@ -8684,7 +8686,13 @@ class ConversationalAssistantManager(NoteManagerMixin):
         timeout_seconds = (
             per_agent_timeout_seconds * candidate_count * camera_count + 120
         )
-        await self._async_send_zalo_typing_event(context, service_context)
+        # The webhook path normally starts typing immediately after its optional
+        # processing acknowledgement. Retry here only when that first attempt
+        # was unavailable or failed, then keep refreshing until delivery ends.
+        if not initial_typing_sent:
+            await self._async_send_zalo_typing_event(
+                context, service_context
+            )
         typing_stop = asyncio.Event()
         typing_task = self.hass.async_create_task(
             self._async_keep_zalo_typing_active(
@@ -8759,11 +8767,16 @@ class ConversationalAssistantManager(NoteManagerMixin):
         context: ZaloWebhookContext,
         service_context: Context | None,
         action: str,
+        *,
+        initial_typing_sent: bool = False,
     ) -> None:
         """Start and retain a slow Zalo task until it completes."""
         task = self.hass.async_create_task(
             self._async_process_zalo_long_running_message(
-                context, service_context, action
+                context,
+                service_context,
+                action,
+                initial_typing_sent=initial_typing_sent,
             )
         )
         self._zalo_background_tasks.add(task)
@@ -8798,14 +8811,30 @@ class ConversationalAssistantManager(NoteManagerMixin):
 
         long_action = self._zalo_long_running_action(context)
         if long_action is not None:
+            processing_message_sent = False
             if long_action != ACTION_CHAT:
                 self._pause_existing_zalo_chat_for_request(context)
-            processing_message_sent = await self._async_send_zalo_webhook_reply(
-                context,
-                self._zalo_processing_text(_request_language(context.text)),
+                processing_message_sent = (
+                    await self._async_send_zalo_webhook_reply(
+                        context,
+                        self._zalo_processing_text(
+                            _request_language(context.text)
+                        ),
+                    )
+                )
+
+            # Chat turns stay visually clean: they show only Zalo's native
+            # typing state and the final AI answer. Other slow features retain
+            # the processing message, followed by the same typing action so
+            # users can see that work is still continuing in the background.
+            typing_event_sent = await self._async_send_zalo_typing_event(
+                context, service_context
             )
             self._start_zalo_background_task(
-                context, service_context, long_action
+                context,
+                service_context,
+                long_action,
+                initial_typing_sent=typing_event_sent,
             )
             return {
                 "ok": True,
@@ -8813,6 +8842,7 @@ class ConversationalAssistantManager(NoteManagerMixin):
                 "accepted": True,
                 "background": True,
                 "processing_message_sent": processing_message_sent,
+                "typing_event_sent": typing_event_sent,
             }
 
         # Start typing immediately and keep refreshing it for normal Zalo
