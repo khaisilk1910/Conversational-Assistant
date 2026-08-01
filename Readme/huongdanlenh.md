@@ -511,7 +511,50 @@ Các từ khóa tiếng Anh:
 
 ---
 
-## 16. 🧩 Bộ nhớ câu lệnh
+## 16. 📣 Gửi thông báo Zalo
+
+Có thể yêu cầu tích hợp gửi một nội dung bất kỳ đến người dùng hoặc nhóm Zalo đã được thêm và bật trong giao diện cấu hình.
+
+### Từ khóa
+
+`Gửi Zalo`  
+`Thông báo Zalo`  
+`Báo Zalo`
+
+### Ví dụ
+
+- `Gửi Zalo yêu cầu ngày mai 8 giờ tất cả nhân viên sale họp bàn chiến lược kinh doanh`
+- `Thông báo Zalo chiều nay 15 giờ họp tại phòng họp tầng 2`
+- `Báo Zalo hệ thống điện tầng 1 đang được bảo trì`
+- `Gửi Zalo nhắc nhóm kỹ thuật kiểm tra máy chủ lúc 22 giờ tối nay`
+
+### Chọn Zalo nhận thông báo
+
+Sau khi nhận yêu cầu, tích hợp sẽ liệt kê các người dùng và nhóm Zalo đã được cấu hình trong UI. Có thể trả lời bằng:
+
+`1`  
+`1 3 5`  
+Tên người dùng hoặc tên nhóm Zalo  
+`Tất cả`  
+`Hủy`
+
+Tích hợp chỉ gửi sau khi người dùng xác nhận đúng Zalo cần nhận. Nội dung được gửi giữ nguyên theo yêu cầu, không tự thêm cách xưng hô vào phần nội dung chuyển tiếp.
+
+### Tạo nhắc hẹn trên Zalo
+
+Nếu nội dung có ngày hoặc giờ rõ ràng, tích hợp sẽ tự tạo thêm nhắc hẹn cho đúng Zalo đã xác nhận. Thời điểm nhắc được đặt **trước thời gian trong nội dung 15 phút**.
+
+Ví dụ:
+
+- Nội dung có `ngày mai lúc 8 giờ` → nhắc lúc `7 giờ 45 ngày mai`.
+- Nội dung có `15 giờ chiều nay` → nhắc lúc `14 giờ 45 chiều nay`.
+- Nội dung không có thời gian cụ thể → chỉ gửi thông báo, không tạo nhắc hẹn.
+
+> Lệnh gửi thông báo Zalo có thể sử dụng trên Zalo và Home Assistant Assist/Voice. Nếu một đích Zalo gửi lỗi, tích hợp vẫn tiếp tục gửi đến các đích còn lại và thông báo kết quả cho người dùng.
+
+---
+
+## 17. 🧩 Bộ nhớ câu lệnh
 
 ### Dạy câu lệnh mới
 
@@ -546,7 +589,7 @@ Các từ khóa tiếng Anh:
 
 ---
 
-## 17. ✅ Từ khóa lựa chọn và xác nhận
+## 18. ✅ Từ khóa lựa chọn và xác nhận
 
 ### Đồng ý
 
@@ -590,7 +633,7 @@ Các từ khóa tiếng Anh:
 
 ---
 
-## 18. ℹ️ Lưu ý sử dụng
+## 19. ℹ️ Lưu ý sử dụng
 
 - Tích hợp không phân biệt chữ hoa và chữ thường.
 - Có thể nhận câu tiếng Việt không dấu.
