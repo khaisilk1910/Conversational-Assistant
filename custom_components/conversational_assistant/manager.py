@@ -153,6 +153,9 @@ from .const import (
     SEARCH_SENTENCES,
     WEATHER_SENTENCES,
     SIGNAL_UPDATE,
+    SPEAKER_ANNOUNCE_SENTENCES,
+    SPEAKER_BUSY_RETRY_COUNT,
+    SPEAKER_BUSY_RETRY_DELAY_SECONDS,
     STORAGE_KEY_PREFIX,
     STORAGE_VERSION,
     TTS_DOMAIN,
@@ -197,6 +200,7 @@ from .command_memory import (
     ACTION_REMINDER_DELETE,
     ACTION_REMINDER_LIST,
     ACTION_SEARCH,
+    ACTION_SPEAKER_ANNOUNCE,
     ACTION_WEATHER,
     ACTION_ZALO_SEND,
     CommandMemoryError,
@@ -464,6 +468,33 @@ def _image_generation_request(text: str) -> str | None:
     return None
 
 
+def _speaker_announcement_request(text: str) -> str | None:
+    """Return exact content following a direct speaker-announcement keyword."""
+    raw = str(text or "").strip()
+    word_matches = list(re.finditer(r"\S+", raw))
+    if not word_matches:
+        return None
+    normalized_words = [
+        normalize_text(match.group(0)) for match in word_matches
+    ]
+    start = 1 if normalized_words[0] in {"hay", "please"} else 0
+    prefixes = (
+        ("thong", "bao", "loa"),
+        ("bao", "loa"),
+        ("bao", "ra", "loa"),
+        ("thong", "bao", "ra", "loa"),
+        ("gui", "loa"),
+        ("nhan", "loa"),
+        ("announce", "on", "speaker"),
+        ("speaker", "announcement"),
+    )
+    for prefix in prefixes:
+        end = start + len(prefix)
+        if tuple(normalized_words[start:end]) == prefix:
+            return raw[word_matches[end - 1].end() :].lstrip()
+    return None
+
+
 def _zalo_send_request(text: str) -> str | None:
     """Return exact content following a direct Zalo-send keyword."""
     raw = str(text or "").strip()
@@ -551,6 +582,18 @@ class PendingZaloSend:
     event_at: datetime | None
     remind_at: datetime | None
     reminder_title: str
+    created_at: datetime
+    expires_at: datetime
+
+
+@dataclass(slots=True)
+class PendingSpeakerAnnouncement:
+    """Direct TTS content waiting for one or more speaker selections."""
+
+    pending_id: str
+    content: str
+    targets: list[NotificationTarget]
+    source_keys: set[str]
     created_at: datetime
     expires_at: datetime
 
@@ -910,7 +953,13 @@ class ConversationalAssistantManager(NoteManagerMixin):
             str, PendingVoiceDeviceControl
         ] = {}
         self._pending_voice_zalo_sends: dict[str, PendingZaloSend] = {}
+        self._pending_voice_speaker_announcements: dict[
+            str, PendingSpeakerAnnouncement
+        ] = {}
         self._zalo_pending_sends: dict[str, PendingZaloSend] = {}
+        self._zalo_pending_speaker_announcements: dict[
+            str, PendingSpeakerAnnouncement
+        ] = {}
         self._zalo_pending_creations: dict[str, PendingZaloReminder] = {}
         self._zalo_pending_deletions: dict[str, PendingZaloDeletion] = {}
         self._zalo_pending_cameras: dict[str, PendingZaloCamera] = {}
@@ -935,6 +984,7 @@ class ConversationalAssistantManager(NoteManagerMixin):
         self._zalo_chat_timeout_tasks: dict[str, asyncio.Task[Any]] = {}
         self._zalo_chat_locks: dict[str, asyncio.Lock] = {}
         self._zalo_background_tasks: set[asyncio.Task[Any]] = set()
+        self._speaker_announcement_tasks: set[asyncio.Task[Any]] = set()
         self._store: Store[dict[str, Any]] = Store(
             hass,
             STORAGE_VERSION,
@@ -1804,6 +1854,7 @@ class ConversationalAssistantManager(NoteManagerMixin):
         pending_items = (
             self._zalo_pending_notes.get(owner_key),
             self._zalo_pending_sends.get(owner_key),
+            self._zalo_pending_speaker_announcements.get(owner_key),
             self._zalo_pending_creations.get(owner_key),
             self._zalo_pending_deletions.get(owner_key),
             self._zalo_pending_cameras.get(owner_key),
@@ -2250,6 +2301,10 @@ class ConversationalAssistantManager(NoteManagerMixin):
                     ZALO_SEND_SENTENCES, self._async_send_to_zalo_from_voice
                 ),
                 agent_manager.register_trigger(
+                    SPEAKER_ANNOUNCE_SENTENCES,
+                    self._async_announce_to_speaker_from_voice,
+                ),
+                agent_manager.register_trigger(
                     HELP_SENTENCES, self._async_help_from_voice
                 ),
                 agent_manager.register_trigger(
@@ -2322,7 +2377,9 @@ class ConversationalAssistantManager(NoteManagerMixin):
         self._pending_voice_cameras.clear()
         self._pending_voice_device_controls.clear()
         self._pending_voice_zalo_sends.clear()
+        self._pending_voice_speaker_announcements.clear()
         self._zalo_pending_sends.clear()
+        self._zalo_pending_speaker_announcements.clear()
         self._zalo_pending_creations.clear()
         self._zalo_pending_deletions.clear()
         self._zalo_pending_cameras.clear()
@@ -2346,6 +2403,12 @@ class ConversationalAssistantManager(NoteManagerMixin):
         if background_tasks:
             await asyncio.gather(*background_tasks, return_exceptions=True)
         self._zalo_background_tasks.clear()
+        speaker_tasks = tuple(self._speaker_announcement_tasks)
+        for task in speaker_tasks:
+            task.cancel()
+        if speaker_tasks:
+            await asyncio.gather(*speaker_tasks, return_exceptions=True)
+        self._speaker_announcement_tasks.clear()
         await self._store.async_save(self._serialize())
 
     @callback
@@ -2458,6 +2521,8 @@ class ConversationalAssistantManager(NoteManagerMixin):
         if explicit is not None:
             return explicit
 
+        if _speaker_announcement_request(text) is not None:
+            return ACTION_SPEAKER_ANNOUNCE
         if _zalo_send_request(text) is not None:
             return ACTION_ZALO_SEND
         note_kind = note_zalo_command_kind(text)
@@ -3053,6 +3118,10 @@ class ConversationalAssistantManager(NoteManagerMixin):
 
         if _is_integration_help_request(text):
             return "help"
+        if _speaker_announcement_request(text) is not None:
+            return ACTION_SPEAKER_ANNOUNCE
+        if _zalo_send_request(text) is not None:
+            return ACTION_ZALO_SEND
         if _image_generation_request(text) is not None:
             return ACTION_IMAGE_GENERATION
         if weather_search_request(text) is not None:
@@ -3259,19 +3328,24 @@ class ConversationalAssistantManager(NoteManagerMixin):
             "như trước đây. Khi có giá trị, `language` được gửi trực tiếp và `voice` được "
             "gửi trong `options.voice`.\n"
             "• Ví dụ: `Nhắc tôi uống thuốc sau 30 phút`; `Nhắc tập thể dục mỗi thứ Hai lúc 7 giờ`.\n\n"
-            "6️⃣ **📝 GHI CHÚ BẢO MẬT**\n"
+            "6️⃣ **🔊 THÔNG BÁO TRỰC TIẾP RA LOA**\n"
+            "• Dùng `Thông báo loa`, `Báo loa`, `Báo ra loa`, `Thông báo ra loa`, `Gửi loa` hoặc `Nhắn loa` kèm nội dung.\n"
+            "• Integration liệt kê loa và chờ chọn một hay nhiều loa trong 120 giây. Có thể trả lời số, tên loa hoặc `Tất cả`; dùng `Hủy` để bỏ yêu cầu.\n"
+            "• Loa đang `playing` hoặc `buffering` được kiểm tra lại mỗi 10 giây, tối đa 20 lần kiểm tra lại. Loa lỗi, mất kết nối, không khả dụng hoặc vẫn bận sẽ được báo về Zalo đã ra lệnh; lệnh Voice Assist báo về Zalo đầu tiên trong danh sách cấu hình.\n"
+            "• Ví dụ: `Thông báo loa bữa tối đã sẵn sàng`; `Nhắn loa mời mọi người xuống phòng họp`.\n\n"
+            "7️⃣ **📝 GHI CHÚ BẢO MẬT**\n"
             "• Thêm, xem, sửa, xóa; chọn Mức 1 bảo mật bằng pass hoặc Mức 2 công khai.\n"
             "• Ví dụ: `Ghi nhớ mã tủ đồ là 2468`; `Danh sách ghi chú`; `Sửa ghi chú`.\n\n"
-            "7️⃣ **📸 CHỤP ẢNH CAMERA**\n"
+            "8️⃣ **📸 CHỤP ẢNH CAMERA**\n"
             "• Chọn một hoặc nhiều camera, chọn đúng Zalo nhận ảnh, rồi xác nhận chụp và gửi.\n"
             "• Ví dụ: `Chụp camera`; chọn `1 3`, chọn Zalo `2`, rồi nói **Đồng ý**.\n\n"
-            "8️⃣ **🧠 PHÂN TÍCH CAMERA BẰNG AI**\n"
+            "9️⃣ **🧠 PHÂN TÍCH CAMERA BẰNG AI**\n"
             "• Chụp và phân tích nhiều camera; instructions có thể sửa tại AI settings.\n"
             "• Ví dụ: `Phân tích camera`; `Analyze camera`; sau đó chọn camera cần xem.\n\n"
-            "9️⃣ **🔎 TÌM KIẾM INTERNET**\n"
+            "1️⃣0️⃣ **🔎 TÌM KIẾM INTERNET**\n"
             "• Dùng AI Agent Search riêng để tìm và tổng hợp thông tin Việt/Anh.\n"
             "• Ví dụ: `Tìm thông tin giá vàng hôm nay`; `Search for the latest Home Assistant news`.\n\n"
-            "🔟 **💬 TRÒ CHUYỆN HỎI ĐÁP TRÊN ZALO**\n"
+            "1️⃣1️⃣ **💬 TRÒ CHUYỆN HỎI ĐÁP TRÊN ZALO**\n"
             "• Bắt đầu bằng `Trò chuyện đi`, `Tám đi` hoặc `Buôn đi`, sau đó "
             "hỏi đáp mọi chủ đề. AI Search được dùng khi cần kiểm chứng thông "
             "tin; điều chưa chắc chắn sẽ được nói rõ thay vì tự bịa.\n"
@@ -3279,19 +3353,19 @@ class ConversationalAssistantManager(NoteManagerMixin):
             "nhắc giữ cách nói văn minh khi gặp từ ngữ thô tục.\n"
             "• Sau 120 giây không phản hồi, integration hỏi lại; im lặng thêm "
             "10 giây sẽ tự dừng trò chuyện.\n\n"
-            "1️⃣1️⃣ **🎨 TẠO ẢNH AI TRÊN ZALO**\n"
+            "1️⃣2️⃣ **🎨 TẠO ẢNH AI TRÊN ZALO**\n"
             "• Tạo ảnh từ mô tả và gửi lại đúng cuộc trò chuyện Zalo.\n"
             "• Ví dụ: `Tạo ảnh một chú mèo phi hành gia`; `Generate an image of a smart home`.\n\n"
-            "1️⃣2️⃣ **🧩 BỘ NHỚ CÂU LỆNH**\n"
+            "1️⃣3️⃣ **🧩 BỘ NHỚ CÂU LỆNH**\n"
             "• Dạy alias mới, xem danh sách hoặc xóa câu lệnh đã học.\n"
             "• Ví dụ: `Học câu lệnh xem cổng để chụp ảnh camera`; `Xóa câu lệnh xem cổng`.\n\n"
-            "1️⃣3️⃣ **🤖 AI DỰ PHÒNG VÀ TRẠNG THÁI XỬ LÝ**\n"
+            "1️⃣4️⃣ **🤖 AI DỰ PHÒNG VÀ TRẠNG THÁI XỬ LÝ**\n"
             "• Agent đã chọn luôn được thử trước; khi lỗi có thể tự chuyển agent khác.\n"
             "• Yêu cầu lâu ngoài chế độ trò chuyện sẽ báo: ⏳ **Đang xử lý thông tin yêu cầu. Hãy chờ phản hồi.**\n\n"
-            "1️⃣4️⃣ **✅ CHỌN VÀ XÁC NHẬN**\n"
+            "1️⃣5️⃣ **✅ CHỌN VÀ XÁC NHẬN**\n"
             "• Có thể chọn nhiều mục bằng `1 3 10`, tên mục hoặc **Tất cả**.\n"
             "• Dùng đúng từ khóa bôi đậm như **Có**, **Không**, **Hủy**, **Bỏ qua**; mỗi bước có hiệu lực 120 giây.\n\n"
-            "1️⃣5️⃣ **📨 GỬI NỘI DUNG VÀ NHẮC HẸN LÊN ZALO**\n"
+            "1️⃣6️⃣ **📨 GỬI NỘI DUNG VÀ NHẮC HẸN LÊN ZALO**\n"
             "• Dùng `Gửi Zalo`, `Thông báo Zalo` hoặc `Báo Zalo`, sau đó chọn một hay nhiều Zalo đã thêm trong UI.\n"
             "• Nội dung được chuyển tiếp nguyên văn. Nếu nhận ra ngày giờ, integration tạo thêm nhắc Zalo trước thời điểm đó 15 phút.\n"
             "• Ví dụ: `Gửi Zalo yêu cầu ngày mai 8h00 tất cả nhân viên sale họp bàn chiến lược kinh doanh`.\n"
@@ -3364,6 +3438,19 @@ class ConversationalAssistantManager(NoteManagerMixin):
             return None
         if pending.expires_at <= dt_util.now():
             self._zalo_pending_sends.pop(owner_key, None)
+            self._schedule_pending_expiry()
+            return None
+        return pending
+
+    def _zalo_pending_speaker_announcement(
+        self, owner_key: str
+    ) -> PendingSpeakerAnnouncement | None:
+        """Return a non-expired direct speaker-announcement selection."""
+        pending = self._zalo_pending_speaker_announcements.get(owner_key)
+        if pending is None:
+            return None
+        if pending.expires_at <= dt_util.now():
+            self._zalo_pending_speaker_announcements.pop(owner_key, None)
             self._schedule_pending_expiry()
             return None
         return pending
@@ -5095,6 +5182,7 @@ class ConversationalAssistantManager(NoteManagerMixin):
         """Cancel unfinished Zalo flows when a new explicit command arrives."""
         self._zalo_pending_notes.pop(owner_key, None)
         self._zalo_pending_sends.pop(owner_key, None)
+        self._zalo_pending_speaker_announcements.pop(owner_key, None)
         self._zalo_pending_creations.pop(owner_key, None)
         self._zalo_pending_deletions.pop(owner_key, None)
         self._zalo_pending_cameras.pop(owner_key, None)
@@ -10557,6 +10645,9 @@ class ConversationalAssistantManager(NoteManagerMixin):
             explicit_ha_kind = None
         pending_note = self._zalo_pending_note(context.owner_key)
         pending_send = self._zalo_pending_send(context.owner_key)
+        pending_speaker = self._zalo_pending_speaker_announcement(
+            context.owner_key
+        )
         pending_creation = self._zalo_pending_creation(context.owner_key)
         pending_deletion = self._zalo_pending_deletion(context.owner_key)
         pending_camera = self._zalo_pending_camera(context.owner_key)
@@ -10579,6 +10670,21 @@ class ConversationalAssistantManager(NoteManagerMixin):
             command is not None or explicit_ha_kind is not None
         ):
             self._zalo_pending_sends.pop(context.owner_key, None)
+            self._schedule_pending_expiry()
+        if (
+            pending_speaker is not None
+            and command is None
+            and explicit_ha_kind is None
+        ):
+            return await self._async_zalo_pending_speaker_reply(
+                context, pending_speaker
+            )
+        if pending_speaker is not None and (
+            command is not None or explicit_ha_kind is not None
+        ):
+            self._zalo_pending_speaker_announcements.pop(
+                context.owner_key, None
+            )
             self._schedule_pending_expiry()
         if (
             pending_calendar_management is not None
@@ -10666,6 +10772,8 @@ class ConversationalAssistantManager(NoteManagerMixin):
             )
         if command == ACTION_ZALO_SEND:
             return await self._async_send_to_zalo_from_zalo(context)
+        if command == ACTION_SPEAKER_ANNOUNCE:
+            return await self._async_announce_to_speaker_from_zalo(context)
         if command == ACTION_SEARCH:
             self._clear_zalo_pending_for_owner(context.owner_key)
             return await self._async_search_from_zalo(
@@ -11464,6 +11572,470 @@ class ConversationalAssistantManager(NoteManagerMixin):
             user_input, self._zalo_send_selection_prompt(pending)
         )
 
+    def _speaker_announcement_selection_prompt(
+        self,
+        pending: PendingSpeakerAnnouncement,
+        *,
+        invalid: bool = False,
+    ) -> str:
+        """Build a numbered prompt for selecting one or more speakers."""
+        lines = [
+            f"{index} - {target.display_name}"
+            for index, target in enumerate(pending.targets, start=1)
+        ]
+        prefix = (
+            "Lựa chọn chưa hợp lệ. Hãy chọn lại đúng số hoặc tên loa.\n"
+            if invalid
+            else "Hãy chọn loa sẽ phát nội dung sau:\n"
+        )
+        return (
+            f"{prefix}{chr(10).join(lines)}\n"
+            f"**Nội dung:** {pending.content}\n"
+            "Trả lời số, tên loa hoặc **tất cả**. Gửi **Hủy** để bỏ yêu cầu."
+        )
+
+    def _new_speaker_announcement_pending(
+        self,
+        content: str,
+        targets: list[NotificationTarget],
+        *,
+        source_keys: set[str] | None = None,
+    ) -> PendingSpeakerAnnouncement:
+        """Create a direct speaker announcement waiting for selection."""
+        now = dt_util.now()
+        return PendingSpeakerAnnouncement(
+            pending_id=uuid.uuid4().hex,
+            content=content,
+            targets=targets,
+            source_keys=source_keys or set(),
+            created_at=now,
+            expires_at=now
+            + timedelta(seconds=PENDING_CONFIRMATION_TIMEOUT_SECONDS),
+        )
+
+    @staticmethod
+    def _speaker_announcement_accepted_text(
+        targets: list[NotificationTarget],
+    ) -> str:
+        """Return an immediate acknowledgement while speakers are checked."""
+        names = ", ".join(target.display_name for target in targets)
+        return (
+            f"Đã nhận yêu cầu phát thông báo trên {names}. "
+            "Nếu loa đang phát hoặc buffering, integration sẽ kiểm tra lại "
+            f"mỗi {SPEAKER_BUSY_RETRY_DELAY_SECONDS} giây, tối đa "
+            f"{SPEAKER_BUSY_RETRY_COUNT} lần kiểm tra lại."
+        )
+
+    async def _async_announce_to_speaker_from_zalo(
+        self, context: ZaloWebhookContext
+    ) -> str:
+        """Start a direct TTS announcement from an inbound Zalo command."""
+        content = _speaker_announcement_request(context.text)
+        if content is None or not content.strip():
+            return (
+                "Thiếu nội dung cần phát. Ví dụ: **Thông báo loa tất cả "
+                "nhân viên xuống phòng họp**."
+            )
+        targets = self._configured_speaker_targets()
+        if not targets:
+            return (
+                "Không tìm thấy loa TTS khả dụng. Hãy bật Speaker notifications "
+                "trong TTS settings, kiểm tra TTS entity/service và bảo đảm loa "
+                "media_player hỗ trợ phát media."
+            )
+        self._clear_zalo_pending_for_owner(context.owner_key)
+        pending = self._new_speaker_announcement_pending(
+            content.strip(), targets
+        )
+        self._zalo_pending_speaker_announcements[context.owner_key] = pending
+        self._schedule_pending_expiry()
+        return self._speaker_announcement_selection_prompt(pending)
+
+    async def _async_zalo_pending_speaker_reply(
+        self,
+        context: ZaloWebhookContext,
+        pending: PendingSpeakerAnnouncement,
+    ) -> str:
+        """Select speakers and launch a non-blocking direct TTS announcement."""
+        if self._is_cancel_pending_text(context.text) or normalize_text(
+            context.text
+        ) in {"khong phat", "thoi khong phat", "huy thong bao loa"}:
+            self._zalo_pending_speaker_announcements.pop(
+                context.owner_key, None
+            )
+            self._schedule_pending_expiry()
+            return "Đã hủy yêu cầu thông báo loa."
+        indexes = parse_target_selection(
+            context.text, [target.display_name for target in pending.targets]
+        )
+        if not indexes:
+            pending.expires_at = dt_util.now() + timedelta(
+                seconds=PENDING_CONFIRMATION_TIMEOUT_SECONDS
+            )
+            self._schedule_pending_expiry()
+            return self._speaker_announcement_selection_prompt(
+                pending, invalid=True
+            )
+        selected = [pending.targets[index] for index in indexes]
+        self._zalo_pending_speaker_announcements.pop(
+            context.owner_key, None
+        )
+        self._schedule_pending_expiry()
+        self._start_speaker_announcement_task(
+            pending.content,
+            selected,
+            zalo_context=context,
+            voice_origin=False,
+        )
+        return self._speaker_announcement_accepted_text(selected)
+
+    async def _async_announce_to_speaker_from_voice(
+        self, user_input: ConversationInput, _result: RecognizeResult
+    ) -> str:
+        """Start a direct TTS announcement from Voice Assist."""
+        content = _speaker_announcement_request(user_input.text)
+        if content is None or not content.strip():
+            return await self._async_voice_response(
+                user_input,
+                "Thiếu nội dung cần phát. Ví dụ: Thông báo loa tất cả nhân "
+                "viên xuống phòng họp.",
+            )
+        targets = self._configured_speaker_targets()
+        if not targets:
+            voice_error = (
+                "Không tìm thấy loa TTS khả dụng. Hãy kiểm tra TTS settings "
+                "và các media player trong Home Assistant."
+            )
+            report = (
+                "⚠️ **Thông báo loa từ Voice Assist không thành công**\n\n"
+                f"**Nội dung:** {content.strip()}\n"
+                f"**Lỗi:** {voice_error}"
+            )
+            delivered = await self._async_send_first_configured_zalo_message(
+                report
+            )
+            if not delivered:
+                persistent_notification.async_create(
+                    self.hass,
+                    report,
+                    title="Conversational Assistant - lỗi thông báo loa",
+                    notification_id=(
+                        f"conversational_assistant_speaker_{uuid.uuid4().hex}"
+                    ),
+                )
+            return await self._async_voice_response(user_input, voice_error)
+        source_keys = self._source_keys(user_input)
+        self._clear_pending_for_source(source_keys)
+        pending = self._new_speaker_announcement_pending(
+            content.strip(), targets, source_keys=source_keys
+        )
+        self._pending_voice_speaker_announcements[
+            pending.pending_id
+        ] = pending
+        self._sync_pending_followup_trigger()
+        return await self._async_voice_response(
+            user_input, self._speaker_announcement_selection_prompt(pending)
+        )
+
+    async def _async_confirm_speaker_announcement_from_voice(
+        self,
+        user_input: ConversationInput,
+        result: RecognizeResult,
+        pending: PendingSpeakerAnnouncement,
+    ) -> str:
+        """Select speakers and launch a direct TTS announcement from voice."""
+        selection = self._selection_slot(user_input, result)
+        indexes = parse_target_selection(
+            selection, [target.display_name for target in pending.targets]
+        )
+        if not indexes:
+            pending.expires_at = dt_util.now() + timedelta(
+                seconds=PENDING_CONFIRMATION_TIMEOUT_SECONDS
+            )
+            self._sync_pending_followup_trigger()
+            return await self._async_voice_response(
+                user_input,
+                self._speaker_announcement_selection_prompt(
+                    pending, invalid=True
+                ),
+            )
+        selected = [pending.targets[index] for index in indexes]
+        self._pending_voice_speaker_announcements.pop(
+            pending.pending_id, None
+        )
+        self._sync_pending_followup_trigger()
+        self._start_speaker_announcement_task(
+            pending.content,
+            selected,
+            zalo_context=None,
+            voice_origin=True,
+        )
+        return await self._async_voice_response(
+            user_input, self._speaker_announcement_accepted_text(selected)
+        )
+
+    async def _async_speak_direct_announcement_on_target(
+        self,
+        target: NotificationTarget,
+        message: str,
+        tts_entity_id: str,
+    ) -> tuple[str, str | None]:
+        """Wait for one speaker to become idle, then call tts.speak."""
+        speaker_entity_id = str(target.speaker_entity_id or "").strip()
+        if not speaker_entity_id:
+            return target.display_name, "cấu hình loa thiếu entity_id"
+
+        retries = 0
+        while True:
+            state = self.hass.states.get(speaker_entity_id)
+            if state is None:
+                return (
+                    target.display_name,
+                    "loa lỗi hoặc mất kết nối, entity không còn tồn tại",
+                )
+            state_value = str(state.state or "").strip().casefold()
+            if state_value in {STATE_UNAVAILABLE, STATE_UNKNOWN}:
+                return (
+                    target.display_name,
+                    "loa mất kết nối hoặc không khả dụng",
+                )
+            if state_value not in {"playing", "buffering"}:
+                break
+            if retries >= SPEAKER_BUSY_RETRY_COUNT:
+                return (
+                    target.display_name,
+                    "loa vẫn đang bận chơi nhạc hoặc buffering sau "
+                    f"{SPEAKER_BUSY_RETRY_COUNT} lần kiểm tra lại, nên không phát "
+                    "TTS được",
+                )
+            retries += 1
+            await asyncio.sleep(SPEAKER_BUSY_RETRY_DELAY_SECONDS)
+
+        try:
+            await self.hass.services.async_call(
+                TTS_DOMAIN,
+                TTS_SERVICE_SPEAK,
+                self._tts_speak_service_data(speaker_entity_id, message),
+                blocking=True,
+                target={"entity_id": tts_entity_id},
+            )
+        except asyncio.CancelledError:
+            raise
+        except Exception:  # noqa: BLE001 - report the exact failed speaker
+            _LOGGER.exception(
+                "Failed direct TTS announcement on %s using %s",
+                speaker_entity_id,
+                tts_entity_id,
+            )
+            return target.display_name, "loa hoặc dịch vụ TTS phát sinh lỗi"
+        return target.display_name, None
+
+    async def _async_deliver_speaker_announcement(
+        self,
+        content: str,
+        targets: list[NotificationTarget],
+    ) -> tuple[list[str], list[str]]:
+        """Deliver direct TTS concurrently and return successes/failures."""
+        tts_entity_id = self._configured_tts_entity_id()
+        if tts_entity_id is None:
+            return [], [
+                f"{target.display_name}: không có TTS entity khả dụng"
+                for target in targets
+            ]
+        if not self.hass.services.has_service(TTS_DOMAIN, TTS_SERVICE_SPEAK):
+            return [], [
+                f"{target.display_name}: service {TTS_DOMAIN}."
+                f"{TTS_SERVICE_SPEAK} không khả dụng"
+                for target in targets
+            ]
+        message = _sanitize_spoken_text(content)
+        if not message:
+            return [], [
+                f"{target.display_name}: nội dung rỗng sau khi chuẩn hóa TTS"
+                for target in targets
+            ]
+
+        results = await asyncio.gather(
+            *(
+                self._async_speak_direct_announcement_on_target(
+                    target, message, tts_entity_id
+                )
+                for target in targets
+            )
+        )
+        successes = [name for name, reason in results if reason is None]
+        failures = [
+            f"{name}: {reason}"
+            for name, reason in results
+            if reason is not None
+        ]
+        return successes, failures
+
+    @staticmethod
+    def _speaker_announcement_failure_text(
+        content: str,
+        successes: list[str],
+        failures: list[str],
+        *,
+        voice_origin: bool,
+    ) -> str:
+        """Format an actionable failure report for Zalo."""
+        source = " từ Voice Assist" if voice_origin else ""
+        if successes:
+            heading = f"⚠️ **Thông báo loa{source} chỉ hoàn thành một phần**"
+            success_line = "\nĐã phát: " + ", ".join(successes) + "."
+        else:
+            heading = f"⚠️ **Thông báo loa{source} không thành công**"
+            success_line = ""
+        details = "\n".join(f"• {item}" for item in failures)
+        return (
+            f"{heading}\n\n**Nội dung:** {content}{success_line}\n"
+            f"**Lỗi:**\n{details}"
+        )
+
+    async def _async_send_first_configured_zalo_message(
+        self, message: str
+    ) -> bool:
+        """Send a failure report to the first enabled Zalo destination."""
+        targets = self._configured_zalo_targets()
+        if not targets:
+            _LOGGER.error(
+                "Cannot report Voice Assist speaker failure: no Zalo target is configured"
+            )
+            return False
+        target = targets[0]
+        if not self.hass.services.has_service(
+            ZALO_DOMAIN, ZALO_SERVICE_SEND_MESSAGE
+        ):
+            _LOGGER.error(
+                "Cannot report Voice Assist speaker failure because %s.%s is unavailable",
+                ZALO_DOMAIN,
+                ZALO_SERVICE_SEND_MESSAGE,
+            )
+            return False
+        thread_id = str(target.get(CONF_ZALO_THREAD_ID, "")).strip()
+        account_selection = str(
+            target.get(CONF_ZALO_ACCOUNT_SELECTION, "")
+        ).strip()
+        zalo_type = str(
+            target.get(CONF_ZALO_TYPE, DEFAULT_ZALO_TYPE)
+        ).strip()
+        if not thread_id or not account_selection:
+            return False
+        prepared = self._zalo_emphasize_important_text(
+            self._address_response(message)
+        )
+        for chunk in self._split_zalo_text(prepared):
+            try:
+                await self.hass.services.async_call(
+                    ZALO_DOMAIN,
+                    ZALO_SERVICE_SEND_MESSAGE,
+                    {
+                        "type": zalo_type,
+                        "ttl": 0,
+                        "message": chunk,
+                        "thread_id": thread_id,
+                        "account_selection": account_selection,
+                    },
+                    blocking=True,
+                )
+            except Exception:  # noqa: BLE001 - use persistent fallback below
+                _LOGGER.exception(
+                    "Failed reporting Voice Assist speaker error to first Zalo target %s",
+                    thread_id,
+                )
+                return False
+        return True
+
+    async def _async_process_speaker_announcement_task(
+        self,
+        content: str,
+        targets: list[NotificationTarget],
+        *,
+        zalo_context: ZaloWebhookContext | None,
+        voice_origin: bool,
+    ) -> None:
+        """Run speaker waiting/TTS and report any failures to Zalo."""
+        try:
+            # Let the current Zalo/Assist acknowledgement begin first. This is
+            # especially important when the selected speaker is also the Voice
+            # Assist output device, whose state needs time to become playing.
+            await asyncio.sleep(1)
+            successes, failures = await self._async_deliver_speaker_announcement(
+                content, targets
+            )
+            if not failures:
+                return
+            report = self._speaker_announcement_failure_text(
+                content,
+                successes,
+                failures,
+                voice_origin=voice_origin,
+            )
+            if zalo_context is not None:
+                delivered = await self._async_send_zalo_webhook_reply(
+                    zalo_context, report
+                )
+            else:
+                delivered = await self._async_send_first_configured_zalo_message(
+                    report
+                )
+            if delivered:
+                return
+            persistent_notification.async_create(
+                self.hass,
+                report,
+                title="Conversational Assistant - lỗi thông báo loa",
+                notification_id=(
+                    f"conversational_assistant_speaker_{uuid.uuid4().hex}"
+                ),
+            )
+        except asyncio.CancelledError:
+            raise
+        except Exception:  # noqa: BLE001 - never lose a background failure
+            _LOGGER.exception("Unexpected direct speaker-announcement failure")
+            fallback = (
+                "⚠️ Thông báo loa không thành công do lỗi ngoài dự kiến. "
+                "Hãy kiểm tra nhật ký Home Assistant."
+            )
+            if zalo_context is not None:
+                delivered = await self._async_send_zalo_webhook_reply(
+                    zalo_context, fallback
+                )
+            else:
+                delivered = await self._async_send_first_configured_zalo_message(
+                    fallback
+                )
+            if not delivered:
+                persistent_notification.async_create(
+                    self.hass,
+                    fallback,
+                    title="Conversational Assistant - lỗi thông báo loa",
+                    notification_id=(
+                        f"conversational_assistant_speaker_{uuid.uuid4().hex}"
+                    ),
+                )
+
+    def _start_speaker_announcement_task(
+        self,
+        content: str,
+        targets: list[NotificationTarget],
+        *,
+        zalo_context: ZaloWebhookContext | None,
+        voice_origin: bool,
+    ) -> None:
+        """Start and retain one direct speaker-announcement background task."""
+        task = self.hass.async_create_task(
+            self._async_process_speaker_announcement_task(
+                content,
+                list(targets),
+                zalo_context=zalo_context,
+                voice_origin=voice_origin,
+            )
+        )
+        self._speaker_announcement_tasks.add(task)
+        task.add_done_callback(self._speaker_announcement_tasks.discard)
+
     def _configured_tts_entity_id(self) -> str | None:
         """Return the configured TTS entity or auto-select an available one."""
         configured = str(self._option(CONF_TTS_ENTITY_ID, "") or "").strip()
@@ -12021,9 +12593,11 @@ class ConversationalAssistantManager(NoteManagerMixin):
             *self._pending_voice_cameras.values(),
             *self._pending_voice_device_controls.values(),
             *self._pending_voice_zalo_sends.values(),
+            *self._pending_voice_speaker_announcements.values(),
             *self._note_pending_items(),
             *self._zalo_pending_notes.values(),
             *self._zalo_pending_sends.values(),
+            *self._zalo_pending_speaker_announcements.values(),
             *self._zalo_pending_creations.values(),
             *self._zalo_pending_deletions.values(),
             *self._zalo_pending_cameras.values(),
@@ -12050,6 +12624,7 @@ class ConversationalAssistantManager(NoteManagerMixin):
             or self._pending_voice_cameras
             or self._pending_voice_device_controls
             or self._pending_voice_zalo_sends
+            or self._pending_voice_speaker_announcements
             or self._has_pending_notes()
         )
         if has_pending and self._unsub_pending_trigger is None:
@@ -12094,9 +12669,19 @@ class ConversationalAssistantManager(NoteManagerMixin):
         ):
             if pending.expires_at <= now:
                 del self._pending_voice_zalo_sends[pending_id]
+        for pending_id, pending in list(
+            self._pending_voice_speaker_announcements.items()
+        ):
+            if pending.expires_at <= now:
+                del self._pending_voice_speaker_announcements[pending_id]
         for owner_key, pending in list(self._zalo_pending_sends.items()):
             if pending.expires_at <= now:
                 del self._zalo_pending_sends[owner_key]
+        for owner_key, pending in list(
+            self._zalo_pending_speaker_announcements.items()
+        ):
+            if pending.expires_at <= now:
+                del self._zalo_pending_speaker_announcements[owner_key]
         for owner_key, pending in list(self._zalo_pending_creations.items()):
             if pending.expires_at <= now:
                 del self._zalo_pending_creations[owner_key]
@@ -12143,6 +12728,11 @@ class ConversationalAssistantManager(NoteManagerMixin):
         ):
             if source_keys & pending.source_keys:
                 del self._pending_voice_zalo_sends[pending_id]
+        for pending_id, pending in list(
+            self._pending_voice_speaker_announcements.items()
+        ):
+            if source_keys & pending.source_keys:
+                del self._pending_voice_speaker_announcements[pending_id]
 
     def _set_pending(
         self,
@@ -12239,9 +12829,37 @@ class ConversationalAssistantManager(NoteManagerMixin):
             and not self._pending_deletions
             and not self._pending_voice_cameras
             and not self._pending_voice_device_controls
+            and not self._pending_voice_speaker_announcements
             and not self._has_pending_notes()
         ):
             return next(iter(self._pending_voice_zalo_sends.values()))
+        return None
+
+    def _find_pending_voice_speaker_announcement(
+        self, user_input: ConversationInput
+    ) -> PendingSpeakerAnnouncement | None:
+        """Find a pending direct speaker announcement for this voice source."""
+        self._purge_expired_pending()
+        source_keys = self._source_keys(user_input)
+        matching = [
+            pending
+            for pending in self._pending_voice_speaker_announcements.values()
+            if source_keys & pending.source_keys
+        ]
+        if matching:
+            return max(matching, key=lambda item: item.created_at)
+        if (
+            len(self._pending_voice_speaker_announcements) == 1
+            and not self._pending
+            and not self._pending_deletions
+            and not self._pending_voice_cameras
+            and not self._pending_voice_device_controls
+            and not self._pending_voice_zalo_sends
+            and not self._has_pending_notes()
+        ):
+            return next(
+                iter(self._pending_voice_speaker_announcements.values())
+            )
         return None
 
     def _find_pending(
@@ -12263,6 +12881,7 @@ class ConversationalAssistantManager(NoteManagerMixin):
             and not self._pending_voice_cameras
             and not self._pending_voice_device_controls
             and not self._pending_voice_zalo_sends
+            and not self._pending_voice_speaker_announcements
             and not self._has_pending_notes()
         ):
             return next(iter(self._pending.values()))
@@ -12287,6 +12906,7 @@ class ConversationalAssistantManager(NoteManagerMixin):
             and not self._pending_voice_cameras
             and not self._pending_voice_device_controls
             and not self._pending_voice_zalo_sends
+            and not self._pending_voice_speaker_announcements
             and not self._has_pending_notes()
         ):
             return next(iter(self._pending_deletions.values()))
@@ -12311,6 +12931,7 @@ class ConversationalAssistantManager(NoteManagerMixin):
             and not self._pending_deletions
             and not self._pending_voice_device_controls
             and not self._pending_voice_zalo_sends
+            and not self._pending_voice_speaker_announcements
             and not self._has_pending_notes()
         ):
             return next(iter(self._pending_voice_cameras.values()))
@@ -12640,6 +13261,10 @@ class ConversationalAssistantManager(NoteManagerMixin):
             return await self._async_send_to_zalo_from_voice(
                 transformed_input, result
             )
+        if command.action == ACTION_SPEAKER_ANNOUNCE:
+            return await self._async_announce_to_speaker_from_voice(
+                transformed_input, result
+            )
         if command.action == ACTION_REMINDER_CREATE:
             return await self._async_create_from_voice(
                 transformed_input, result
@@ -12714,6 +13339,8 @@ class ConversationalAssistantManager(NoteManagerMixin):
     def _is_primary_voice_command(self, text: str) -> bool:
         """Return whether another Conversational Assistant trigger handles text."""
         if _is_integration_help_request(text):
+            return True
+        if _speaker_announcement_request(text) is not None:
             return True
         if _zalo_send_request(text) is not None:
             return True
@@ -12872,6 +13499,9 @@ class ConversationalAssistantManager(NoteManagerMixin):
             "khong gui",
             "thoi khong gui",
             "huy gui zalo",
+            "khong phat",
+            "thoi khong phat",
+            "huy thong bao loa",
         }
 
     async def _async_pending_followup_from_voice(
@@ -12905,6 +13535,9 @@ class ConversationalAssistantManager(NoteManagerMixin):
 
         note_pending = self._find_pending_note(user_input)
         zalo_send_pending = self._find_pending_voice_zalo_send(user_input)
+        speaker_pending = self._find_pending_voice_speaker_announcement(
+            user_input
+        )
         camera_pending = self._find_pending_voice_camera(user_input)
         creation = self._find_pending(user_input)
         deletion = self._find_pending_deletion(user_input)
@@ -12914,6 +13547,7 @@ class ConversationalAssistantManager(NoteManagerMixin):
             )
         if (
             zalo_send_pending is None
+            and speaker_pending is None
             and camera_pending is None
             and creation is None
             and deletion is None
@@ -12930,6 +13564,11 @@ class ConversationalAssistantManager(NoteManagerMixin):
                     zalo_send_pending.pending_id, None
                 )
                 response = "Đã hủy yêu cầu gửi Zalo."
+            elif speaker_pending is not None:
+                self._pending_voice_speaker_announcements.pop(
+                    speaker_pending.pending_id, None
+                )
+                response = "Đã hủy yêu cầu thông báo loa."
             elif camera_pending is not None:
                 self._pending_voice_cameras.pop(
                     camera_pending.pending_id, None
@@ -12959,6 +13598,10 @@ class ConversationalAssistantManager(NoteManagerMixin):
         if zalo_send_pending is not None:
             return await self._async_confirm_zalo_send_from_voice(
                 user_input, result, zalo_send_pending
+            )
+        if speaker_pending is not None:
+            return await self._async_confirm_speaker_announcement_from_voice(
+                user_input, result, speaker_pending
             )
         if camera_pending is not None:
             return await self._async_confirm_camera_from_voice(

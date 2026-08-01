@@ -32,6 +32,7 @@ ACTION_SEARCH = "search"
 ACTION_WEATHER = "weather"
 ACTION_IMAGE_GENERATION = "image_generation"
 ACTION_ZALO_SEND = "zalo_send"
+ACTION_SPEAKER_ANNOUNCE = "speaker_announce"
 
 SUPPORTED_ACTIONS = {
     ACTION_CAMERA,
@@ -51,6 +52,7 @@ SUPPORTED_ACTIONS = {
     ACTION_WEATHER,
     ACTION_IMAGE_GENERATION,
     ACTION_ZALO_SEND,
+    ACTION_SPEAKER_ANNOUNCE,
 }
 
 MAX_LEARNED_COMMANDS = 100
@@ -65,6 +67,7 @@ REQUEST_ACTIONS = {
     ACTION_WEATHER,
     ACTION_IMAGE_GENERATION,
     ACTION_ZALO_SEND,
+    ACTION_SPEAKER_ANNOUNCE,
 }
 
 ACTION_LABELS = {
@@ -85,6 +88,7 @@ ACTION_LABELS = {
     ACTION_WEATHER: "tra cứu thời tiết bằng AI Search",
     ACTION_IMAGE_GENERATION: "tạo ảnh bằng AI và gửi về Zalo",
     ACTION_ZALO_SEND: "gửi nội dung đến Zalo đã cấu hình",
+    ACTION_SPEAKER_ANNOUNCE: "phát nội dung thông báo ra loa TTS",
 }
 
 # Explicit labels also let users teach short targets such as "để camera" or
@@ -137,6 +141,8 @@ _TARGET_LABELS = {
     "check weather": ACTION_WEATHER,
     "send zalo": ACTION_ZALO_SEND,
     "notify zalo": ACTION_ZALO_SEND,
+    "announce on speaker": ACTION_SPEAKER_ANNOUNCE,
+    "speaker announcement": ACTION_SPEAKER_ANNOUNCE,
     "generate image": ACTION_IMAGE_GENERATION,
     "generate an image": ACTION_IMAGE_GENERATION,
     "create image": ACTION_IMAGE_GENERATION,
@@ -195,6 +201,12 @@ _TARGET_LABELS = {
     "gui zalo": ACTION_ZALO_SEND,
     "thong bao zalo": ACTION_ZALO_SEND,
     "bao zalo": ACTION_ZALO_SEND,
+    "thong bao loa": ACTION_SPEAKER_ANNOUNCE,
+    "bao loa": ACTION_SPEAKER_ANNOUNCE,
+    "bao ra loa": ACTION_SPEAKER_ANNOUNCE,
+    "thong bao ra loa": ACTION_SPEAKER_ANNOUNCE,
+    "gui loa": ACTION_SPEAKER_ANNOUNCE,
+    "nhan loa": ACTION_SPEAKER_ANNOUNCE,
     "tao anh": ACTION_IMAGE_GENERATION,
     "tao mot anh": ACTION_IMAGE_GENERATION,
     "tao buc anh": ACTION_IMAGE_GENERATION,
@@ -622,6 +634,7 @@ def canonical_text(
         ACTION_WEATHER: "thời tiết",
         ACTION_IMAGE_GENERATION: "tạo ảnh",
         ACTION_ZALO_SEND: "gửi zalo",
+        ACTION_SPEAKER_ANNOUNCE: "thông báo loa",
         ACTION_CAMERA_ANALYSIS: "phân tích camera",
     }
     prefix = prefixes.get(action, "")

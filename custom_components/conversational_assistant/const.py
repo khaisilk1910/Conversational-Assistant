@@ -210,6 +210,28 @@ ZALO_SEND_SENTENCES = [
     "[please ]notify zalo {request}",
 ]
 
+# Direct TTS announcements. The content is collected after one of these
+# explicit prefixes, then the user selects one or more discovered speakers.
+SPEAKER_ANNOUNCE_SENTENCES = [
+    "[hãy ]thông báo loa",
+    "[hãy ]thông báo loa {request}",
+    "[hãy ]báo loa",
+    "[hãy ]báo loa {request}",
+    "[hãy ]báo ra loa",
+    "[hãy ]báo ra loa {request}",
+    "[hãy ]thông báo ra loa",
+    "[hãy ]thông báo ra loa {request}",
+    "[hãy ]gửi loa",
+    "[hãy ]gửi loa {request}",
+    "[hãy ]nhắn loa",
+    "[hãy ]nhắn loa {request}",
+]
+
+# Busy speakers are rechecked every 10 seconds. Twenty rechecks occur after
+# the initial check, giving a maximum wait of approximately 200 seconds.
+SPEAKER_BUSY_RETRY_DELAY_SECONDS = 10
+SPEAKER_BUSY_RETRY_COUNT = 20
+
 # Users can teach persistent alternative phrases for existing workflows.
 # These management commands are static; learned phrases themselves are
 # registered dynamically after loading Home Assistant Store.
