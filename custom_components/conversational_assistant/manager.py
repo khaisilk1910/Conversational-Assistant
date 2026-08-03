@@ -922,18 +922,61 @@ def _prepare_camera_snapshot_path(filename: str) -> None:
 
 
 def _sanitize_spoken_text(value: str) -> str:
-    """Return TTS-friendly text without markup, emoji, or punctuation."""
-    normalized = unicodedata.normalize("NFC", value.strip())
-    characters: list[str] = []
-    for character in normalized:
-        category = unicodedata.category(character)
-        if character.isspace():
-            characters.append(" ")
-        elif category.startswith(("L", "N")):
-            characters.append(character)
-        else:
-            characters.append(" ")
-    return " ".join("".join(characters).split())
+    """Return one-line TTS text without markup, emoji, or decoration.
+
+    Useful punctuation is retained so the speech engine can pause naturally.
+    Line breaks and list items become sentence boundaries instead of being
+    removed blindly.
+    """
+    text = unicodedata.normalize("NFC", str(value or "").strip())
+    text = re.sub(r"\[([^\]]+)\]\([^\)]+\)", r"\1", text)
+    text = re.sub(r"<[^>]+>", " ", text)
+    text = re.sub(r"(?m)^\s{0,3}#{1,6}\s*", "", text)
+    text = re.sub(r"\*\*(.*?)\*\*", r"\1", text, flags=re.DOTALL)
+    text = re.sub(r"__(.*?)__", r"\1", text, flags=re.DOTALL)
+    text = text.replace("`", "")
+
+    spoken_lines: list[str] = []
+    allowed_punctuation = set(".,;:!?%°/+-()'’")
+    for raw_line in text.replace("\r\n", "\n").replace("\r", "\n").split("\n"):
+        line = re.sub(
+            r"^\s*(?:[•▪◦‣⁃]|[-*+]\s+|\d+\s*[.)-]\s+)",
+            "",
+            raw_line,
+        )
+        characters: list[str] = []
+        for character in line:
+            category = unicodedata.category(character)
+            codepoint = ord(character)
+            if character in {"\ufe0f", "\u200d", "\u20e3"}:
+                continue
+            if (
+                0x1F000 <= codepoint <= 0x1FAFF
+                or 0x1F1E6 <= codepoint <= 0x1F1FF
+                or 0x2600 <= codepoint <= 0x27BF
+            ):
+                continue
+            if character.isspace():
+                characters.append(" ")
+            elif category.startswith(("L", "N")):
+                characters.append(character)
+            elif character in allowed_punctuation:
+                characters.append(character)
+            else:
+                characters.append(" ")
+
+        cleaned = " ".join("".join(characters).split())
+        cleaned = re.sub(r"\s+([,.;:!?%°)])", r"\1", cleaned)
+        cleaned = re.sub(r"([(])\s+", r"\1", cleaned)
+        cleaned = re.sub(r"\s+([/+-])\s+", r" \1 ", cleaned)
+        cleaned = cleaned.strip(" -")
+        if cleaned:
+            spoken_lines.append(cleaned)
+
+    for index in range(len(spoken_lines) - 1):
+        if spoken_lines[index][-1] not in ".,;:!?":
+            spoken_lines[index] += "."
+    return " ".join(spoken_lines).strip()
 
 
 def _assist_speech_text(value: str) -> str:
@@ -1021,6 +1064,7 @@ class ConversationalAssistantManager(NoteManagerMixin):
         self._scheduled_device_action_unsubs: dict[
             str, Callable[[], None]
         ] = {}
+        self._scheduled_device_action_tasks: set[asyncio.Task[Any]] = set()
         self._zalo_pending_calendar_events: dict[
             str, PendingZaloCalendarEvent
         ] = {}
@@ -1036,11 +1080,16 @@ class ConversationalAssistantManager(NoteManagerMixin):
         self._zalo_chat_locks: dict[str, asyncio.Lock] = {}
         self._zalo_background_tasks: set[asyncio.Task[Any]] = set()
         self._speaker_announcement_tasks: set[asyncio.Task[Any]] = set()
+        # Serialize output per media player while still allowing different
+        # speakers to play concurrently. This prevents overlapping requests
+        # from racing on the same speaker.
+        self._speaker_locks: dict[str, asyncio.Lock] = {}
         self._store: Store[dict[str, Any]] = Store(
             hass,
             STORAGE_VERSION,
             f"{STORAGE_KEY_PREFIX}.{entry.entry_id}",
         )
+        self._storage_loaded = False
         self._unsub_timer: Callable[[], None] | None = None
         self._unsub_pending_trigger: Callable[[], None] | None = None
         self._unsub_pending_expiry_timer: Callable[[], None] | None = None
@@ -2822,6 +2871,7 @@ class ConversationalAssistantManager(NoteManagerMixin):
     async def async_setup(self) -> None:
         """Load data and register listeners."""
         stored = await self._store.async_load() or {}
+        self._storage_loaded = True
         for item in stored.get("reminders", []):
             try:
                 reminder = Reminder.from_dict(item)
@@ -2988,6 +3038,14 @@ class ConversationalAssistantManager(NoteManagerMixin):
                     exc_info=True,
                 )
         self._scheduled_device_action_unsubs.clear()
+        scheduled_action_tasks = tuple(self._scheduled_device_action_tasks)
+        for task in scheduled_action_tasks:
+            task.cancel()
+        if scheduled_action_tasks:
+            await asyncio.gather(
+                *scheduled_action_tasks, return_exceptions=True
+            )
+        self._scheduled_device_action_tasks.clear()
         self._zalo_pending_calendar_events.clear()
         self._zalo_pending_calendar_managements.clear()
         self._clear_discovery_caches()
@@ -3004,7 +3062,9 @@ class ConversationalAssistantManager(NoteManagerMixin):
         if speaker_tasks:
             await asyncio.gather(*speaker_tasks, return_exceptions=True)
         self._speaker_announcement_tasks.clear()
-        await self._store.async_save(self._serialize())
+        self._speaker_locks.clear()
+        if self._storage_loaded:
+            await self._store.async_save(self._serialize())
 
     @callback
     def _clear_discovery_caches(self) -> None:
@@ -3933,140 +3993,47 @@ class ConversationalAssistantManager(NoteManagerMixin):
         return normalized
 
     def _integration_help_text(self) -> str:
-        """Return the shared concise guide for Voice Assist and Zalo."""
+        """Return a compact shared guide for Voice Assist and Zalo."""
         keyword = self.zalo_invocation_keyword.replace("`", "'")
         if self.zalo_invocation_keyword_enabled:
-            invocation_guide = (
-                "🔑 **TỪ KHÓA GỌI TÍCH HỢP TRÊN ZALO**\n"
-                f"• Đang bật. Mọi yêu cầu Zalo mới phải bắt đầu "
-                f"bằng **`{keyword}`**; nội dung không có từ khóa ở đầu và không "
-                "thuộc một luồng đang hoạt động sẽ được "
-                "bỏ qua im lặng để tránh nhầm với trò chuyện thông thường.\n"
-                f"• Ví dụ mở một yêu cầu mới: **`{keyword} chụp cam`**, "
-                f"**`{keyword} thời tiết Hà Nội`**.\n"
-                "• Khi integration đã hỏi chọn mục, xác nhận, hủy hoặc đang trong "
-                "phòng trò chuyện tiếp nối, hãy trả lời trực tiếp như **`1 3`**, "
-                "**`đồng ý`**, **`hủy`**; không cần lặp lại từ khóa. Sau khi luồng "
-                "hoàn tất, bị hủy hoặc hết thời gian chờ, yêu cầu mới lại phải bắt "
-                f"đầu bằng **`{keyword}`**.\n"
-                "• Đổi từ khóa hoặc tắt yêu cầu từ khóa tại **Configure > Zalo settings > Zalo webhook and Home Assistant**. "
-                "Tùy chọn này chỉ lọc tin nhắn webhook Zalo; Voice Assist vẫn dùng lệnh "
-                "bình thường, không cần đọc từ khóa.\n"
-                "• Automation webhook nên tiếp tục chuyển toàn bộ payload vào "
-                "`conversational_assistant.process_zalo_webhook`; không nên hard-code "
-                "từ khóa trong automation vì từ khóa có thể đổi trong UI.\n"
-                "• Condition mẫu có `blocked = ['@bot']` vẫn dùng được với từ khóa "
-                "mặc định `@1080`. Nếu đổi từ khóa thành `@bot`, hãy bỏ hoặc sửa mục "
-                "blocked đó, nếu không automation sẽ chặn lệnh trước khi tới integration.\n\n"
+            zalo_rule = (
+                f"• Zalo: bắt đầu yêu cầu mới bằng **`{keyword}`**. "
+                "Khi bot đang chờ chọn hoặc xác nhận, chỉ cần trả lời trực tiếp.\n"
             )
         else:
-            invocation_guide = (
-                "🔑 **TỪ KHÓA GỌI TÍCH HỢP TRÊN ZALO**\n"
-                "• Đang tắt. Tin nhắn webhook Zalo được xử lý như trước, không cần từ khóa "
-                "ở đầu và có thể dễ trùng với nội dung trò chuyện thông thường.\n"
-                f"• Có thể bật tại **Configure > Zalo settings > Zalo webhook and Home Assistant**; từ khóa mặc định là "
-                f"**`{keyword}`**. Voice Assist không bị ảnh hưởng.\n\n"
-            )
+            zalo_rule = "• Zalo: hiện không bắt buộc từ khóa gọi tích hợp.\n"
 
         return (
-            "📘 **HƯỚNG DẪN SỬ DỤNG CONVERSATIONAL ASSISTANT**\n"
-            "🇻🇳 Dùng tiếng Việt hoặc 🇬🇧 English trên Voice Assist và Zalo.\n\n"
-            f"{invocation_guide}"
-            "1️⃣ **🏠 NHÀ THÔNG MINH: ZALO VÀ VOICE ASSIST**\n"
-            "• Home Assistant Assist tiếp tục xử lý trực tiếp các lệnh gốc như "
-            "bật/tắt, đặt nhiệt độ, đặt tốc độ quạt và lệnh trì hoãn cơ bản; "
-            "integration không giành xử lý các lệnh gốc này để tránh xung đột.\n"
-            "• Integration bổ sung trên Voice Assist và Zalo các thao tác chưa "
-            "được intent gốc bao phủ đầy đủ: tăng/giảm nhiệt độ, chuyển HVAC "
-            "mode, fan mode, preset, đảo gió dọc/ngang, độ ẩm; tốc độ, quay "
-            "đảo, hướng quay và preset của quạt.\n"
-            "• Hỗ trợ hẹn giờ bền vững cho mọi thao tác integration có thể "
-            "điều khiển, gồm mốc tương đối hoặc thời điểm cụ thể. Lịch vẫn được "
-            "khôi phục sau khi Home Assistant khởi động lại.\n"
-            "• Nếu thiếu tên quạt hoặc điều hòa, bot đọc/liệt kê thiết bị và chờ "
-            "chọn trong 120 giây. Nếu thao tác không được thiết bị hỗ trợ, bot "
-            "chỉ gợi ý các action và mode Home Assistant đang công bố.\n"
-            "• Lệnh hợp lệ được thực hiện ngay; chỉ **mở cửa cuốn/cửa gara** "
-            "mới yêu cầu xác nhận trong 120 giây. Có thể trả lời **Có**, "
-            "**Đồng ý** hoặc **Mở** để thực hiện; trả lời **Hủy** để dừng.\n"
-            "• Ví dụ: `Chuyển điều hòa phòng ngủ sang cool`; `Tăng nhiệt độ "
-            "điều hòa 2 độ`; `Bật đảo gió ngang`; `Tăng tốc độ quạt 20%`; "
-            "`Bật quay đảo quạt`; `Hẹn giờ tắt quạt sau 30 phút`; `Lên lịch "
-            "chuyển điều hòa sang dry lúc 22 giờ`.\n\n"
-            "2️⃣ **🌦️ DỰ BÁO THỜI TIẾT VÀ CẢNH BÁO BÃO**\n"
-            "• Có trên cả Zalo và Voice Assist. Hỗ trợ hỏi một ngày như `Thời tiết hôm nay`, `Thời tiết ngày mai`, một ngày tương đối như `Thời tiết 2 ngày nữa`, hoặc liệt kê từng ngày bằng `Thời tiết 3 ngày tiếp theo`, `Dự báo 7 ngày tới`. Cụm **N ngày tiếp theo/tới** bắt đầu từ ngày mai; ví dụ 2 ngày tiếp theo là ngày mai và ngày kia.\n"
-            "• Integration ưu tiên bộ phân tích và công cụ có sẵn của Home Assistant để xác định mốc ngày. Chỉ khi mốc phức tạp mới dùng AI Agent để phân tích; phần lấy dữ liệu thời tiết trực tuyến luôn dùng **AI Agent Search**, không dùng agent điều khiển thiết bị.\n"
-            "• Khi yêu cầu nhiều ngày, integration bắt buộc liệt kê riêng từng ngày với đủ năm đầu mục: điều kiện thời tiết, nhiệt độ thấp-cao, khả năng mưa, độ ẩm và sức gió. Trên Zalo, mỗi ngày được đánh dấu dạng `📅 **Thứ Hai, 03/08/2026**`; giá trị thiếu nhãn từ AI được chuẩn hóa lại, còn phản hồi thiếu dữ liệu của bất kỳ ngày nào sẽ bị loại để thử AI Search dự phòng. Chỉ hỗ trợ tối đa 7 ngày liên tiếp.\n"
-            "• Các mốc phức tạp như `thứ Ba tuần sau` hoặc `cuối tuần này` được AI phân tích ngày trước khi tra cứu. Nếu không nêu địa điểm, integration dùng địa điểm trong **Weather settings**; khi ô này để trống mới dùng vị trí Home Assistant.\n"
-            "• Dùng `Kiểm tra bão`, `Tình hình bão`, `Có bão không` hoặc hỏi về áp thấp nhiệt đới/xoáy thuận nhiệt đới. Integration chỉ cảnh báo hệ thống có khả năng ảnh hưởng Việt Nam; nếu không có sẽ trả lời **Không có bão**.\n"
-            "• Tại **Configure > Weather settings**, có thể bật lịch gửi dự báo hằng ngày, nhập nhiều giờ chạy, chọn số ngày từ 1 đến 7 và chọn một hay nhiều Zalo nhận. Cũng có thể bật lịch kiểm tra bão ở nhiều giờ; bản tin bão chỉ được gửi khi thực sự có cảnh báo ảnh hưởng Việt Nam, còn không có bão hoặc kiểm tra lỗi thì không gửi.\n"
-            "• Ví dụ: `Thời tiết Hà Nội chiều mai`; `Thời tiết 5 ngày tiếp theo`; `Kiểm tra bão`; `Will it rain in Bangkok this weekend?`.\n\n"
-            "3️⃣ **📅 LỊCH VÀ SỰ KIỆN**\n"
-            "• Tra cứu, tạo, sửa hoặc xóa sự kiện; kết quả được nhóm theo từng lịch.\n"
-            "• Ví dụ: `Sự kiện trong 15 ngày tới`; `Tạo sự kiện họp lúc 18h30 ngày mai`.\n"
-            "• Sau tra cứu, phản hồi **Sửa**, **Xóa** hoặc **Bỏ qua** khi được hỏi.\n\n"
-            "4️⃣ **🔔 SENSOR VÀ THÔNG BÁO LỊCH**\n"
-            "• Calendar settings cho phép chọn lịch, số ngày quét, giờ gửi và nơi nhận Mobile/Zalo.\n"
-            "• Ví dụ: chọn 30 ngày, giờ 07:00 và bật thông báo khi có sự kiện.\n\n"
-            "5️⃣ **⏰ NHẮC HẸN**\n"
-            "• Tạo một lần hoặc lặp lại; gửi tới Mobile, Zalo và loa TTS; có thể xem hoặc xóa.\n"
-            "• Tại **Configure > TTS settings**, có thể chọn TTS entity và nhập "
-            "tùy chọn `language` cùng tên `voice` mà bộ máy TTS đang dùng hỗ trợ. "
-            "Phải nhập đúng mã ngôn ngữ và đúng tên giọng; không sử dụng thì để trống.\n"
-            "• Khi cả hai ô để trống, integration gọi `tts.speak` theo cấu hình mặc định "
-            "như trước đây. Khi có giá trị, `language` được gửi trực tiếp và `voice` được "
-            "gửi trong `options.voice`.\n"
-            "• Ví dụ: `Nhắc tôi uống thuốc sau 30 phút`; `Nhắc tập thể dục mỗi thứ Hai lúc 7 giờ`.\n\n"
-            "6️⃣ **🔊 THÔNG BÁO TRỰC TIẾP RA LOA**\n"
-            "• Dùng `Thông báo loa`, `Báo loa`, `Báo ra loa`, `Thông báo ra loa`, `Gửi loa` hoặc `Nhắn loa` kèm nội dung.\n"
-            "• Integration liệt kê loa và chờ chọn một hay nhiều loa trong 120 giây. Có thể trả lời số, tên loa hoặc `Tất cả`; dùng `Hủy` để bỏ yêu cầu.\n"
-            "• Loa đang `playing` hoặc `buffering` được kiểm tra lại mỗi 10 giây, tối đa 20 lần kiểm tra lại. Loa lỗi, mất kết nối, không khả dụng hoặc vẫn bận sẽ được báo về Zalo đã ra lệnh; lệnh Voice Assist báo về Zalo đầu tiên trong danh sách cấu hình.\n"
-            "• Ví dụ: `Thông báo loa bữa tối đã sẵn sàng`; `Nhắn loa mời mọi người xuống phòng họp`.\n\n"
-            "7️⃣ **📝 GHI CHÚ BẢO MẬT**\n"
-            "• Thêm, xem, sửa, xóa; chọn Mức 1 bảo mật bằng pass hoặc Mức 2 công khai.\n"
-            "• Ví dụ: `Ghi nhớ mã tủ đồ là 2468`; `Danh sách ghi chú`; `Sửa ghi chú`.\n\n"
-            "8️⃣ **📸 CHỤP ẢNH CAMERA**\n"
-            "• Chọn một hoặc nhiều camera, chọn đúng Zalo nhận ảnh, rồi xác nhận chụp và gửi.\n"
-            "• Ví dụ: `Chụp camera`; chọn `1 3`, chọn Zalo `2`, rồi nói **Đồng ý**.\n\n"
-            "9️⃣ **🧠 PHÂN TÍCH CAMERA BẰNG AI**\n"
-            "• Chụp và phân tích nhiều camera; instructions có thể sửa tại AI settings.\n"
-            "• Ví dụ: `Phân tích camera`; `Analyze camera`; sau đó chọn camera cần xem.\n\n"
-            "1️⃣0️⃣ **🔎 TÌM KIẾM INTERNET**\n"
-            "• Dùng AI Agent Search riêng để tìm và tổng hợp thông tin Việt/Anh.\n"
-            "• Ví dụ: `Tìm thông tin giá vàng hôm nay`; `Search for the latest Home Assistant news`.\n\n"
-            "1️⃣1️⃣ **💬 TRÒ CHUYỆN HỎI ĐÁP TRÊN ZALO**\n"
-            "• Bắt đầu bằng `Trò chuyện đi`, `Tám đi` hoặc `Buôn đi`, sau đó "
-            "hỏi đáp mọi chủ đề. AI Search được dùng khi cần kiểm chứng thông "
-            "tin; điều chưa chắc chắn sẽ được nói rõ thay vì tự bịa.\n"
-            "• Phản hồi thân thiện, trẻ trung, dùng thuật ngữ đúng lĩnh vực và "
-            "nhắc giữ cách nói văn minh khi gặp từ ngữ thô tục.\n"
-            "• Sau 120 giây không phản hồi, integration hỏi lại; im lặng thêm "
-            "10 giây sẽ tự dừng trò chuyện.\n\n"
-            "1️⃣2️⃣ **🎨 TẠO ẢNH AI TRÊN ZALO**\n"
-            "• Tạo ảnh từ mô tả và gửi lại đúng cuộc trò chuyện Zalo.\n"
-            "• Ví dụ: `Tạo ảnh một chú mèo phi hành gia`; `Generate an image of a smart home`.\n\n"
-            "1️⃣3️⃣ **🧩 BỘ NHỚ CÂU LỆNH**\n"
-            "• Dạy alias mới, xem danh sách hoặc xóa câu lệnh đã học.\n"
-            "• Ví dụ: `Học câu lệnh xem cổng để chụp ảnh camera`; `Xóa câu lệnh xem cổng`.\n\n"
-            "1️⃣4️⃣ **🤖 AI DỰ PHÒNG VÀ TRẠNG THÁI XỬ LÝ**\n"
-            "• Agent đã chọn luôn được thử trước; khi lỗi có thể tự chuyển agent khác.\n"
-            "• Yêu cầu lâu ngoài chế độ trò chuyện sẽ báo: ⏳ **Đang xử lý thông tin yêu cầu. Hãy chờ phản hồi.**\n\n"
-            "1️⃣5️⃣ **✅ CHỌN VÀ XÁC NHẬN**\n"
-            "• Có thể chọn nhiều mục bằng `1 3 10`, tên mục hoặc **Tất cả**.\n"
-            "• Dùng đúng từ khóa bôi đậm như **Có**, **Không**, **Hủy**, **Bỏ qua**; mỗi bước có hiệu lực 120 giây.\n\n"
-            "1️⃣6️⃣ **📨 GỬI NỘI DUNG VÀ NHẮC HẸN LÊN ZALO**\n"
-            "• Dùng `Gửi Zalo`, `Thông báo Zalo` hoặc `Báo Zalo`, sau đó chọn một hay nhiều Zalo đã thêm trong UI.\n"
-            "• Nội dung được chuyển tiếp nguyên văn. Nếu nhận ra ngày giờ, integration tạo thêm nhắc Zalo trước thời điểm đó 15 phút.\n"
-            "• Ví dụ: `Gửi Zalo yêu cầu ngày mai 8h00 tất cả nhân viên sale họp bàn chiến lược kinh doanh`.\n"
-            "• Có thể đổi cách bot gọi người dùng tại General settings > Xưng hô; mặc định là `Sếp Khải`.\n\n"
-            "1️⃣7️⃣ **🌙☀️ CHUYỂN ĐỔI VÀ TRA CỨU NGÀY ÂM DƯƠNG**\n"
-            "• Có trên cả Zalo và Voice Assist. Hỗ trợ `đổi`, `chuyển`, `quy đổi`, `tra`, `xem`, `lấy ngày âm`, `lấy ngày dương` và câu hỏi tự nhiên về thứ, ngày âm hoặc ngày dương.\n"
-            "• Có thể nhập ngày dạng `30/11/1984`, `30-11-1984`, `30.11.1984`, `ngày 30 tháng 11 năm 1984`, hoặc dùng mốc như `hôm nay`, `ngày mai`, `ngày kia`, `ngày kìa`, `thứ 3 tuần này`, `thứ 3 tuần sau`, `10 ngày nữa`.\n"
-            "• Integration ưu tiên tự phân tích mốc thời gian theo giờ địa phương Home Assistant, sau đó gọi action `am_lich_viet_nam.convert_date`. Chỉ khi mốc hoặc ý định khó hiểu mới dùng AI; nếu vẫn không xác định được, bot yêu cầu nói rõ mốc.\n"
-            "• Kết quả Zalo có tiêu đề, emoji và gạch đầu dòng; luôn hiển thị Thứ khi action trả trường `thu`. Voice Assist tự bỏ xuống dòng, emoji, Markdown và ký tự trang trí để TTS đọc liền mạch.\n"
-            "• Tra cứu chi tiết có thể trả ngày âm/dương, Can Chi, tiết khí, giờ hoàng đạo và hắc đạo, hướng xuất hành, Thập nhị trực, Nhị thập bát tú, luận giải ngày và tháng nhuận.\n"
-            "• Ví dụ: `Đổi ngày 30/11/1984 dương lịch sang âm lịch`; `Ngày mai âm lịch bao nhiêu`; `Hôm nay thứ mấy`; `Thứ 3 tuần sau âm lịch bao nhiêu`; `10 ngày nữa là thứ mấy`.\n\n"
-            "💡 Gửi `Hướng dẫn sử dụng tích hợp` để xem lại nội dung này."
+            "📘 **HƯỚNG DẪN CONVERSATIONAL ASSISTANT**\n\n"
+            f"{zalo_rule}"
+            "• Gửi **Hủy** để dừng luồng đang chờ; thời gian chọn/xác nhận là 120 giây.\n\n"
+            "🏠 **Thiết bị**\n"
+            "• Bật/tắt, tăng/giảm, đổi chế độ điều hòa hoặc quạt; hỗ trợ hẹn giờ.\n"
+            "• Ví dụ: `Tăng điều hòa phòng ngủ 2 độ`; `Tắt quạt sau 30 phút`.\n\n"
+            "🌦️ **Thời tiết và bão**\n"
+            "• Hỏi hiện tại hoặc tối đa 7 ngày; dữ liệu trực tuyến lấy bằng AI Search.\n"
+            "• Ví dụ: `Thời tiết Hà Nội 5 ngày tới`; `Kiểm tra bão`.\n\n"
+            "⏰ **Nhắc hẹn và lịch**\n"
+            "• Tạo, xem, sửa, xóa nhắc hẹn hoặc sự kiện; hỗ trợ lặp lại và nhiều nơi nhận.\n"
+            "• Ví dụ: `Nhắc tôi uống thuốc lúc 20 giờ`; `Tạo lịch họp 8 giờ ngày mai`.\n\n"
+            "🔊 **Thông báo loa**\n"
+            "• Dùng `Thông báo loa`, `Báo loa`, `Gửi loa` hoặc `Nhắn loa` kèm nội dung.\n"
+            "• Chọn một, nhiều loa hoặc **Tất cả**. Loa bận được chờ và kiểm tra lại.\n\n"
+            "📨 **Gửi Zalo**\n"
+            "• Dùng `Gửi Zalo`, `Thông báo Zalo` hoặc `Báo Zalo`, rồi chọn nơi nhận.\n"
+            "• Nội dung có ngày giờ sẽ được tạo thêm nhắc Zalo trước 15 phút.\n\n"
+            "📸 **Camera**\n"
+            "• `Chụp camera` để gửi ảnh; `Phân tích camera` để AI mô tả hình ảnh.\n\n"
+            "📝 **Ghi chú và trò chuyện**\n"
+            "• Thêm, xem, sửa, xóa ghi chú; `Trò chuyện` để mở phiên AI và `Kết thúc` để đóng.\n\n"
+            "🤖 **AI và bộ nhớ câu lệnh**\n"
+            "• `Tìm thông tin...`, `Tạo ảnh...`, `Học câu lệnh...`, xem hoặc xóa câu lệnh đã học.\n\n"
+            "🌙 **Âm dương lịch**\n"
+            "• Ví dụ: `Ngày mai âm lịch bao nhiêu`; `Đổi 30/11/1984 sang âm lịch`.\n\n"
+            "⚙️ **Cấu hình**\n"
+            "• Vào **Settings > Devices & services > Conversational Assistant > Configure** "
+            "để chọn Zalo, AI Search, lịch, thời tiết, loa và TTS.\n\n"
+            "💡 Gửi `Hướng dẫn sử dụng tích hợp` để xem lại."
         )
 
     def _zalo_upcoming_reminders(
@@ -6539,9 +6506,21 @@ class ConversationalAssistantManager(NoteManagerMixin):
         def emit(field: str, value: str) -> None:
             icon, label = labels[field]
             cleaned = value.strip(" :-–—\t")
-            if cleaned:
-                output.append(f"{icon} **{label}**: {cleaned}")
-                seen.add(field)
+            if not cleaned:
+                return
+            if field in seen:
+                # Keep one stable line per core field. If an agent emits a
+                # second value, merge it into the existing labeled line.
+                prefix = f"{icon} **{label}**: "
+                for index in range(len(output) - 1, -1, -1):
+                    if output[index].startswith(prefix):
+                        existing = output[index][len(prefix):]
+                        if normalize_text(cleaned) not in normalize_text(existing):
+                            output[index] = f"{prefix}{existing}; {cleaned}"
+                        return
+                return
+            output.append(f"{icon} **{label}**: {cleaned}")
+            seen.add(field)
 
         for original in raw_lines:
             stripped = original.strip()
@@ -6557,7 +6536,12 @@ class ConversationalAssistantManager(NoteManagerMixin):
                 r"monday|tuesday|wednesday|thursday|friday|saturday|sunday)",
                 normalized_line,
             )
-            if found_date and weekday_match:
+            date_heading = (
+                stripped.lstrip().startswith("📅")
+                or normalized_line.startswith(("ngay ", "date "))
+                or bool(weekday_match)
+            )
+            if found_date and date_heading:
                 clean, _emoji = cls._weather_clean_line(stripped)
                 clean = re.sub(r"^ngay\s+", "", clean, flags=re.IGNORECASE)
                 output.append(f"📅 **{clean.strip()}**")
@@ -7201,8 +7185,10 @@ class ConversationalAssistantManager(NoteManagerMixin):
                 "Return clear natural sentences with no emoji, no Markdown table, "
                 "and no decorative Markdown. For a multi-day request, speak one short "
                 "dated segment for every requested day in chronological order; never "
-                "merge or omit requested dates. Mention only the most relevant weather "
-                "fields. "
+                "merge or omit requested dates. Every requested day must include the "
+                "weather condition, low-high temperature, precipitation probability, "
+                "humidity, and wind direction/speed. Use complete sentences and useful "
+                "punctuation so TTS pauses naturally. "
             )
         return (
             "Act as an Internet weather lookup specialist. Interpret the user's exact "
@@ -9501,6 +9487,27 @@ class ConversationalAssistantManager(NoteManagerMixin):
         )
 
     @callback
+    def _start_scheduled_device_action_task(self, action_id: str) -> None:
+        """Start, retain, and observe one due device-action task."""
+        task = self.hass.async_create_task(
+            self._async_run_scheduled_device_action(action_id)
+        )
+        self._scheduled_device_action_tasks.add(task)
+
+        def _finished(done_task: asyncio.Task[Any]) -> None:
+            self._scheduled_device_action_tasks.discard(done_task)
+            if done_task.cancelled():
+                return
+            try:
+                done_task.result()
+            except Exception:  # noqa: BLE001 - surface background failure
+                _LOGGER.exception(
+                    "Scheduled device action %s failed unexpectedly", action_id
+                )
+
+        task.add_done_callback(_finished)
+
+    @callback
     def _schedule_one_device_action(self, item: ScheduledDeviceAction) -> None:
         """Register one persistent point-in-time callback."""
         previous = self._scheduled_device_action_unsubs.pop(
@@ -9511,17 +9518,13 @@ class ConversationalAssistantManager(NoteManagerMixin):
 
         now = dt_util.now()
         if item.run_at <= now:
-            self.hass.async_create_task(
-                self._async_run_scheduled_device_action(item.action_id)
-            )
+            self._start_scheduled_device_action_task(item.action_id)
             return
 
         @callback
         def _due(_now: datetime) -> None:
             self._scheduled_device_action_unsubs.pop(item.action_id, None)
-            self.hass.async_create_task(
-                self._async_run_scheduled_device_action(item.action_id)
-            )
+            self._start_scheduled_device_action_task(item.action_id)
 
         self._scheduled_device_action_unsubs[item.action_id] = (
             async_track_point_in_time(self.hass, _due, item.run_at)
@@ -13563,49 +13566,53 @@ class ConversationalAssistantManager(NoteManagerMixin):
         if not speaker_entity_id:
             return target.display_name, "cấu hình loa thiếu entity_id"
 
-        retries = 0
-        while True:
-            state = self.hass.states.get(speaker_entity_id)
-            if state is None:
-                return (
-                    target.display_name,
-                    "loa lỗi hoặc mất kết nối, entity không còn tồn tại",
-                )
-            state_value = str(state.state or "").strip().casefold()
-            if state_value in {STATE_UNAVAILABLE, STATE_UNKNOWN}:
-                return (
-                    target.display_name,
-                    "loa mất kết nối hoặc không khả dụng",
-                )
-            if state_value not in {"playing", "buffering"}:
-                break
-            if retries >= SPEAKER_BUSY_RETRY_COUNT:
-                return (
-                    target.display_name,
-                    "loa vẫn đang bận chơi nhạc hoặc buffering sau "
-                    f"{SPEAKER_BUSY_RETRY_COUNT} lần kiểm tra lại, nên không phát "
-                    "TTS được",
-                )
-            retries += 1
-            await asyncio.sleep(SPEAKER_BUSY_RETRY_DELAY_SECONDS)
+        lock = self._speaker_locks.setdefault(
+            speaker_entity_id, asyncio.Lock()
+        )
+        async with lock:
+            retries = 0
+            while True:
+                state = self.hass.states.get(speaker_entity_id)
+                if state is None:
+                    return (
+                        target.display_name,
+                        "loa lỗi hoặc mất kết nối, entity không còn tồn tại",
+                    )
+                state_value = str(state.state or "").strip().casefold()
+                if state_value in {STATE_UNAVAILABLE, STATE_UNKNOWN}:
+                    return (
+                        target.display_name,
+                        "loa mất kết nối hoặc không khả dụng",
+                    )
+                if state_value not in {"playing", "buffering"}:
+                    break
+                if retries >= SPEAKER_BUSY_RETRY_COUNT:
+                    return (
+                        target.display_name,
+                        "loa vẫn đang bận chơi nhạc hoặc buffering sau "
+                        f"{SPEAKER_BUSY_RETRY_COUNT} lần kiểm tra lại, nên không phát "
+                        "TTS được",
+                    )
+                retries += 1
+                await asyncio.sleep(SPEAKER_BUSY_RETRY_DELAY_SECONDS)
 
-        try:
-            await self.hass.services.async_call(
-                TTS_DOMAIN,
-                TTS_SERVICE_SPEAK,
-                self._tts_speak_service_data(speaker_entity_id, message),
-                blocking=True,
-                target={"entity_id": tts_entity_id},
-            )
-        except asyncio.CancelledError:
-            raise
-        except Exception:  # noqa: BLE001 - report the exact failed speaker
-            _LOGGER.exception(
-                "Failed direct TTS announcement on %s using %s",
-                speaker_entity_id,
-                tts_entity_id,
-            )
-            return target.display_name, "loa hoặc dịch vụ TTS phát sinh lỗi"
+            try:
+                await self.hass.services.async_call(
+                    TTS_DOMAIN,
+                    TTS_SERVICE_SPEAK,
+                    self._tts_speak_service_data(speaker_entity_id, message),
+                    blocking=True,
+                    target={"entity_id": tts_entity_id},
+                )
+            except asyncio.CancelledError:
+                raise
+            except Exception:  # noqa: BLE001 - report the exact failed speaker
+                _LOGGER.exception(
+                    "Failed direct TTS announcement on %s using %s",
+                    speaker_entity_id,
+                    tts_entity_id,
+                )
+                return target.display_name, "loa hoặc dịch vụ TTS phát sinh lỗi"
         return target.display_name, None
 
     async def _async_deliver_speaker_announcement(
@@ -14129,41 +14136,40 @@ class ConversationalAssistantManager(NoteManagerMixin):
             )
             return False
 
-        sent = False
         spoken_message = _sanitize_spoken_text(
-            f"Bạn có lời nhắc {reminder.message}"
+            f"Bạn có lời nhắc. {reminder.message}"
         )
         if not spoken_message:
             _LOGGER.error(
                 "Conversational Assistant message became empty after TTS sanitization"
             )
             return False
+
+        targets: list[NotificationTarget] = []
         for speaker_entity_id in speaker_entity_ids:
             state = self.hass.states.get(speaker_entity_id)
-            if state is None or state.state in (STATE_UNAVAILABLE, STATE_UNKNOWN):
+            targets.append(
+                NotificationTarget(
+                    target_id=f"speaker:{speaker_entity_id}",
+                    kind="speaker",
+                    display_name=(state.name if state is not None else speaker_entity_id),
+                    speaker_entity_id=speaker_entity_id,
+                )
+            )
+        results = await asyncio.gather(
+            *(
+                self._async_speak_direct_announcement_on_target(
+                    target, spoken_message, tts_entity_id
+                )
+                for target in targets
+            )
+        )
+        for name, reason in results:
+            if reason is not None:
                 _LOGGER.warning(
-                    "Skipping unavailable Conversational Assistant speaker %s",
-                    speaker_entity_id,
+                    "Could not speak reminder on %s: %s", name, reason
                 )
-                continue
-            try:
-                await self.hass.services.async_call(
-                    TTS_DOMAIN,
-                    TTS_SERVICE_SPEAK,
-                    self._tts_speak_service_data(
-                        speaker_entity_id, spoken_message
-                    ),
-                    blocking=True,
-                    target={"entity_id": tts_entity_id},
-                )
-                sent = True
-            except Exception:  # noqa: BLE001 - keep other targets working
-                _LOGGER.exception(
-                    "Failed to speak Conversational Assistant on %s using %s",
-                    speaker_entity_id,
-                    tts_entity_id,
-                )
-        return sent
+        return any(reason is None for _name, reason in results)
 
     async def _async_send_notification(self, reminder: Reminder) -> None:
         """Send reminder through every assigned notification channel."""

@@ -124,10 +124,32 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         )
 
     manager = ConversationalAssistantManager(hass, entry)
-    await manager.async_setup()
     entry.runtime_data = manager
+    try:
+        await manager.async_setup()
+        await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
+    except Exception:
+        # Do not leave listeners, timers, entities, or background tasks behind
+        # when a config-entry setup fails part-way through. Cleanup failures
+        # must not hide the original setup exception.
+        try:
+            await hass.config_entries.async_unload_platforms(entry, PLATFORMS)
+        except Exception:  # noqa: BLE001 - best effort after setup failure
+            _LOGGER.debug(
+                "Failed unloading partially set up platforms for %s",
+                entry.entry_id,
+                exc_info=True,
+            )
+        try:
+            await manager.async_unload()
+        except Exception:  # noqa: BLE001 - preserve original setup exception
+            _LOGGER.debug(
+                "Failed cleaning up manager after setup error for %s",
+                entry.entry_id,
+                exc_info=True,
+            )
+        raise
     entry.async_on_unload(entry.add_update_listener(_async_update_listener))
-    await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
     return True
 
 
