@@ -69,15 +69,14 @@
       },
       "general": {
         "title": "Cài đặt chung",
-        "description": "Thiết lập xưng hô, hành vi xác nhận và xử lý thông báo chung của Conversational Assistant.",
-        "data": {
-          "dismiss_on_clear": "Vuốt bỏ thông báo cũng được xem là Bỏ qua (chỉ Android)",
-          "confirm_targets": "Hỏi nơi nhận và loa phát trước khi lưu từng nhắc nhở",
-          "user_address": "Xưng hô"
-        },
-        "data_description": {
-          "confirm_targets": "Khi bật, cả nhắc hẹn từ Voice Assist và Zalo chỉ được lưu sau khi bạn trả lời bằng số thứ tự hoặc tên nơi nhận.",
-          "user_address": "Cách tích hợp gọi người dùng trong mọi phản hồi. Mặc định: Sếp Khải."
+        "description": "Quản lý hành vi chung và tên gọi trực tiếp. Hiện có {mobile_count} thiết bị Mobile, {zalo_count} nơi nhận Zalo, {speaker_count} loa và {camera_count} camera.",
+        "menu_options": {
+          "general_behavior": "Hành vi và xưng hô",
+          "mobile_targets": "Thiết bị Mobile và tên gọi",
+          "zalo": "Nơi nhận Zalo và tên gọi",
+          "speaker_targets": "Loa và tên gọi",
+          "camera_targets": "Camera và tên gọi",
+          "init": "Quay lại Tùy chọn Conversational Assistant"
         }
       },
       "calendar": {
@@ -108,7 +107,8 @@
           "add_zalo": "Thêm nơi nhận Zalo",
           "edit_zalo_select": "Sửa nơi nhận Zalo",
           "delete_zalo": "Xóa nơi nhận Zalo",
-          "init": "Quay lại Tùy chọn Conversational Assistant"
+          "init": "Quay lại Tùy chọn Conversational Assistant",
+          "general": "Quay lại Cài đặt chung"
         }
       },
       "zalo_webhook": {
@@ -169,7 +169,7 @@
       },
       "add_zalo": {
         "title": "Thêm nơi nhận Zalo",
-        "description": "Đặt tên ngắn, dễ đọc bằng giọng nói, ví dụ Gia đình hoặc Anh Nam.",
+        "description": "Đặt tên ngắn, dễ đọc bằng giọng nói. Ví dụ đặt Khải để dùng lệnh “thông báo Zalo Khải ...”.",
         "data": {
           "name": "Tên nơi nhận dùng khi nói",
           "enabled": "Đưa nơi nhận này vào danh sách lựa chọn bằng giọng nói",
@@ -202,7 +202,8 @@
         "data_description": {
           "name": "Assist sẽ đọc tên này và bạn cũng có thể trả lời bằng chính tên đó.",
           "zalo_type": "Người dùng tương ứng type 0; Nhóm tương ứng type 1."
-        }
+        },
+        "description": "Tên gọi được dùng để gửi trực tiếp mà không cần hiện danh sách chọn."
       },
       "delete_zalo": {
         "title": "Xóa nơi nhận Zalo",
@@ -237,11 +238,179 @@
           "weather_storm_times": "Nhập nhiều giờ theo định dạng HH:MM hoặc HH:MM:SS, mỗi giờ một dòng hoặc ngăn cách bằng dấu phẩy. Mặc định gợi ý: 06:30, 12:00 và 21:00.",
           "weather_storm_zalo_targets": "Chọn một hoặc nhiều nơi nhận cảnh báo bão. Bắt buộc khi bật kiểm tra bão theo lịch."
         }
+      },
+      "general_behavior": {
+        "title": "Hành vi chung",
+        "description": "Thiết lập xưng hô, hành vi xác nhận và xử lý thông báo chung của Conversational Assistant.",
+        "data": {
+          "dismiss_on_clear": "Vuốt bỏ thông báo cũng được xem là Bỏ qua (chỉ Android)",
+          "confirm_targets": "Hỏi nơi nhận và loa phát trước khi lưu từng nhắc nhở",
+          "user_address": "Xưng hô"
+        },
+        "data_description": {
+          "confirm_targets": "Khi bật, cả nhắc hẹn từ Voice Assist và Zalo chỉ được lưu sau khi bạn trả lời bằng số thứ tự hoặc tên nơi nhận.",
+          "user_address": "Cách tích hợp gọi người dùng trong mọi phản hồi. Mặc định: Sếp Khải."
+        }
+      },
+      "mobile_targets": {
+        "title": "Thiết bị Mobile và tên gọi",
+        "description": "Đã cấu hình {target_count} thiết bị Mobile. Khi câu lệnh bắt đầu bằng tên đã đặt, tích hợp thực hiện trực tiếp mà không hiện danh sách chọn.",
+        "menu_options": {
+          "add_mobile_target": "Thêm thiết bị Mobile",
+          "edit_mobile_target_select": "Sửa thiết bị Mobile",
+          "delete_mobile_target": "Xóa thiết bị Mobile",
+          "general": "Quay lại Cài đặt chung"
+        }
+      },
+      "add_mobile_target": {
+        "title": "Thêm thiết bị Mobile",
+        "description": "Tên gọi được dùng cho lệnh trực tiếp và khi chọn nơi nhận.",
+        "data": {
+          "name": "Tên gọi khi ra lệnh",
+          "enabled": "Cho phép dùng thiết bị này",
+          "mobile_device_id": "Thiết bị Mobile App"
+        },
+        "data_description": {
+          "name": "Đặt tên ngắn, riêng biệt và dễ nói, ví dụ Phòng Ngủ, Cam Cổng hoặc Điện Thoại Khải.",
+          "enabled": "Khi tắt, thiết bị không xuất hiện trong danh sách và không nhận lệnh gọi thẳng.",
+          "mobile_device_id": "Chọn đúng thiết bị hoặc thực thể Home Assistant cần liên kết với tên gọi."
+        }
+      },
+      "edit_mobile_target_select": {
+        "title": "Chọn thiết bị Mobile cần sửa",
+        "data": {
+          "selected_named_target": "Thiết bị Mobile"
+        }
+      },
+      "edit_mobile_target": {
+        "title": "Sửa thiết bị Mobile",
+        "description": "Đổi tên gọi, trạng thái hoặc thiết bị liên kết.",
+        "data": {
+          "name": "Tên gọi khi ra lệnh",
+          "enabled": "Cho phép dùng thiết bị này",
+          "mobile_device_id": "Thiết bị Mobile App"
+        },
+        "data_description": {
+          "name": "Đặt tên ngắn, riêng biệt và dễ nói, ví dụ Phòng Ngủ, Cam Cổng hoặc Điện Thoại Khải.",
+          "enabled": "Khi tắt, thiết bị không xuất hiện trong danh sách và không nhận lệnh gọi thẳng.",
+          "mobile_device_id": "Chọn đúng thiết bị hoặc thực thể Home Assistant cần liên kết với tên gọi."
+        }
+      },
+      "delete_mobile_target": {
+        "title": "Xóa thiết bị Mobile",
+        "description": "Xóa liên kết và tên gọi khỏi cấu hình Conversational Assistant.",
+        "data": {
+          "selected_named_target": "Thiết bị Mobile cần xóa"
+        }
+      },
+      "speaker_targets": {
+        "title": "Loa và tên gọi",
+        "description": "Đã cấu hình {target_count} loa. Khi câu lệnh bắt đầu bằng tên đã đặt, tích hợp thực hiện trực tiếp mà không hiện danh sách chọn.",
+        "menu_options": {
+          "add_speaker_target": "Thêm loa",
+          "edit_speaker_target_select": "Sửa loa",
+          "delete_speaker_target": "Xóa loa",
+          "general": "Quay lại Cài đặt chung"
+        }
+      },
+      "add_speaker_target": {
+        "title": "Thêm loa",
+        "description": "Tên gọi được dùng cho lệnh trực tiếp và khi chọn nơi nhận.",
+        "data": {
+          "name": "Tên gọi khi ra lệnh",
+          "enabled": "Cho phép dùng thiết bị này",
+          "speaker_entity_id": "Thực thể loa"
+        },
+        "data_description": {
+          "name": "Đặt tên ngắn, riêng biệt và dễ nói, ví dụ Phòng Ngủ, Cam Cổng hoặc Điện Thoại Khải.",
+          "enabled": "Khi tắt, thiết bị không xuất hiện trong danh sách và không nhận lệnh gọi thẳng.",
+          "speaker_entity_id": "Chọn đúng thiết bị hoặc thực thể Home Assistant cần liên kết với tên gọi."
+        }
+      },
+      "edit_speaker_target_select": {
+        "title": "Chọn loa cần sửa",
+        "data": {
+          "selected_named_target": "Loa"
+        }
+      },
+      "edit_speaker_target": {
+        "title": "Sửa loa",
+        "description": "Đổi tên gọi, trạng thái hoặc thiết bị liên kết.",
+        "data": {
+          "name": "Tên gọi khi ra lệnh",
+          "enabled": "Cho phép dùng thiết bị này",
+          "speaker_entity_id": "Thực thể loa"
+        },
+        "data_description": {
+          "name": "Đặt tên ngắn, riêng biệt và dễ nói, ví dụ Phòng Ngủ, Cam Cổng hoặc Điện Thoại Khải.",
+          "enabled": "Khi tắt, thiết bị không xuất hiện trong danh sách và không nhận lệnh gọi thẳng.",
+          "speaker_entity_id": "Chọn đúng thiết bị hoặc thực thể Home Assistant cần liên kết với tên gọi."
+        }
+      },
+      "delete_speaker_target": {
+        "title": "Xóa loa",
+        "description": "Xóa liên kết và tên gọi khỏi cấu hình Conversational Assistant.",
+        "data": {
+          "selected_named_target": "Loa cần xóa"
+        }
+      },
+      "camera_targets": {
+        "title": "Camera và tên gọi",
+        "description": "Đã cấu hình {target_count} camera. Khi câu lệnh bắt đầu bằng tên đã đặt, tích hợp thực hiện trực tiếp mà không hiện danh sách chọn.",
+        "menu_options": {
+          "add_camera_target": "Thêm camera",
+          "edit_camera_target_select": "Sửa camera",
+          "delete_camera_target": "Xóa camera",
+          "general": "Quay lại Cài đặt chung"
+        }
+      },
+      "add_camera_target": {
+        "title": "Thêm camera",
+        "description": "Tên gọi được dùng cho lệnh trực tiếp và khi chọn nơi nhận.",
+        "data": {
+          "name": "Tên gọi khi ra lệnh",
+          "enabled": "Cho phép dùng thiết bị này",
+          "camera_entity_id": "Thực thể camera"
+        },
+        "data_description": {
+          "name": "Đặt tên ngắn, riêng biệt và dễ nói, ví dụ Phòng Ngủ, Cam Cổng hoặc Điện Thoại Khải.",
+          "enabled": "Khi tắt, thiết bị không xuất hiện trong danh sách và không nhận lệnh gọi thẳng.",
+          "camera_entity_id": "Chọn đúng thiết bị hoặc thực thể Home Assistant cần liên kết với tên gọi."
+        }
+      },
+      "edit_camera_target_select": {
+        "title": "Chọn camera cần sửa",
+        "data": {
+          "selected_named_target": "Camera"
+        }
+      },
+      "edit_camera_target": {
+        "title": "Sửa camera",
+        "description": "Đổi tên gọi, trạng thái hoặc thiết bị liên kết.",
+        "data": {
+          "name": "Tên gọi khi ra lệnh",
+          "enabled": "Cho phép dùng thiết bị này",
+          "camera_entity_id": "Thực thể camera"
+        },
+        "data_description": {
+          "name": "Đặt tên ngắn, riêng biệt và dễ nói, ví dụ Phòng Ngủ, Cam Cổng hoặc Điện Thoại Khải.",
+          "enabled": "Khi tắt, thiết bị không xuất hiện trong danh sách và không nhận lệnh gọi thẳng.",
+          "camera_entity_id": "Chọn đúng thiết bị hoặc thực thể Home Assistant cần liên kết với tên gọi."
+        }
+      },
+      "delete_camera_target": {
+        "title": "Xóa camera",
+        "description": "Xóa liên kết và tên gọi khỏi cấu hình Conversational Assistant.",
+        "data": {
+          "selected_named_target": "Camera cần xóa"
+        }
       }
     },
     "error": {
       "required": "Trường này là bắt buộc.",
-      "invalid_time_list": "Có giờ không hợp lệ. Hãy dùng HH:MM hoặc HH:MM:SS, mỗi giờ một dòng hoặc ngăn cách bằng dấu phẩy."
+      "invalid_time_list": "Có giờ không hợp lệ. Hãy dùng HH:MM hoặc HH:MM:SS, mỗi giờ một dòng hoặc ngăn cách bằng dấu phẩy.",
+      "duplicate_name": "Tên gọi này trùng hoặc dễ nhầm với một tên đã cấu hình.",
+      "duplicate_target": "Thiết bị hoặc nơi nhận này đã được thêm."
     }
   },
   "services": {

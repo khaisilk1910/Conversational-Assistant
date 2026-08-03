@@ -31,6 +31,8 @@ from .const import (
     CONF_CALENDAR_NOTIFICATION_MOBILE_DEVICES,
     CONF_CALENDAR_NOTIFICATION_TIME,
     CONF_CALENDAR_NOTIFICATION_ZALO_TARGETS,
+    CONF_CAMERA_ENTITY_ID,
+    CONF_CAMERA_TARGETS,
     CONF_WEATHER_FORECAST_DAYS,
     CONF_WEATHER_FORECAST_ENABLED,
     CONF_WEATHER_FORECAST_TIMES,
@@ -40,8 +42,15 @@ from .const import (
     CONF_WEATHER_STORM_TIMES,
     CONF_WEATHER_STORM_ZALO_TARGETS,
     CONF_CONFIRM_TARGETS,
+    CONF_MOBILE_DEVICE_ID,
+    CONF_MOBILE_TARGETS,
+    CONF_NAMED_TARGET_ENABLED,
+    CONF_NAMED_TARGET_ID,
+    CONF_NAMED_TARGET_NAME,
     CONF_DISMISS_ON_CLEAR,
     CONF_SPEAKER_ENABLED,
+    CONF_SPEAKER_ENTITY_ID,
+    CONF_SPEAKER_TARGETS,
     CONF_TTS_ENTITY_ID,
     CONF_TTS_LANGUAGE,
     CONF_TTS_VOICE,
@@ -96,8 +105,15 @@ from .const import (
     ZALO_TYPE_GROUP,
     ZALO_TYPE_USER,
 )
+from .named_targets import (
+    make_named_target,
+    named_target_errors,
+    normalize_named_target_list,
+    spoken_name_key,
+)
 
 CONF_SELECTED_ZALO_TARGET = "selected_zalo_target"
+CONF_SELECTED_NAMED_TARGET = "selected_named_target"
 
 
 def _general_settings_schema(
@@ -960,6 +976,75 @@ def _first_tts_entity_id(hass) -> str | None:
     return entity_ids[0] if entity_ids else None
 
 
+def _named_target_schema(
+    reference_key: str,
+    reference_selector: Any,
+    target: dict[str, Any] | None = None,
+) -> vol.Schema:
+    """Build one add/edit form for a configured spoken target."""
+    target = target or {}
+    fields: dict[Any, Any] = {
+        vol.Required(
+            CONF_NAMED_TARGET_NAME,
+            default=str(target.get(CONF_NAMED_TARGET_NAME, "")),
+        ): selector.TextSelector(
+            selector.TextSelectorConfig(type=selector.TextSelectorType.TEXT)
+        ),
+        vol.Optional(
+            CONF_NAMED_TARGET_ENABLED,
+            default=bool(target.get(CONF_NAMED_TARGET_ENABLED, True)),
+        ): selector.BooleanSelector(),
+    }
+    reference = str(target.get(reference_key, "") or "").strip()
+    if reference:
+        fields[vol.Required(reference_key, default=reference)] = (
+            reference_selector
+        )
+    else:
+        fields[vol.Required(reference_key)] = reference_selector
+    return vol.Schema(fields)
+
+
+def _mobile_target_schema(
+    hass: HomeAssistant, target: dict[str, Any] | None = None
+) -> vol.Schema:
+    """Build a named Mobile App device form."""
+    choices = _mobile_device_choices(hass)
+    selected = str((target or {}).get(CONF_MOBILE_DEVICE_ID, "") or "")
+    if selected and selected not in choices:
+        choices[selected] = selected
+    return _named_target_schema(
+        CONF_MOBILE_DEVICE_ID, _select_single_schema(choices), target
+    )
+
+
+def _entity_target_schema(
+    domain: str, reference_key: str, target: dict[str, Any] | None = None
+) -> vol.Schema:
+    """Build a named entity form for speakers or cameras."""
+    return _named_target_schema(
+        reference_key,
+        selector.EntitySelector(
+            selector.EntitySelectorConfig(domain=domain, multiple=False)
+        ),
+        target,
+    )
+
+
+def _select_single_schema(options: dict[str, str]) -> selector.SelectSelector:
+    """Build a stable single-select dropdown from dynamic HA data."""
+    return selector.SelectSelector(
+        selector.SelectSelectorConfig(
+            options=[
+                {"value": value, "label": label}
+                for value, label in options.items()
+            ],
+            multiple=False,
+            mode=selector.SelectSelectorMode.DROPDOWN,
+        )
+    )
+
+
 def _zalo_schema(target: dict[str, Any] | None = None) -> vol.Schema:
     """Build add/edit Zalo target schema."""
     target = target or {}
@@ -1000,15 +1085,48 @@ def _zalo_schema(target: dict[str, Any] | None = None) -> vol.Schema:
     )
 
 
-def _validate_zalo(user_input: dict[str, Any]) -> dict[str, str]:
-    """Validate a Zalo destination."""
+def _validate_zalo(
+    user_input: dict[str, Any],
+    *,
+    existing: list[dict[str, Any]] | None = None,
+    editing_target_id: str | None = None,
+) -> dict[str, str]:
+    """Validate a Zalo destination and its direct spoken name."""
     errors: dict[str, str] = {}
-    if not str(user_input.get(CONF_ZALO_TARGET_NAME, "")).strip():
+    name = " ".join(
+        str(user_input.get(CONF_ZALO_TARGET_NAME, "") or "").split()
+    )[:80]
+    thread_id = str(user_input.get(CONF_ZALO_THREAD_ID, "")).strip()
+    account = str(
+        user_input.get(CONF_ZALO_ACCOUNT_SELECTION, "")
+    ).strip()
+    target_type = str(user_input.get(CONF_ZALO_TYPE, DEFAULT_ZALO_TYPE))
+    if not name:
         errors[CONF_ZALO_TARGET_NAME] = "required"
-    if not str(user_input.get(CONF_ZALO_THREAD_ID, "")).strip():
+    if not thread_id:
         errors[CONF_ZALO_THREAD_ID] = "required"
-    if not str(user_input.get(CONF_ZALO_ACCOUNT_SELECTION, "")).strip():
+    if not account:
         errors[CONF_ZALO_ACCOUNT_SELECTION] = "required"
+    for item in existing or []:
+        if str(item.get(CONF_ZALO_TARGET_ID, "")) == str(
+            editing_target_id or ""
+        ):
+            continue
+        if name and spoken_name_key(
+            str(item.get(CONF_ZALO_TARGET_NAME, "") or "")
+        ) == spoken_name_key(name):
+            errors[CONF_ZALO_TARGET_NAME] = "duplicate_name"
+        if (
+            thread_id
+            and account
+            and str(item.get(CONF_ZALO_TYPE, DEFAULT_ZALO_TYPE))
+            == target_type
+            and str(item.get(CONF_ZALO_THREAD_ID, "")).strip()
+            == thread_id
+            and str(item.get(CONF_ZALO_ACCOUNT_SELECTION, "")).strip()
+            == account
+        ):
+            errors[CONF_ZALO_THREAD_ID] = "duplicate_target"
     return errors
 
 
@@ -1018,9 +1136,9 @@ def _make_zalo_target(
     """Normalize a Zalo target for config entry options."""
     return {
         CONF_ZALO_TARGET_ID: target_id or uuid.uuid4().hex,
-        CONF_ZALO_TARGET_NAME: str(
-            user_input[CONF_ZALO_TARGET_NAME]
-        ).strip(),
+        CONF_ZALO_TARGET_NAME: " ".join(
+            str(user_input[CONF_ZALO_TARGET_NAME]).split()
+        )[:80],
         CONF_ZALO_TARGET_ENABLED: bool(
             user_input.get(CONF_ZALO_TARGET_ENABLED, True)
         ),
@@ -1188,6 +1306,7 @@ class ConversationalAssistantOptionsFlow(config_entries.OptionsFlow):
         """Initialize options flow state."""
         self._options: dict[str, Any] | None = None
         self._editing_target_id: str | None = None
+        self._editing_named_target_id: str | None = None
 
     def _current(self, key: str, default: Any) -> Any:
         """Return option value with config data fallback."""
@@ -1440,6 +1559,22 @@ class ConversationalAssistantOptionsFlow(config_entries.OptionsFlow):
                 DEFAULT_AI_AGENT_FAILOVER_ENABLED,
             ),
         )
+        for list_key, reference_key in (
+            (CONF_MOBILE_TARGETS, CONF_MOBILE_DEVICE_ID),
+            (CONF_SPEAKER_TARGETS, CONF_SPEAKER_ENTITY_ID),
+            (CONF_CAMERA_TARGETS, CONF_CAMERA_ENTITY_ID),
+        ):
+            if list_key in options:
+                options[list_key] = normalize_named_target_list(
+                    options[list_key], reference_key=reference_key
+                )
+                continue
+            data_targets = self.config_entry.data.get(list_key)
+            if isinstance(data_targets, list):
+                options[list_key] = normalize_named_target_list(
+                    deepcopy(data_targets), reference_key=reference_key
+                )
+
         if CONF_ZALO_TARGETS not in options:
             data_targets = self.config_entry.data.get(CONF_ZALO_TARGETS)
             if isinstance(data_targets, list):
@@ -1459,6 +1594,170 @@ class ConversationalAssistantOptionsFlow(config_entries.OptionsFlow):
             value = []
             options[CONF_ZALO_TARGETS] = value
         return value
+
+    @staticmethod
+    def _named_target_spec(kind: str) -> tuple[str, str]:
+        """Return list and reference keys for one configured target kind."""
+        specs = {
+            "mobile": (CONF_MOBILE_TARGETS, CONF_MOBILE_DEVICE_ID),
+            "speaker": (CONF_SPEAKER_TARGETS, CONF_SPEAKER_ENTITY_ID),
+            "camera": (CONF_CAMERA_TARGETS, CONF_CAMERA_ENTITY_ID),
+        }
+        return specs[kind]
+
+    def _named_targets(
+        self, kind: str, *, explicit: bool = True
+    ) -> list[dict[str, Any]]:
+        """Return configured targets; optionally mark the list explicit."""
+        list_key, reference_key = self._named_target_spec(kind)
+        options = self._ensure_options()
+        if list_key not in options and not explicit:
+            return []
+        value = normalize_named_target_list(
+            options.get(list_key, []), reference_key=reference_key
+        )
+        if explicit:
+            options[list_key] = value
+        return value
+
+    def _named_target_schema_for_kind(
+        self, kind: str, target: dict[str, Any] | None = None
+    ) -> vol.Schema:
+        """Return the correct selector form for a named target kind."""
+        if kind == "mobile":
+            return _mobile_target_schema(self.hass, target)
+        if kind == "speaker":
+            return _entity_target_schema(
+                "media_player", CONF_SPEAKER_ENTITY_ID, target
+            )
+        return _entity_target_schema("camera", CONF_CAMERA_ENTITY_ID, target)
+
+    async def _async_named_targets_menu(self, kind: str) -> ConfigFlowResult:
+        """Show add/edit/delete navigation for one named target kind."""
+        targets = self._named_targets(kind, explicit=False)
+        menu_options = [f"add_{kind}_target"]
+        if targets:
+            menu_options.extend(
+                [f"edit_{kind}_target_select", f"delete_{kind}_target"]
+            )
+        menu_options.append("general")
+        return self.async_show_menu(
+            step_id=f"{kind}_targets",
+            menu_options=menu_options,
+            description_placeholders={"target_count": str(len(targets))},
+        )
+
+    async def _async_add_named_target(
+        self, kind: str, user_input: dict[str, Any] | None
+    ) -> ConfigFlowResult:
+        """Add one named Mobile, speaker, or camera target."""
+        targets = self._named_targets(
+            kind, explicit=user_input is not None
+        )
+        _list_key, reference_key = self._named_target_spec(kind)
+        errors: dict[str, str] = {}
+        if user_input is not None:
+            errors = named_target_errors(
+                user_input, reference_key=reference_key, existing=targets
+            )
+            if not errors:
+                targets.append(
+                    make_named_target(user_input, reference_key=reference_key)
+                )
+                return await self._async_named_targets_menu(kind)
+        return self.async_show_form(
+            step_id=f"add_{kind}_target",
+            data_schema=self._named_target_schema_for_kind(kind, user_input),
+            errors=errors,
+        )
+
+    async def _async_select_named_target(
+        self, kind: str, user_input: dict[str, Any] | None
+    ) -> ConfigFlowResult:
+        """Select one configured target to edit."""
+        targets = self._named_targets(kind)
+        choices = {
+            str(item[CONF_NAMED_TARGET_ID]): str(item[CONF_NAMED_TARGET_NAME])
+            for item in targets
+        }
+        if user_input is not None:
+            self._editing_named_target_id = str(
+                user_input[CONF_SELECTED_NAMED_TARGET]
+            )
+            return await self._async_edit_named_target(kind, None)
+        return self.async_show_form(
+            step_id=f"edit_{kind}_target_select",
+            data_schema=vol.Schema(
+                {vol.Required(CONF_SELECTED_NAMED_TARGET): vol.In(choices)}
+            ),
+        )
+
+    async def _async_edit_named_target(
+        self, kind: str, user_input: dict[str, Any] | None
+    ) -> ConfigFlowResult:
+        """Edit one configured named target."""
+        targets = self._named_targets(kind)
+        _list_key, reference_key = self._named_target_spec(kind)
+        target = next(
+            (
+                item
+                for item in targets
+                if str(item.get(CONF_NAMED_TARGET_ID, ""))
+                == str(self._editing_named_target_id or "")
+            ),
+            None,
+        )
+        if target is None:
+            return await self._async_named_targets_menu(kind)
+        errors: dict[str, str] = {}
+        if user_input is not None:
+            errors = named_target_errors(
+                user_input,
+                reference_key=reference_key,
+                existing=targets,
+                editing_target_id=str(target[CONF_NAMED_TARGET_ID]),
+            )
+            if not errors:
+                replacement = make_named_target(
+                    user_input,
+                    reference_key=reference_key,
+                    target_id=str(target[CONF_NAMED_TARGET_ID]),
+                )
+                targets[targets.index(target)] = replacement
+                self._editing_named_target_id = None
+                return await self._async_named_targets_menu(kind)
+        return self.async_show_form(
+            step_id=f"edit_{kind}_target",
+            data_schema=self._named_target_schema_for_kind(
+                kind, target if user_input is None else user_input
+            ),
+            errors=errors,
+        )
+
+    async def _async_delete_named_target(
+        self, kind: str, user_input: dict[str, Any] | None
+    ) -> ConfigFlowResult:
+        """Delete one configured named target."""
+        targets = self._named_targets(kind)
+        choices = {
+            str(item[CONF_NAMED_TARGET_ID]): str(item[CONF_NAMED_TARGET_NAME])
+            for item in targets
+        }
+        if user_input is not None:
+            selected = str(user_input[CONF_SELECTED_NAMED_TARGET])
+            list_key, _reference_key = self._named_target_spec(kind)
+            self._ensure_options()[list_key] = [
+                item
+                for item in targets
+                if str(item.get(CONF_NAMED_TARGET_ID, "")) != selected
+            ]
+            return await self._async_named_targets_menu(kind)
+        return self.async_show_form(
+            step_id=f"delete_{kind}_target",
+            data_schema=vol.Schema(
+                {vol.Required(CONF_SELECTED_NAMED_TARGET): vol.In(choices)}
+            ),
+        )
 
     async def async_step_init(
         self, _user_input: dict[str, Any] | None = None
@@ -1481,18 +1780,45 @@ class ConversationalAssistantOptionsFlow(config_entries.OptionsFlow):
         )
 
     async def async_step_general(
+        self, _user_input: dict[str, Any] | None = None
+    ) -> ConfigFlowResult:
+        """Show shared behavior and named target configuration."""
+        return self.async_show_menu(
+            step_id="general",
+            menu_options=[
+                "general_behavior",
+                "mobile_targets",
+                "zalo",
+                "speaker_targets",
+                "camera_targets",
+                "init",
+            ],
+            description_placeholders={
+                "mobile_count": str(
+                    len(self._named_targets("mobile", explicit=False))
+                ),
+                "zalo_count": str(len(self._zalo_targets())),
+                "speaker_count": str(
+                    len(self._named_targets("speaker", explicit=False))
+                ),
+                "camera_count": str(
+                    len(self._named_targets("camera", explicit=False))
+                ),
+            },
+        )
+
+    async def async_step_general_behavior(
         self, user_input: dict[str, Any] | None = None
     ) -> ConfigFlowResult:
         """Edit shared confirmation and notification settings."""
         options = self._ensure_options()
         if user_input is not None:
             options.update(_normalize_general_settings(user_input))
-            return await self.async_step_init()
+            return await self.async_step_general()
 
         values = options
-
         return self.async_show_form(
-            step_id="general",
+            step_id="general_behavior",
             data_schema=_general_settings_schema(
                 bool(
                     values.get(
@@ -1509,6 +1835,57 @@ class ConversationalAssistantOptionsFlow(config_entries.OptionsFlow):
             ),
         )
 
+    async def async_step_mobile_targets(
+        self, _user_input: dict[str, Any] | None = None
+    ) -> ConfigFlowResult:
+        return await self._async_named_targets_menu("mobile")
+
+    async def async_step_speaker_targets(
+        self, _user_input: dict[str, Any] | None = None
+    ) -> ConfigFlowResult:
+        return await self._async_named_targets_menu("speaker")
+
+    async def async_step_camera_targets(
+        self, _user_input: dict[str, Any] | None = None
+    ) -> ConfigFlowResult:
+        return await self._async_named_targets_menu("camera")
+
+    async def async_step_add_mobile_target(self, user_input=None):
+        return await self._async_add_named_target("mobile", user_input)
+
+    async def async_step_edit_mobile_target_select(self, user_input=None):
+        return await self._async_select_named_target("mobile", user_input)
+
+    async def async_step_edit_mobile_target(self, user_input=None):
+        return await self._async_edit_named_target("mobile", user_input)
+
+    async def async_step_delete_mobile_target(self, user_input=None):
+        return await self._async_delete_named_target("mobile", user_input)
+
+    async def async_step_add_speaker_target(self, user_input=None):
+        return await self._async_add_named_target("speaker", user_input)
+
+    async def async_step_edit_speaker_target_select(self, user_input=None):
+        return await self._async_select_named_target("speaker", user_input)
+
+    async def async_step_edit_speaker_target(self, user_input=None):
+        return await self._async_edit_named_target("speaker", user_input)
+
+    async def async_step_delete_speaker_target(self, user_input=None):
+        return await self._async_delete_named_target("speaker", user_input)
+
+    async def async_step_add_camera_target(self, user_input=None):
+        return await self._async_add_named_target("camera", user_input)
+
+    async def async_step_edit_camera_target_select(self, user_input=None):
+        return await self._async_select_named_target("camera", user_input)
+
+    async def async_step_edit_camera_target(self, user_input=None):
+        return await self._async_edit_named_target("camera", user_input)
+
+    async def async_step_delete_camera_target(self, user_input=None):
+        return await self._async_delete_named_target("camera", user_input)
+
     async def async_step_calendar(
         self, user_input: dict[str, Any] | None = None
     ) -> ConfigFlowResult:
@@ -1522,7 +1899,17 @@ class ConversationalAssistantOptionsFlow(config_entries.OptionsFlow):
             return self.async_create_entry(title="", data=options)
 
         calendar_choices = _calendar_entity_choices(self.hass)
-        mobile_choices = _mobile_device_choices(self.hass)
+        if CONF_MOBILE_TARGETS in options:
+            mobile_choices = {
+                str(item.get(CONF_MOBILE_DEVICE_ID, "")): str(
+                    item.get(CONF_NAMED_TARGET_NAME, "")
+                )
+                for item in self._named_targets("mobile", explicit=False)
+                if bool(item.get(CONF_NAMED_TARGET_ENABLED, True))
+                and str(item.get(CONF_MOBILE_DEVICE_ID, ""))
+            }
+        else:
+            mobile_choices = _mobile_device_choices(self.hass)
         zalo_choices = _zalo_target_choices(self._zalo_targets())
         values = _normalize_calendar_settings(options)
         return self.async_show_form(
@@ -1593,7 +1980,7 @@ class ConversationalAssistantOptionsFlow(config_entries.OptionsFlow):
         menu_options = ["zalo_webhook", "add_zalo"]
         if self._zalo_targets():
             menu_options.extend(["edit_zalo_select", "delete_zalo"])
-        menu_options.append("init")
+        menu_options.extend(["general", "init"])
         return self.async_show_menu(
             step_id="zalo",
             menu_options=menu_options,
@@ -1763,7 +2150,9 @@ class ConversationalAssistantOptionsFlow(config_entries.OptionsFlow):
         """Add one named Zalo destination."""
         errors: dict[str, str] = {}
         if user_input is not None:
-            errors = _validate_zalo(user_input)
+            errors = _validate_zalo(
+                user_input, existing=self._zalo_targets()
+            )
             if not errors:
                 self._zalo_targets().append(_make_zalo_target(user_input))
                 return await self.async_step_zalo()
@@ -1818,7 +2207,11 @@ class ConversationalAssistantOptionsFlow(config_entries.OptionsFlow):
 
         errors: dict[str, str] = {}
         if user_input is not None:
-            errors = _validate_zalo(user_input)
+            errors = _validate_zalo(
+                user_input,
+                existing=self._zalo_targets(),
+                editing_target_id=str(target[CONF_ZALO_TARGET_ID]),
+            )
             if not errors:
                 replacement = _make_zalo_target(
                     user_input, str(target[CONF_ZALO_TARGET_ID])

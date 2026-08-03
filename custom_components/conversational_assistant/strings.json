@@ -69,15 +69,14 @@
       },
       "general": {
         "title": "General settings",
-        "description": "Configure shared addressing, confirmation, and notification behavior for Conversational Assistant.",
-        "data": {
-          "dismiss_on_clear": "Treat swiping away as dismiss (Android only)",
-          "confirm_targets": "Ask which destinations and speakers to use before saving each reminder",
-          "user_address": "Form of address"
-        },
-        "data_description": {
-          "confirm_targets": "When enabled, both Voice Assist and Zalo reminders are saved only after you reply with destination numbers or names.",
-          "user_address": "How the integration addresses the user in every reply. Default: Sếp Khải."
+        "description": "Manage shared behavior and direct spoken names. Configured: {mobile_count} Mobile devices, {zalo_count} Zalo destinations, {speaker_count} speakers, and {camera_count} cameras.",
+        "menu_options": {
+          "general_behavior": "Behavior and form of address",
+          "mobile_targets": "Mobile devices and spoken names",
+          "zalo": "Zalo destinations and spoken names",
+          "speaker_targets": "Speakers and spoken names",
+          "camera_targets": "Cameras and spoken names",
+          "init": "Back to Conversational Assistant options"
         }
       },
       "calendar": {
@@ -108,7 +107,8 @@
           "add_zalo": "Add Zalo destination",
           "edit_zalo_select": "Edit Zalo destination",
           "delete_zalo": "Delete Zalo destination",
-          "init": "Back to Conversational Assistant options"
+          "init": "Back to Conversational Assistant options",
+          "general": "Back to General settings"
         }
       },
       "zalo_webhook": {
@@ -169,7 +169,7 @@
       },
       "add_zalo": {
         "title": "Add Zalo destination",
-        "description": "Give this destination a short spoken name, such as Family or Anh Nam.",
+        "description": "Choose a short spoken name. For example, name it Khai and say “notify Zalo Khai ...”.",
         "data": {
           "name": "Spoken destination name",
           "enabled": "Offer this destination in voice choices",
@@ -202,7 +202,8 @@
         "data_description": {
           "name": "This name is spoken by Assist and can be used in replies.",
           "zalo_type": "User maps to type 0; Group maps to type 1."
-        }
+        },
+        "description": "This spoken name can send directly without showing a selection list."
       },
       "delete_zalo": {
         "title": "Delete Zalo destination",
@@ -237,11 +238,179 @@
           "weather_storm_times": "Enter HH:MM or HH:MM:SS values, one per line or comma-separated. Suggested defaults: 06:30, 12:00, and 21:00.",
           "weather_storm_zalo_targets": "Select one or more storm alert recipients. Required when scheduled storm checks are enabled."
         }
+      },
+      "general_behavior": {
+        "title": "General behavior",
+        "description": "Configure shared addressing, confirmation, and notification behavior for Conversational Assistant.",
+        "data": {
+          "dismiss_on_clear": "Treat swiping away as dismiss (Android only)",
+          "confirm_targets": "Ask which destinations and speakers to use before saving each reminder",
+          "user_address": "Form of address"
+        },
+        "data_description": {
+          "confirm_targets": "When enabled, both Voice Assist and Zalo reminders are saved only after you reply with destination numbers or names.",
+          "user_address": "How the integration addresses the user in every reply. Default: Sếp Khải."
+        }
+      },
+      "mobile_targets": {
+        "title": "Mobile devices and spoken names",
+        "description": "Configured: {target_count} Mobile device(s). A command beginning with a configured name is executed directly without showing a selection list.",
+        "menu_options": {
+          "add_mobile_target": "Add Mobile device",
+          "edit_mobile_target_select": "Edit Mobile device",
+          "delete_mobile_target": "Delete Mobile device",
+          "general": "Back to General settings"
+        }
+      },
+      "add_mobile_target": {
+        "title": "Add Mobile device",
+        "description": "The spoken name is used by direct commands and destination selection.",
+        "data": {
+          "name": "Spoken name",
+          "enabled": "Enable this target",
+          "mobile_device_id": "Mobile App device"
+        },
+        "data_description": {
+          "name": "Use a short, unique, easy-to-say name, such as Bedroom, Gate Camera, or Khai Phone.",
+          "enabled": "Disabled targets are hidden from selection lists and direct commands.",
+          "mobile_device_id": "Select the Home Assistant device or entity linked to this spoken name."
+        }
+      },
+      "edit_mobile_target_select": {
+        "title": "Select Mobile device to edit",
+        "data": {
+          "selected_named_target": "Mobile device"
+        }
+      },
+      "edit_mobile_target": {
+        "title": "Edit Mobile device",
+        "description": "Change the spoken name, enabled state, or linked target.",
+        "data": {
+          "name": "Spoken name",
+          "enabled": "Enable this target",
+          "mobile_device_id": "Mobile App device"
+        },
+        "data_description": {
+          "name": "Use a short, unique, easy-to-say name, such as Bedroom, Gate Camera, or Khai Phone.",
+          "enabled": "Disabled targets are hidden from selection lists and direct commands.",
+          "mobile_device_id": "Select the Home Assistant device or entity linked to this spoken name."
+        }
+      },
+      "delete_mobile_target": {
+        "title": "Delete Mobile device",
+        "description": "Remove this link and spoken name from Conversational Assistant.",
+        "data": {
+          "selected_named_target": "Mobile device to delete"
+        }
+      },
+      "speaker_targets": {
+        "title": "Speakers and spoken names",
+        "description": "Configured: {target_count} speaker(s). A command beginning with a configured name is executed directly without showing a selection list.",
+        "menu_options": {
+          "add_speaker_target": "Add speaker",
+          "edit_speaker_target_select": "Edit speaker",
+          "delete_speaker_target": "Delete speaker",
+          "general": "Back to General settings"
+        }
+      },
+      "add_speaker_target": {
+        "title": "Add speaker",
+        "description": "The spoken name is used by direct commands and destination selection.",
+        "data": {
+          "name": "Spoken name",
+          "enabled": "Enable this target",
+          "speaker_entity_id": "Speaker entity"
+        },
+        "data_description": {
+          "name": "Use a short, unique, easy-to-say name, such as Bedroom, Gate Camera, or Khai Phone.",
+          "enabled": "Disabled targets are hidden from selection lists and direct commands.",
+          "speaker_entity_id": "Select the Home Assistant device or entity linked to this spoken name."
+        }
+      },
+      "edit_speaker_target_select": {
+        "title": "Select speaker to edit",
+        "data": {
+          "selected_named_target": "Speaker"
+        }
+      },
+      "edit_speaker_target": {
+        "title": "Edit speaker",
+        "description": "Change the spoken name, enabled state, or linked target.",
+        "data": {
+          "name": "Spoken name",
+          "enabled": "Enable this target",
+          "speaker_entity_id": "Speaker entity"
+        },
+        "data_description": {
+          "name": "Use a short, unique, easy-to-say name, such as Bedroom, Gate Camera, or Khai Phone.",
+          "enabled": "Disabled targets are hidden from selection lists and direct commands.",
+          "speaker_entity_id": "Select the Home Assistant device or entity linked to this spoken name."
+        }
+      },
+      "delete_speaker_target": {
+        "title": "Delete speaker",
+        "description": "Remove this link and spoken name from Conversational Assistant.",
+        "data": {
+          "selected_named_target": "Speaker to delete"
+        }
+      },
+      "camera_targets": {
+        "title": "Cameras and spoken names",
+        "description": "Configured: {target_count} camera(s). A command beginning with a configured name is executed directly without showing a selection list.",
+        "menu_options": {
+          "add_camera_target": "Add camera",
+          "edit_camera_target_select": "Edit camera",
+          "delete_camera_target": "Delete camera",
+          "general": "Back to General settings"
+        }
+      },
+      "add_camera_target": {
+        "title": "Add camera",
+        "description": "The spoken name is used by direct commands and destination selection.",
+        "data": {
+          "name": "Spoken name",
+          "enabled": "Enable this target",
+          "camera_entity_id": "Camera entity"
+        },
+        "data_description": {
+          "name": "Use a short, unique, easy-to-say name, such as Bedroom, Gate Camera, or Khai Phone.",
+          "enabled": "Disabled targets are hidden from selection lists and direct commands.",
+          "camera_entity_id": "Select the Home Assistant device or entity linked to this spoken name."
+        }
+      },
+      "edit_camera_target_select": {
+        "title": "Select camera to edit",
+        "data": {
+          "selected_named_target": "Camera"
+        }
+      },
+      "edit_camera_target": {
+        "title": "Edit camera",
+        "description": "Change the spoken name, enabled state, or linked target.",
+        "data": {
+          "name": "Spoken name",
+          "enabled": "Enable this target",
+          "camera_entity_id": "Camera entity"
+        },
+        "data_description": {
+          "name": "Use a short, unique, easy-to-say name, such as Bedroom, Gate Camera, or Khai Phone.",
+          "enabled": "Disabled targets are hidden from selection lists and direct commands.",
+          "camera_entity_id": "Select the Home Assistant device or entity linked to this spoken name."
+        }
+      },
+      "delete_camera_target": {
+        "title": "Delete camera",
+        "description": "Remove this link and spoken name from Conversational Assistant.",
+        "data": {
+          "selected_named_target": "Camera to delete"
+        }
       }
     },
     "error": {
       "required": "This field is required.",
-      "invalid_time_list": "One or more times are invalid. Use HH:MM or HH:MM:SS, one per line or comma-separated."
+      "invalid_time_list": "One or more times are invalid. Use HH:MM or HH:MM:SS, one per line or comma-separated.",
+      "duplicate_name": "This spoken name duplicates or conflicts with an existing name.",
+      "duplicate_target": "This device or destination has already been added."
     }
   },
   "services": {

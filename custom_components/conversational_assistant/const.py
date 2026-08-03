@@ -7,6 +7,15 @@ INTEGRATION_NAME = "Conversational Assistant"
 PLATFORMS = ["sensor"]
 
 CONF_NOTIFICATION_DEVICES = "notification_devices"
+CONF_MOBILE_TARGETS = "mobile_targets"
+CONF_SPEAKER_TARGETS = "speaker_targets"
+CONF_CAMERA_TARGETS = "camera_targets"
+CONF_NAMED_TARGET_ID = "target_id"
+CONF_NAMED_TARGET_NAME = "name"
+CONF_NAMED_TARGET_ENABLED = "enabled"
+CONF_MOBILE_DEVICE_ID = "mobile_device_id"
+CONF_SPEAKER_ENTITY_ID = "speaker_entity_id"
+CONF_CAMERA_ENTITY_ID = "camera_entity_id"
 CONF_DISMISS_ON_CLEAR = "dismiss_on_clear"
 CONF_CONFIRM_TARGETS = "confirm_targets"
 CONF_USER_ADDRESS = "user_address"
@@ -435,15 +444,25 @@ CAMERA_ANALYSIS_INSTRUCTIONS = DEFAULT_AI_CAMERA_INSTRUCTIONS
 
 CAMERA_ANALYSIS_SENTENCES = [
     "[hãy ]phân tích cam",
+    "[hãy ]phân tích cam {request}",
     "[hãy ]phân tích camera",
+    "[hãy ]phân tích camera {request}",
     "[hãy ]kiểm tra cam",
+    "[hãy ]kiểm tra cam {request}",
     "[hãy ]kiểm tra camera",
+    "[hãy ]kiểm tra camera {request}",
     "[hãy ]xem và phân tích cam",
+    "[hãy ]xem và phân tích cam {request}",
     "[hãy ]xem và phân tích camera",
+    "[hãy ]xem và phân tích camera {request}",
     "[please ]analyze camera",
+    "[please ]analyze camera {request}",
     "[please ]analyse camera",
+    "[please ]analyse camera {request}",
     "[please ]check camera",
+    "[please ]check camera {request}",
     "[please ]inspect camera",
+    "[please ]inspect camera {request}",
 ]
 
 # AI image generation is currently delivered to the originating Zalo chat.
@@ -541,10 +560,10 @@ CAMERA_SENTENCES = [
     "[please ](take|capture|get|send) (a photo|a picture|an image) [from ](camera|cameras) {request}",
     "[please ](take|capture) [a ]camera snapshot",
     "[please ](take|capture) [a ]camera snapshot {request}",
-    "[hãy ](chụp|lấy) (ảnh|hình) [từ ](camera|máy quay)",
-    "[hãy ](chụp|lấy) (ảnh|hình) [từ ](camera|máy quay) {request}",
-    "[hãy ]chụp (camera|máy quay)",
-    "[hãy ]chụp (camera|máy quay) {request}",
+    "[hãy ](chụp|lấy) (ảnh|hình) [từ ](camera|máy quay|cam)",
+    "[hãy ](chụp|lấy) (ảnh|hình) [từ ](camera|máy quay|cam) {request}",
+    "[hãy ]chụp (camera|máy quay|cam)",
+    "[hãy ]chụp (camera|máy quay|cam) {request}",
 ]
 
 

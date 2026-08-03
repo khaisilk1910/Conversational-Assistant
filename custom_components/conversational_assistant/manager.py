@@ -98,6 +98,8 @@ from .const import (
     CONF_CALENDAR_NOTIFICATION_MOBILE_DEVICES,
     CONF_CALENDAR_NOTIFICATION_TIME,
     CONF_CALENDAR_NOTIFICATION_ZALO_TARGETS,
+    CONF_CAMERA_ENTITY_ID,
+    CONF_CAMERA_TARGETS,
     CONF_WEATHER_FORECAST_DAYS,
     CONF_WEATHER_FORECAST_ENABLED,
     CONF_WEATHER_FORECAST_TIMES,
@@ -107,8 +109,15 @@ from .const import (
     CONF_WEATHER_STORM_TIMES,
     CONF_WEATHER_STORM_ZALO_TARGETS,
     CONF_CONFIRM_TARGETS,
+    CONF_MOBILE_DEVICE_ID,
+    CONF_MOBILE_TARGETS,
+    CONF_NAMED_TARGET_ENABLED,
+    CONF_NAMED_TARGET_ID,
+    CONF_NAMED_TARGET_NAME,
     CONF_DISMISS_ON_CLEAR,
     CONF_SPEAKER_ENABLED,
+    CONF_SPEAKER_ENTITY_ID,
+    CONF_SPEAKER_TARGETS,
     CONF_TTS_ENTITY_ID,
     CONF_TTS_LANGUAGE,
     CONF_TTS_VOICE,
@@ -286,6 +295,11 @@ from .weather_flow import (
     weather_plan_from_ai_payload,
 )
 from .models import Reminder
+from .named_targets import (
+    extract_leading_named_targets,
+    normalize_named_target_list,
+    target_aliases,
+)
 from .note_flow import (
     NoteManagerMixin,
     is_primary_note_voice_command,
@@ -569,6 +583,120 @@ def _zalo_send_request(text: str) -> str | None:
     return None
 
 
+def _reminder_request_tail(text: str) -> tuple[str, bool] | None:
+    """Return reminder content after its command prefix and language."""
+    raw = str(text or "").strip()
+    word_matches = list(re.finditer(r"\S+", raw))
+    if not word_matches:
+        return None
+    normalized_words = [normalize_text(match.group(0)) for match in word_matches]
+    start = 1 if normalized_words[0] in {"hay", "please"} else 0
+    vietnamese_prefixes = (
+        ("tao", "hen", "gio", "nhac", "toi"),
+        ("hen", "gio", "nhac", "toi"),
+        ("tao", "nhac", "hen"),
+        ("dat", "nhac", "hen"),
+        ("them", "nhac", "hen"),
+        ("tao", "nhac", "nho"),
+        ("dat", "nhac", "nho"),
+        ("them", "nhac", "nho"),
+        ("tao", "lich", "nhac"),
+        ("dat", "lich", "nhac"),
+        ("them", "lich", "nhac"),
+        ("nhac", "cho", "toi"),
+        ("hen", "cho", "toi"),
+        ("nhac", "toi"),
+        ("hen", "toi"),
+        ("nhac", "hen"),
+        ("nhac", "nho"),
+        ("lich", "nhac"),
+        ("hen", "gio"),
+        ("nhac",),
+        ("hen",),
+        ("them",),
+        ("tao",),
+        ("dat",),
+    )
+    english_prefixes = (
+        ("remind", "me", "to"),
+        ("remind", "me"),
+        ("set", "me", "a", "reminder", "to"),
+        ("create", "me", "a", "reminder", "to"),
+        ("add", "me", "a", "reminder", "to"),
+        ("schedule", "me", "a", "reminder", "to"),
+        ("set", "a", "reminder", "to"),
+        ("create", "a", "reminder", "to"),
+        ("add", "a", "reminder", "to"),
+        ("schedule", "a", "reminder", "to"),
+        ("set", "reminder", "to"),
+        ("create", "reminder", "to"),
+        ("add", "reminder", "to"),
+        ("schedule", "reminder", "to"),
+        ("set", "me", "a", "reminder"),
+        ("create", "me", "a", "reminder"),
+        ("add", "me", "a", "reminder"),
+        ("schedule", "me", "a", "reminder"),
+        ("set", "a", "reminder"),
+        ("create", "a", "reminder"),
+        ("add", "a", "reminder"),
+        ("schedule", "a", "reminder"),
+        ("set", "reminder"),
+        ("create", "reminder"),
+        ("add", "reminder"),
+        ("schedule", "reminder"),
+    )
+    for is_english, prefixes in (
+        (False, vietnamese_prefixes),
+        (True, english_prefixes),
+    ):
+        for prefix in sorted(prefixes, key=len, reverse=True):
+            end = start + len(prefix)
+            if tuple(normalized_words[start:end]) != prefix:
+                continue
+            return raw[word_matches[end - 1].end() :].lstrip(), is_english
+    return None
+
+
+def _camera_request_tail(text: str, *, analysis: bool = False) -> str | None:
+    """Return text following a camera capture or analysis command."""
+    raw = str(text or "").strip()
+    word_matches = list(re.finditer(r"\S+", raw))
+    if not word_matches:
+        return None
+    normalized_words = [normalize_text(match.group(0)) for match in word_matches]
+    start = 1 if normalized_words[0] in {"hay", "please"} else 0
+    prefixes = (
+        ("phan", "tich", "camera"),
+        ("phan", "tich", "cam"),
+        ("kiem", "tra", "camera"),
+        ("kiem", "tra", "cam"),
+        ("xem", "va", "phan", "tich", "camera"),
+        ("xem", "va", "phan", "tich", "cam"),
+        ("analyze", "camera"),
+        ("analyse", "camera"),
+        ("check", "camera"),
+        ("inspect", "camera"),
+    ) if analysis else (
+        ("chup", "camera"),
+        ("chup", "cam"),
+        ("chup", "may", "quay"),
+        ("chup", "anh", "camera"),
+        ("chup", "hinh", "camera"),
+        ("lay", "anh", "camera"),
+        ("lay", "hinh", "camera"),
+        ("take", "camera", "photo"),
+        ("take", "a", "camera", "photo"),
+        ("camera", "snapshot"),
+        ("take", "a", "photo", "from", "camera"),
+        ("capture", "camera", "image"),
+    )
+    for prefix in prefixes:
+        end = start + len(prefix)
+        if tuple(normalized_words[start:end]) == prefix:
+            return raw[word_matches[end - 1].end():].lstrip()
+    return None
+
+
 @dataclass(slots=True)
 class NotificationTarget:
     """A selectable notification destination."""
@@ -579,6 +707,7 @@ class NotificationTarget:
     mobile_device_id: str | None = None
     zalo: dict[str, Any] | None = None
     speaker_entity_id: str | None = None
+    aliases: tuple[str, ...] = ()
 
 
 @dataclass(slots=True)
@@ -655,6 +784,7 @@ class CameraTarget:
     entity_id: str
     display_name: str
     available: bool
+    aliases: tuple[str, ...] = ()
 
 
 @dataclass(slots=True, frozen=True)
@@ -719,6 +849,7 @@ class PendingVoiceCamera:
     expires_at: datetime
     mode: str = "capture"
     analysis_items: list[CameraAnalysisResult] | None = None
+    direct_execution: bool = False
 
 
 @dataclass(slots=True)
@@ -3554,6 +3685,18 @@ class ConversationalAssistantManager(NoteManagerMixin):
             CONF_ZALO_ACCOUNT_SELECTION: account_selection,
         }
 
+    def _configured_named_target_records(
+        self, list_key: str, reference_key: str
+    ) -> list[dict[str, Any]] | None:
+        """Return explicit named targets, or None for legacy auto-discovery."""
+        if list_key in self.entry.options:
+            raw = self.entry.options.get(list_key)
+        elif list_key in self.entry.data:
+            raw = self.entry.data.get(list_key)
+        else:
+            return None
+        return normalize_named_target_list(raw, reference_key=reference_key)
+
     def _configured_zalo_targets(self) -> list[dict[str, Any]]:
         """Return normalized enabled Zalo destinations."""
         if CONF_ZALO_TARGETS in self.entry.options:
@@ -4015,15 +4158,16 @@ class ConversationalAssistantManager(NoteManagerMixin):
             "• Ví dụ: `Thời tiết Hà Nội 5 ngày tới`; `Kiểm tra bão`.\n\n"
             "⏰ **Nhắc hẹn và lịch**\n"
             "• Tạo, xem, sửa, xóa nhắc hẹn hoặc sự kiện; hỗ trợ lặp lại và nhiều nơi nhận.\n"
-            "• Ví dụ: `Nhắc tôi uống thuốc lúc 20 giờ`; `Tạo lịch họp 8 giờ ngày mai`.\n\n"
+            "• Có thể gọi thẳng tên Mobile, Zalo hoặc loa: `Nhắc Zalo Khải 20 giờ uống thuốc`.\n\n"
             "🔊 **Thông báo loa**\n"
-            "• Dùng `Thông báo loa`, `Báo loa`, `Gửi loa` hoặc `Nhắn loa` kèm nội dung.\n"
-            "• Chọn một, nhiều loa hoặc **Tất cả**. Loa bận được chờ và kiểm tra lại.\n\n"
+            "• Gọi thẳng tên đã đặt: `Báo loa Phòng Ngủ xuống ăn cơm`.\n"
+            "• Không có tên thì chọn một, nhiều loa hoặc **Tất cả**. Loa bận được chờ và kiểm tra lại.\n\n"
             "📨 **Gửi Zalo**\n"
-            "• Dùng `Gửi Zalo`, `Thông báo Zalo` hoặc `Báo Zalo`, rồi chọn nơi nhận.\n"
-            "• Nội dung có ngày giờ sẽ được tạo thêm nhắc Zalo trước 15 phút.\n\n"
+            "• Gọi thẳng tên đã đặt: `Thông báo Zalo Khải xuống ăn cơm`.\n"
+            "• Không có tên thì bot cho chọn; nội dung có ngày giờ tạo nhắc trước 15 phút.\n\n"
             "📸 **Camera**\n"
-            "• `Chụp camera` để gửi ảnh; `Phân tích camera` để AI mô tả hình ảnh.\n\n"
+            "• Gọi thẳng tên đã đặt: `Chụp Cam Cổng`; `Phân tích Cam Cổng`.\n"
+            "• Không có tên thì bot hiển thị danh sách camera để chọn.\n\n"
             "📝 **Ghi chú và trò chuyện**\n"
             "• Thêm, xem, sửa, xóa ghi chú; `Trò chuyện` để mở phiên AI và `Kết thúc` để đóng.\n\n"
             "🤖 **AI và bộ nhớ câu lệnh**\n"
@@ -4032,7 +4176,7 @@ class ConversationalAssistantManager(NoteManagerMixin):
             "• Ví dụ: `Ngày mai âm lịch bao nhiêu`; `Đổi 30/11/1984 sang âm lịch`.\n\n"
             "⚙️ **Cấu hình**\n"
             "• Vào **Settings > Devices & services > Conversational Assistant > Configure** "
-            "để chọn Zalo, AI Search, lịch, thời tiết, loa và TTS.\n\n"
+            "để đặt tên cho Mobile, Zalo, loa, camera và cấu hình AI, lịch, thời tiết, TTS.\n\n"
             "💡 Gửi `Hướng dẫn sử dụng tích hợp` để xem lại."
         )
 
@@ -4434,6 +4578,29 @@ class ConversationalAssistantManager(NoteManagerMixin):
                 "Hãy kiểm tra cấu hình Conversational Assistant."
             )
 
+        direct_selection = self._direct_reminder_target_selection(
+            context.text, targets
+        )
+        if direct_selection is not None:
+            selected_targets, direct_request = direct_selection
+            if not direct_request:
+                return (
+                    "Thiếu thời gian hoặc nội dung nhắc nhở sau tên nơi nhận. "
+                    "Ví dụ: nhắc Zalo Khải 18h xuống ăn cơm."
+                )
+            try:
+                parsed = parse_reminder_request(direct_request)
+            except ReminderParseError as err:
+                return f"Tôi chưa tạo được nhắc nhở. {err}"
+            reminder = self._reminder_from_targets(
+                parsed, selected_targets, owner_key=context.owner_key
+            )
+            await self.async_add_reminder(reminder)
+            target_names = ", ".join(
+                target.display_name for target in selected_targets
+            )
+            return f"{parsed.confirmation} Sẽ thông báo đến {target_names}."
+
         confirm_targets = bool(
             self._option(CONF_CONFIRM_TARGETS, DEFAULT_CONFIRM_TARGETS)
         )
@@ -4601,7 +4768,35 @@ class ConversationalAssistantManager(NoteManagerMixin):
         )
 
     def _discovered_camera_targets(self) -> list[CameraTarget]:
-        """Return cameras, scanning lazily and caching their identities."""
+        """Return configured cameras, falling back to legacy discovery."""
+        configured = self._configured_named_target_records(
+            CONF_CAMERA_TARGETS, CONF_CAMERA_ENTITY_ID
+        )
+        if configured is not None:
+            cameras: list[CameraTarget] = []
+            for item in configured:
+                if not bool(item.get(CONF_NAMED_TARGET_ENABLED, True)):
+                    continue
+                entity_id = str(item.get(CONF_CAMERA_ENTITY_ID, "") or "").strip()
+                if not entity_id:
+                    continue
+                state = self.hass.states.get(entity_id)
+                name = str(item.get(CONF_NAMED_TARGET_NAME, entity_id)).strip()
+                cameras.append(
+                    CameraTarget(
+                        entity_id=entity_id,
+                        display_name=name,
+                        available=(
+                            state is not None
+                            and state.state not in {STATE_UNAVAILABLE, STATE_UNKNOWN}
+                        ),
+                        aliases=target_aliases(
+                            name, prefixes=("camera", "cam", "máy quay")
+                        ),
+                    )
+                )
+            return cameras
+
         now = monotonic()
         cached = self._camera_targets_cache
         if cached is None or now >= self._camera_targets_cache_until:
@@ -4629,15 +4824,14 @@ class ConversationalAssistantManager(NoteManagerMixin):
                         display_name=name,
                         available=state.state
                         not in {STATE_UNAVAILABLE, STATE_UNKNOWN},
+                        aliases=target_aliases(
+                            name, prefixes=("camera", "cam", "máy quay")
+                        ),
                     )
                 )
             self._camera_targets_cache = cached
-            self._camera_targets_cache_until = (
-                now + DISCOVERY_CACHE_SECONDS
-            )
+            self._camera_targets_cache_until = now + DISCOVERY_CACHE_SECONDS
 
-        # Camera availability can change quickly, so refresh only the cheap
-        # state lookup while reusing the cached entity list and display names.
         cameras: list[CameraTarget] = []
         for camera in cached:
             state = self.hass.states.get(camera.entity_id)
@@ -4649,6 +4843,7 @@ class ConversationalAssistantManager(NoteManagerMixin):
                     display_name=camera.display_name,
                     available=state.state
                     not in {STATE_UNAVAILABLE, STATE_UNKNOWN},
+                    aliases=camera.aliases,
                 )
             )
         return cameras
@@ -4763,6 +4958,36 @@ class ConversationalAssistantManager(NoteManagerMixin):
                 "đang tồn tại."
             )
 
+        tail = _camera_request_tail(context.text, analysis=False)
+        direct = extract_leading_named_targets(
+            tail or "", [camera.aliases or (camera.display_name,) for camera in cameras]
+        )
+        if direct.indexes:
+            selected = [cameras[index] for index in direct.indexes]
+            unavailable = [
+                camera.display_name
+                for camera in selected
+                if not camera.available
+            ]
+            available = [camera for camera in selected if camera.available]
+            if not available:
+                return (
+                    "Camera đã chọn hiện không khả dụng: "
+                    + ", ".join(unavailable)
+                    + "."
+                )
+            result = await self._async_capture_cameras_to_zalo(
+                context, available, None
+            )
+            if unavailable and isinstance(result, ZaloDirectResponse):
+                await self._async_send_zalo_webhook_reply(
+                    context,
+                    "Đã bỏ qua camera không khả dụng: "
+                    + ", ".join(unavailable)
+                    + ".",
+                )
+            return result
+
         self._zalo_pending_cameras[context.owner_key] = PendingZaloCamera(
             cameras=cameras,
             expires_at=dt_util.now()
@@ -4790,6 +5015,76 @@ class ConversationalAssistantManager(NoteManagerMixin):
                 "Chưa tìm thấy camera nào trên Home Assistant. Hãy kiểm tra "
                 "tích hợp camera và trạng thái các entity camera.",
             )
+
+        tail = _camera_request_tail(user_input.text, analysis=False)
+        direct = extract_leading_named_targets(
+            tail or "", [camera.aliases or (camera.display_name,) for camera in cameras]
+        )
+        if direct.indexes:
+            selected = [cameras[index] for index in direct.indexes]
+            available = [camera for camera in selected if camera.available]
+            unavailable = [
+                camera.display_name
+                for camera in selected
+                if not camera.available
+            ]
+            if not available:
+                return await self._async_voice_response(
+                    user_input,
+                    "Camera đã chọn hiện không khả dụng: "
+                    + ", ".join(unavailable)
+                    + ".",
+                )
+            pending = self._set_pending_voice_camera(
+                user_input, cameras, zalo_targets
+            )
+            pending.selected_cameras = available
+            pending.direct_execution = True
+
+            selection_targets = self._configured_zalo_selection_targets()
+            destination_text = direct.remainder
+            parsed_destination = _zalo_send_request(destination_text)
+            if parsed_destination is not None:
+                destination_text = parsed_destination
+            destination_match = extract_leading_named_targets(
+                destination_text,
+                [
+                    target.aliases or (target.display_name,)
+                    for target in selection_targets
+                ],
+            )
+            if destination_match.indexes:
+                selected_zalo = [
+                    zalo_targets[index] for index in destination_match.indexes
+                ]
+            elif len(zalo_targets) == 1:
+                selected_zalo = [zalo_targets[0]]
+            else:
+                pending.phase = "destination"
+                pending.expires_at = dt_util.now() + timedelta(
+                    seconds=PENDING_CONFIRMATION_TIMEOUT_SECONDS
+                )
+                self._sync_pending_followup_trigger()
+                return await self._async_voice_response(
+                    user_input,
+                    self._voice_camera_destination_prompt(
+                        available, zalo_targets
+                    ),
+                )
+
+            pending.zalo_targets = [dict(target) for target in selected_zalo]
+            self._pending_voice_cameras.pop(pending.pending_id, None)
+            self._sync_pending_followup_trigger()
+            response = await self._async_capture_voice_cameras(
+                user_input, pending, selected_zalo
+            )
+            if unavailable:
+                response += (
+                    " Đã bỏ qua camera không khả dụng: "
+                    + ", ".join(unavailable)
+                    + "."
+                )
+            return await self._async_voice_response(user_input, response)
 
         self._set_pending_voice_camera(user_input, cameras, zalo_targets)
         return await self._async_voice_response(
@@ -4892,6 +5187,34 @@ class ConversationalAssistantManager(NoteManagerMixin):
                 "Chưa tìm thấy camera nào trên Home Assistant. Hãy kiểm tra "
                 "tích hợp camera và trạng thái các entity camera."
             )
+        tail = _camera_request_tail(context.text, analysis=True)
+        direct = extract_leading_named_targets(
+            tail or "", [camera.aliases or (camera.display_name,) for camera in cameras]
+        )
+        if direct.indexes:
+            selected = [cameras[index] for index in direct.indexes]
+            unavailable_names = [
+                camera.display_name for camera in selected if not camera.available
+            ]
+            available = [camera for camera in selected if camera.available]
+            if not available:
+                return (
+                    "Camera đã chọn hiện không khả dụng: "
+                    + ", ".join(unavailable_names)
+                    + "."
+                )
+            result = await self._async_analyze_cameras_to_zalo(
+                context, available, None
+            )
+            if unavailable_names and isinstance(result, ZaloDirectResponse):
+                await self._async_send_zalo_webhook_reply(
+                    context,
+                    "Đã bỏ qua camera không khả dụng: "
+                    + ", ".join(unavailable_names)
+                    + ".",
+                )
+            return result
+
         self._zalo_pending_cameras[context.owner_key] = PendingZaloCamera(
             cameras=cameras,
             expires_at=dt_util.now()
@@ -4914,11 +5237,117 @@ class ConversationalAssistantManager(NoteManagerMixin):
                 "Chưa tìm thấy camera nào trên Home Assistant. Hãy kiểm tra "
                 "tích hợp camera và trạng thái các entity camera.",
             )
+        zalo_targets = self._configured_zalo_targets()
+        tail = _camera_request_tail(user_input.text, analysis=True)
+        direct = extract_leading_named_targets(
+            tail or "", [camera.aliases or (camera.display_name,) for camera in cameras]
+        )
+        if direct.indexes:
+            selected = [cameras[index] for index in direct.indexes]
+            available = [camera for camera in selected if camera.available]
+            unavailable_names = [
+                camera.display_name for camera in selected if not camera.available
+            ]
+            if not available:
+                return await self._async_voice_response(
+                    user_input,
+                    "Camera đã chọn hiện không khả dụng: "
+                    + ", ".join(unavailable_names)
+                    + ".",
+                )
+            pending = self._set_pending_voice_camera(
+                user_input, cameras, zalo_targets, mode="analysis"
+            )
+            pending.selected_cameras = available
+            pending.direct_execution = True
+            owner_key = "voice-analysis:" + uuid.uuid5(
+                uuid.NAMESPACE_URL,
+                "|".join(sorted(pending.source_keys)),
+            ).hex
+            items, failures = await self._async_capture_and_analyze_cameras(
+                owner_key, available, user_input.context
+            )
+            if not items:
+                self._pending_voice_cameras.pop(pending.pending_id, None)
+                self._sync_pending_followup_trigger()
+                return await self._async_voice_response(
+                    user_input,
+                    "Không thể chụp và phân tích camera đã chọn. "
+                    + ("; ".join(failures) or "Hãy kiểm tra camera và AI Task agent."),
+                )
+            pending.analysis_items = items
+            analysis_text = self._camera_analysis_voice_text(items, failures)
+            if unavailable_names:
+                analysis_text += (
+                    "\nĐã bỏ qua camera không khả dụng: "
+                    + ", ".join(unavailable_names)
+                    + "."
+                )
+            if not zalo_targets:
+                self._pending_voice_cameras.pop(pending.pending_id, None)
+                self._sync_pending_followup_trigger()
+                return await self._async_voice_response(
+                    user_input, analysis_text, ai_generated=True
+                )
+
+            selection_targets = self._configured_zalo_selection_targets()
+            destination_text = direct.remainder
+            parsed_destination = _zalo_send_request(destination_text)
+            if parsed_destination is not None:
+                destination_text = parsed_destination
+            destination_match = extract_leading_named_targets(
+                destination_text,
+                [
+                    target.aliases or (target.display_name,)
+                    for target in selection_targets
+                ],
+            )
+            if destination_match.indexes:
+                selected_zalo = [
+                    zalo_targets[index] for index in destination_match.indexes
+                ]
+            elif len(zalo_targets) == 1:
+                selected_zalo = [zalo_targets[0]]
+            else:
+                pending.phase = "analysis_destination"
+                pending.zalo_targets = [dict(target) for target in zalo_targets]
+                pending.expires_at = dt_util.now() + timedelta(
+                    seconds=PENDING_CONFIRMATION_TIMEOUT_SECONDS
+                )
+                self._sync_pending_followup_trigger()
+                return await self._async_voice_response(
+                    user_input,
+                    analysis_text
+                    + "\n"
+                    + self._voice_camera_analysis_destination_prompt(zalo_targets),
+                    ai_generated=True,
+                )
+
+            sent_targets, send_failures = (
+                await self._async_send_camera_analysis_to_configured_zalo(
+                    items, selected_zalo, user_input.context
+                )
+            )
+            self._pending_voice_cameras.pop(pending.pending_id, None)
+            self._sync_pending_followup_trigger()
+            if sent_targets:
+                analysis_text += (
+                    "\nĐã gửi ảnh và nội dung phân tích lên Zalo đến "
+                    + ", ".join(sent_targets)
+                    + "."
+                )
+            elif send_failures:
+                analysis_text += (
+                    "\nChưa gửi được lên Zalo: "
+                    + "; ".join(send_failures)
+                    + "."
+                )
+            return await self._async_voice_response(
+                user_input, analysis_text, ai_generated=True
+            )
+
         self._set_pending_voice_camera(
-            user_input,
-            cameras,
-            self._configured_zalo_targets(),
-            mode="analysis",
+            user_input, cameras, zalo_targets, mode="analysis"
         )
         return await self._async_voice_response(
             user_input, self._voice_camera_analysis_selection_prompt(cameras)
@@ -13009,7 +13438,33 @@ class ConversationalAssistantManager(NoteManagerMixin):
             await typing_task
 
     def _discovered_mobile_targets(self) -> list[NotificationTarget]:
-        """Auto-discover Mobile App devices lazily with a short cache."""
+        """Return configured Mobile devices, falling back to legacy discovery."""
+        configured = self._configured_named_target_records(
+            CONF_MOBILE_TARGETS, CONF_MOBILE_DEVICE_ID
+        )
+        if configured is not None:
+            registry = dr.async_get(self.hass)
+            targets: list[NotificationTarget] = []
+            for item in configured:
+                if not bool(item.get(CONF_NAMED_TARGET_ENABLED, True)):
+                    continue
+                device_id = str(item.get(CONF_MOBILE_DEVICE_ID, "") or "").strip()
+                if not device_id or registry.async_get(device_id) is None:
+                    continue
+                name = str(item.get(CONF_NAMED_TARGET_NAME, device_id)).strip()
+                targets.append(
+                    NotificationTarget(
+                        target_id=f"mobile:{item.get(CONF_NAMED_TARGET_ID, device_id)}",
+                        kind="mobile",
+                        display_name=f"Điện thoại {name}",
+                        mobile_device_id=device_id,
+                        aliases=target_aliases(
+                            name, prefixes=("điện thoại", "mobile", "phone")
+                        ),
+                    )
+                )
+            return targets
+
         now = monotonic()
         if (
             self._mobile_targets_cache is not None
@@ -13017,14 +13472,8 @@ class ConversationalAssistantManager(NoteManagerMixin):
         ):
             return list(self._mobile_targets_cache)
 
-        # Resolve usable Mobile App config entries once, instead of resolving
-        # config entries and notify services again for every device in the
-        # registry.  This changes discovery from repeated nested lookups to one
-        # linear registry pass.
         usable_mobile_entry_ids: set[str] = set()
-        for config_entry in self.hass.config_entries.async_entries(
-            "mobile_app"
-        ):
+        for config_entry in self.hass.config_entries.async_entries("mobile_app"):
             webhook_id = config_entry.data.get(ATTR_WEBHOOK_ID)
             if not webhook_id:
                 continue
@@ -13045,17 +13494,18 @@ class ConversationalAssistantManager(NoteManagerMixin):
             ),
         )
         for device in devices:
-            if not usable_mobile_entry_ids.intersection(
-                device.config_entries
-            ):
+            if not usable_mobile_entry_ids.intersection(device.config_entries):
                 continue
-            name = device.name_by_user or device.name or device.id
+            name = str(device.name_by_user or device.name or device.id)
             targets.append(
                 NotificationTarget(
                     target_id=f"mobile:{device.id}",
                     kind="mobile",
                     display_name=f"Điện thoại {name}",
                     mobile_device_id=device.id,
+                    aliases=target_aliases(
+                        name, prefixes=("điện thoại", "mobile", "phone")
+                    ),
                 )
             )
         self._mobile_targets_cache = targets
@@ -13063,7 +13513,7 @@ class ConversationalAssistantManager(NoteManagerMixin):
         return list(targets)
 
     def _configured_zalo_selection_targets(self) -> list[NotificationTarget]:
-        """Return selectable Zalo destinations."""
+        """Return selectable Zalo destinations with direct spoken aliases."""
         targets: list[NotificationTarget] = []
         for zalo in self._configured_zalo_targets():
             name = str(zalo[CONF_ZALO_TARGET_NAME])
@@ -13078,6 +13528,9 @@ class ConversationalAssistantManager(NoteManagerMixin):
                     kind="zalo",
                     display_name=f"{prefix} {name}",
                     zalo=dict(zalo),
+                    aliases=target_aliases(
+                        name, prefixes=("zalo", "zalo nhóm", "zalo người dùng")
+                    ),
                 )
             )
         return targets
@@ -13295,6 +13748,16 @@ class ConversationalAssistantManager(NoteManagerMixin):
                 "Assistant > Zalo settings để thêm nơi nhận."
             )
         self._clear_zalo_pending_for_owner(context.owner_key)
+        direct = extract_leading_named_targets(
+            content, [target.aliases or (target.display_name,) for target in targets]
+        )
+        if direct.indexes:
+            if not direct.remainder:
+                return "Thiếu nội dung cần gửi sau tên Zalo đã chọn."
+            selected = [targets[index] for index in direct.indexes]
+            pending = self._new_zalo_send_pending(direct.remainder, selected)
+            return await self._async_deliver_zalo_send(pending, selected)
+
         pending = self._new_zalo_send_pending(content.strip(), targets)
         self._zalo_pending_sends[context.owner_key] = pending
         self._schedule_pending_expiry()
@@ -13344,6 +13807,21 @@ class ConversationalAssistantManager(NoteManagerMixin):
             )
         source_keys = self._source_keys(user_input)
         self._clear_pending_for_source(source_keys)
+        direct = extract_leading_named_targets(
+            content, [target.aliases or (target.display_name,) for target in targets]
+        )
+        if direct.indexes:
+            if not direct.remainder:
+                return await self._async_voice_response(
+                    user_input, "Thiếu nội dung cần gửi sau tên Zalo đã chọn."
+                )
+            selected = [targets[index] for index in direct.indexes]
+            pending = self._new_zalo_send_pending(
+                direct.remainder, selected, source_keys=source_keys
+            )
+            response = await self._async_deliver_zalo_send(pending, selected)
+            return await self._async_voice_response(user_input, response)
+
         pending = self._new_zalo_send_pending(
             content.strip(), targets, source_keys=source_keys
         )
@@ -13425,6 +13903,21 @@ class ConversationalAssistantManager(NoteManagerMixin):
                 "media_player hỗ trợ phát media."
             )
         self._clear_zalo_pending_for_owner(context.owner_key)
+        direct = extract_leading_named_targets(
+            content, [target.aliases or (target.display_name,) for target in targets]
+        )
+        if direct.indexes:
+            if not direct.remainder:
+                return "Thiếu nội dung cần phát sau tên loa đã chọn."
+            selected = [targets[index] for index in direct.indexes]
+            self._start_speaker_announcement_task(
+                direct.remainder,
+                selected,
+                zalo_context=context,
+                voice_origin=False,
+            )
+            return self._speaker_announcement_accepted_text(selected)
+
         pending = self._new_speaker_announcement_pending(
             content.strip(), targets
         )
@@ -13507,6 +14000,25 @@ class ConversationalAssistantManager(NoteManagerMixin):
             return await self._async_voice_response(user_input, voice_error)
         source_keys = self._source_keys(user_input)
         self._clear_pending_for_source(source_keys)
+        direct = extract_leading_named_targets(
+            content, [target.aliases or (target.display_name,) for target in targets]
+        )
+        if direct.indexes:
+            if not direct.remainder:
+                return await self._async_voice_response(
+                    user_input, "Thiếu nội dung cần phát sau tên loa đã chọn."
+                )
+            selected = [targets[index] for index in direct.indexes]
+            self._start_speaker_announcement_task(
+                direct.remainder,
+                selected,
+                zalo_context=None,
+                voice_origin=True,
+            )
+            return await self._async_voice_response(
+                user_input, self._speaker_announcement_accepted_text(selected)
+            )
+
         pending = self._new_speaker_announcement_pending(
             content.strip(), targets, source_keys=source_keys
         )
@@ -13872,15 +14384,41 @@ class ConversationalAssistantManager(NoteManagerMixin):
         return data
 
     def _configured_speaker_targets(self) -> list[NotificationTarget]:
-        """Auto-discover announcement speakers lazily with a short cache."""
-        if not bool(
-            self._option(CONF_SPEAKER_ENABLED, DEFAULT_SPEAKER_ENABLED)
-        ):
+        """Return configured speakers, falling back to legacy discovery."""
+        if not bool(self._option(CONF_SPEAKER_ENABLED, DEFAULT_SPEAKER_ENABLED)):
             return []
         if self._configured_tts_entity_id() is None:
             return []
         if not self.hass.services.has_service(TTS_DOMAIN, TTS_SERVICE_SPEAK):
             return []
+
+        configured = self._configured_named_target_records(
+            CONF_SPEAKER_TARGETS, CONF_SPEAKER_ENTITY_ID
+        )
+        if configured is not None:
+            targets: list[NotificationTarget] = []
+            for item in configured:
+                if not bool(item.get(CONF_NAMED_TARGET_ENABLED, True)):
+                    continue
+                entity_id = str(item.get(CONF_SPEAKER_ENTITY_ID, "") or "").strip()
+                if not entity_id:
+                    continue
+                name = str(item.get(CONF_NAMED_TARGET_NAME, entity_id)).strip()
+                targets.append(
+                    NotificationTarget(
+                        target_id=(
+                            "speaker:"
+                            f"{item.get(CONF_NAMED_TARGET_ID, entity_id)}"
+                        ),
+                        kind="speaker",
+                        display_name=f"Loa {name}",
+                        speaker_entity_id=entity_id,
+                        aliases=target_aliases(
+                            name, prefixes=("loa", "speaker")
+                        ),
+                    )
+                )
+            return targets
 
         now = monotonic()
         if (
@@ -13905,16 +14443,13 @@ class ConversationalAssistantManager(NoteManagerMixin):
                 supported_features = 0
             if not supported_features & int(MediaPlayerEntityFeature.PLAY_MEDIA):
                 continue
-
-            # TVs and projectors may expose play_media but should not normally
-            # be offered as household announcement speakers.
             device_class = str(
                 state.attributes.get("device_class", "") or ""
             ).casefold()
             if device_class in {"tv", "projector"}:
                 continue
 
-            speaker_name = state.name
+            speaker_name = str(state.name)
             display_name = (
                 speaker_name
                 if speaker_name.casefold().startswith("loa ")
@@ -13926,6 +14461,9 @@ class ConversationalAssistantManager(NoteManagerMixin):
                     kind="speaker",
                     display_name=display_name,
                     speaker_entity_id=state.entity_id,
+                    aliases=target_aliases(
+                        speaker_name, prefixes=("loa", "speaker")
+                    ),
                 )
             )
         self._speaker_targets_cache = targets
@@ -13939,6 +14477,26 @@ class ConversationalAssistantManager(NoteManagerMixin):
             *self._configured_zalo_selection_targets(),
             *self._configured_speaker_targets(),
         ]
+
+    @staticmethod
+    def _direct_reminder_target_selection(
+        request: str, targets: list[NotificationTarget]
+    ) -> tuple[list[NotificationTarget], str] | None:
+        """Resolve configured names directly after a reminder command."""
+        tail = _reminder_request_tail(request)
+        if tail is None:
+            return None
+        content, is_english = tail
+        match = extract_leading_named_targets(
+            content, [target.aliases for target in targets]
+        )
+        if not match.indexes:
+            return None
+        selected = [targets[index] for index in match.indexes]
+        if not match.remainder:
+            return selected, ""
+        prefix = "remind me " if is_english else "nhắc "
+        return selected, prefix + match.remainder
 
     def _webhook_ids_for_device_ids(self, device_ids: list[str]) -> list[str]:
         """Resolve Home Assistant devices to mobile app webhook IDs."""
@@ -14899,6 +15457,33 @@ class ConversationalAssistantManager(NoteManagerMixin):
             )
             return await self._async_voice_response(user_input, response)
 
+        direct_selection = self._direct_reminder_target_selection(
+            request, targets
+        )
+        if direct_selection is not None:
+            selected_targets, direct_request = direct_selection
+            if not direct_request:
+                return await self._async_voice_response(
+                    user_input,
+                    "Thiếu thời gian hoặc nội dung nhắc nhở sau tên nơi nhận. "
+                    "Ví dụ: nhắc loa Phòng Ngủ 18h xuống ăn cơm.",
+                )
+            try:
+                parsed = parse_reminder_request(direct_request)
+            except ReminderParseError as err:
+                return await self._async_voice_response(
+                    user_input, f"Tôi chưa tạo được nhắc nhở. {err}"
+                )
+            reminder = self._reminder_from_targets(parsed, selected_targets)
+            await self.async_add_reminder(reminder)
+            target_names = ", ".join(
+                target.display_name for target in selected_targets
+            )
+            response = (
+                f"{parsed.confirmation} Sẽ thông báo đến {target_names}."
+            )
+            return await self._async_voice_response(user_input, response)
+
         confirm_targets = bool(
             self._option(CONF_CONFIRM_TARGETS, DEFAULT_CONFIRM_TARGETS)
         )
@@ -15856,6 +16441,14 @@ class ConversationalAssistantManager(NoteManagerMixin):
             pending.zalo_targets = [
                 dict(target) for target in selected_targets
             ]
+            if pending.direct_execution:
+                self._pending_voice_cameras.pop(pending.pending_id, None)
+                self._sync_pending_followup_trigger()
+                response = await self._async_capture_voice_cameras(
+                    user_input, pending, selected_targets
+                )
+                return await self._async_voice_response(user_input, response)
+
             pending.phase = "confirmation"
             pending.expires_at = dt_util.now() + timedelta(
                 seconds=PENDING_CONFIRMATION_TIMEOUT_SECONDS
