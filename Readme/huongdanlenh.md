@@ -1,242 +1,84 @@
-# 📘 HƯỚNG DẪN CÂU LỆNH CONVERSATIONAL ASSISTANT
+# 📘 HƯỚNG DẪN CONVERSATIONAL ASSISTANT
 
-## 1. 📖 Từ khóa xem hướng dẫn sử dụng
+> Điều khiển Home Assistant, tra cứu thông tin, nhắc hẹn, gửi Zalo, thông báo loa, camera và AI bằng câu nói tự nhiên.
 
-Có thể gửi riêng một trong các câu sau:
+## 🚀 Cách dùng nhanh
 
-- `Trợ giúp`
-- `Hướng dẫn`
-- `Hướng dẫn sử dụng`
-- `Hướng dẫn sử dụng tích hợp`
-- `Sử dụng tích hợp`
-- `Dùng tích hợp`
-- `Cách sử dụng tích hợp`
-- `Hướng dẫn tích hợp`
-- `Giới thiệu tích hợp`
-- `Học cách sử dụng tích hợp`
-- `Học sử dụng tích hợp`
-- `Hướng dẫn Conversational Assistant`
-- `Hướng dẫn sử dụng Conversational Assistant`
-- `Cách sử dụng Conversational Assistant`
-- `Lệnh`
-- `Các lệnh`
-- `Các lệnh hỗ trợ`
-- `Các tính năng`
-- `Hướng dẫn các tính năng`
-- `Giới thiệu các tính năng`
-- `Tích hợp có tính năng gì?`
-- `Tích hợp hỗ trợ tính năng gì?`
-- `Conversational Assistant làm được gì?`
-- `Tôi có thể sử dụng tích hợp như thế nào?`
+- Gửi lệnh bằng **Zalo** hoặc **Home Assistant Assist/Voice**.
+- Có thể nói tự nhiên, không phân biệt chữ hoa/thường và hỗ trợ tiếng Việt không dấu.
+- Có thể thêm `Hãy` hoặc `Please` ở đầu câu.
+- Khi tích hợp hiển thị danh sách, trả lời bằng **số thứ tự**, **tên**, **nhiều số**, `Tất cả` hoặc `Hủy`.
+- Thời gian chờ xác nhận mặc định: **120 giây**.
 
-Các từ khóa tiếng Anh:
+### Xem hướng dẫn
 
-- `Help`
-- `Show help`
-- `Usage guide`
-- `User guide`
-- `Instructions`
-- `Commands`
-- `Features`
-- `How to use the integration`
-- `How to use Conversational Assistant`
-- `What can the integration do?`
-- `What features are supported?`
-
-Có thể thêm từ `Hãy` hoặc `Please` ở đầu câu.
+`Trợ giúp` · `Hướng dẫn` · `Các lệnh` · `Các tính năng` · `Help` · `Commands` · `Features`
 
 ---
 
-## 2. 🏠 Điều khiển thiết bị Home Assistant
+## 1. 🏠 Điều khiển thiết bị
 
-### Từ khóa thao tác cơ bản
+### Lệnh cơ bản
 
-`Bật` · `Tắt` · `Mở` · `Đóng` · `Khóa` · `Mở khóa`  
-`Tăng` · `Giảm` · `Chuyển` · `Dừng` · `Tạm dừng` · `Tiếp tục`  
-`Phát` · `Quét` · `Dọn dẹp` · `Làm sạch`  
-`Đặt nhiệt độ` · `Đặt điều hòa`
+`Bật` · `Tắt` · `Mở` · `Đóng` · `Khóa` · `Mở khóa` · `Dừng` · `Tạm dừng` · `Tiếp tục` · `Phát` · `Quét` · `Dọn dẹp`
 
-### Ví dụ
+**Ví dụ**
 
 - `Bật đèn phòng khách`
 - `Tắt toàn bộ đèn tầng 2`
 - `Mở rèm phòng ngủ`
 - `Khóa cửa chính`
-- `Đặt điều hòa phòng khách 25 độ`
+- `Cho robot hút bụi dọn phòng khách`
 
-### Xác nhận an toàn
+> Lệnh mở cửa cuốn hoặc cửa gara cần xác nhận trước khi thực hiện.
 
-- Lệnh **mở cửa cuốn hoặc cửa gara** cần xác nhận trước khi thực hiện.
-- Các lệnh bật, tắt hoặc điều khiển thiết bị khác được thực hiện ngay nếu yêu cầu đã rõ ràng và thiết bị hỗ trợ.
-
----
-
-## 3. ❄️ Điều khiển điều hòa nâng cao
-
-Có thể điều khiển các chức năng mà điều hòa hoặc thiết bị `climate` thực tế hỗ trợ trong Home Assistant.
-
-### Nhiệt độ
+### Điều hòa
 
 - `Đặt điều hòa phòng khách 25 độ`
 - `Tăng nhiệt độ điều hòa phòng ngủ 2 độ`
-- `Giảm nhiệt độ điều hòa phòng khách 1 độ`
-- `Đặt nhiệt độ điều hòa phòng ngủ từ 23 đến 26 độ`
-
-### Chế độ hoạt động
-
 - `Chuyển điều hòa phòng khách sang chế độ làm mát`
-- `Chuyển điều hòa phòng ngủ sang chế độ sưởi`
-- `Đặt điều hòa phòng khách chế độ hút ẩm`
-- `Chuyển điều hòa sang chế độ quạt`
-- `Chuyển điều hòa sang chế độ tự động`
-
-Tên chế độ có thể được nói bằng tiếng Việt hoặc theo tên mà thiết bị công bố, ví dụ:
-
-`cool` · `heat` · `dry` · `fan_only` · `auto`
-
-### Chế độ quạt gió của điều hòa
-
-- `Đặt quạt gió điều hòa phòng ngủ ở mức thấp`
-- `Tăng chế độ quạt gió điều hòa phòng khách`
-- `Giảm chế độ quạt gió điều hòa phòng khách`
-- `Chuyển quạt gió điều hòa sang tự động`
-
-### Đảo gió
-
+- `Đặt quạt gió điều hòa ở mức thấp`
 - `Bật đảo gió điều hòa phòng khách`
-- `Tắt đảo gió điều hòa phòng ngủ`
-- `Chuyển đảo gió dọc điều hòa phòng khách sang tự động`
-- `Chuyển đảo gió ngang điều hòa phòng ngủ sang trái phải`
-
-### Preset và độ ẩm
-
 - `Chuyển điều hòa phòng ngủ sang chế độ ngủ`
-- `Đặt preset điều hòa phòng khách là eco`
 - `Đặt độ ẩm điều hòa phòng ngủ 55 phần trăm`
 
-> Tích hợp chỉ thực hiện các chế độ, preset, mức quạt, đảo gió và độ ẩm mà entity đang hỗ trợ. Nếu thao tác không tồn tại, tích hợp sẽ gợi ý các thao tác hợp lệ để người dùng yêu cầu lại.
+Hỗ trợ các chức năng entity thực tế có: nhiệt độ, `cool`, `heat`, `dry`, `fan_only`, `auto`, tốc độ quạt, đảo gió, preset và độ ẩm.
 
----
-
-## 4. 🌬️ Điều khiển quạt nâng cao
-
-Có thể điều khiển các chức năng mà quạt hoặc thiết bị `fan` thực tế hỗ trợ trong Home Assistant.
-
-### Bật, tắt và tốc độ
+### Quạt
 
 - `Bật quạt phòng khách`
-- `Tắt quạt phòng ngủ`
 - `Đặt quạt phòng khách 60 phần trăm`
-- `Tăng tốc độ quạt phòng khách 20 phần trăm`
-- `Giảm tốc độ quạt phòng ngủ 10 phần trăm`
-- `Tăng tốc độ quạt phòng khách`
-- `Giảm tốc độ quạt phòng khách`
-
-### Quay đảo và hướng quay
-
+- `Tăng tốc độ quạt phòng ngủ 20 phần trăm`
 - `Bật quay quạt phòng khách`
-- `Tắt quay quạt phòng ngủ`
-- `Bật đảo gió quạt phòng khách`
-- `Đổi hướng quay quạt phòng khách`
-- `Chuyển hướng quạt phòng ngủ sang thuận`
-- `Chuyển hướng quạt phòng ngủ sang ngược`
-
-### Preset
-
+- `Đổi hướng quay quạt phòng ngủ`
 - `Chuyển quạt phòng ngủ sang chế độ ngủ`
-- `Đặt preset quạt phòng khách là natural`
 
-> Tích hợp chỉ hiển thị và thực hiện các tốc độ, preset, chức năng quay đảo hoặc hướng quay mà quạt đang hỗ trợ.
+> Nếu thiết bị không hỗ trợ thao tác, tích hợp sẽ hiển thị các chế độ hoặc mức điều khiển hợp lệ.
 
 ---
 
-## 5. ⏱️ Hẹn giờ điều khiển thiết bị
+## 2. ⏱️ Hẹn giờ điều khiển thiết bị
 
-Có thể hẹn giờ cho các thao tác thiết bị được tích hợp hỗ trợ, gồm bật, tắt, điều chỉnh điều hòa, quạt, đèn, rèm và các thiết bị khác.
+Có thể hẹn bật, tắt, mở, đóng hoặc thay đổi chế độ của đèn, quạt, điều hòa, rèm và các thiết bị được hỗ trợ.
 
-### Hẹn sau một khoảng thời gian
+**Ví dụ**
 
 - `Tắt quạt phòng khách sau 30 phút`
-- `Bật điều hòa phòng ngủ sau 15 phút`
-- `Sau 10 phút giảm nhiệt độ điều hòa phòng khách 2 độ`
-- `Sau 20 phút tăng tốc độ quạt phòng ngủ 15 phần trăm`
-- `Đóng rèm phòng khách sau 5 phút`
-
-### Hẹn vào thời điểm cụ thể
-
-- `Bật điều hòa phòng khách lúc 22 giờ`
-- `Tắt quạt phòng ngủ lúc 23 giờ 30`
+- `Bật điều hòa phòng ngủ lúc 22 giờ`
+- `Sau 10 phút giảm nhiệt độ điều hòa 2 độ`
 - `Ngày mai lúc 7 giờ chuyển điều hòa sang chế độ làm mát`
-- `Lúc 21 giờ bật quay quạt phòng ngủ`
+- `Sau 15 phút bật đảo gió điều hòa phòng khách`
 - `Ngày mai lúc 6 giờ 30 mở rèm phòng khách`
 
-### Hẹn thay đổi chế độ
-
-- `Sau 30 phút chuyển điều hòa phòng ngủ sang chế độ ngủ`
-- `Lúc 22 giờ chuyển điều hòa phòng khách sang chế độ hút ẩm`
-- `Sau 15 phút bật đảo gió điều hòa phòng khách`
-- `Ngày mai lúc 8 giờ đặt quạt phòng khách 40 phần trăm`
-
-### Lưu ý
-
-- Có thể sử dụng các mẫu câu hẹn giờ trên **Zalo** và **Home Assistant Assist/Voice**.
-- Với Voice, tích hợp chỉ xử lý phần nâng cao hoặc hẹn giờ khi Home Assistant chưa xử lý sẵn, nhằm tránh gọi lệnh hai lần.
-- Lịch điều khiển được lưu để tiếp tục hoạt động sau khi Home Assistant khởi động lại.
-- Đến thời điểm hẹn, tích hợp kiểm tra lại thiết bị và khả năng hỗ trợ trước khi thực hiện.
+Lịch hẹn được lưu để tiếp tục hoạt động sau khi Home Assistant khởi động lại. Đến giờ, tích hợp kiểm tra lại thiết bị trước khi thực hiện.
 
 ---
 
-## 6. 💬 Trò chuyện hỏi đáp bằng AI
+## 3. 🔍 Kiểm tra trạng thái nhà
 
-### Bắt đầu trò chuyện
+**Từ khóa:** `Kiểm tra` · `Xem trạng thái` · `Cho tôi biết` · `Báo cáo` · `Thiết bị nào`
 
-Gửi riêng một trong các câu sau:
-
-- `Trò chuyện đi`
-- `Tám đi`
-- `Buôn đi`
-
-Có thể hỏi ngay trong câu bắt đầu, ví dụ:
-
-- `Trò chuyện đi, kể tôi nghe một chuyện vui`
-- `Tám đi, hôm nay có tin công nghệ gì đáng chú ý?`
-- `Buôn đi, giải thích cho tôi lỗ đen là gì`
-
-### Trong khi trò chuyện
-
-- Có thể hỏi đáp về nhiều chủ đề khác nhau.
-- Khi câu hỏi cần kiểm chứng thông tin thực tế, tích hợp sử dụng AI Search để tìm kiếm trước khi phản hồi.
-- Khi chưa đủ dữ liệu hoặc chưa chắc chắn, tích hợp sẽ nói rõ mức độ không chắc chắn thay vì tự bịa thông tin.
-- Câu trả lời được trình bày dễ đọc, dùng thuật ngữ phù hợp với từng lĩnh vực và giải thích theo cách dễ hiểu.
-- Nội dung trò chuyện có phong cách thân thiện, trẻ trung, vui vẻ và không sử dụng từ ngữ thô tục.
-- Nếu người dùng sử dụng ngôn từ không phù hợp, tích hợp sẽ nhắc giữ cách trò chuyện văn minh.
-
-### Thời gian duy trì cuộc trò chuyện
-
-- Sau mỗi phản hồi, luồng trò chuyện được giữ trong **120 giây**.
-- Nếu người dùng không phản hồi, tích hợp sẽ hỏi lại một lần.
-- Nếu sau đó vẫn không có phản hồi trong **10 giây**, tích hợp sẽ thông báo dừng trò chuyện hỏi đáp.
-
-> Trong chế độ trò chuyện, tích hợp không gửi tin nhắn “⏳ Đang xử lý thông tin yêu cầu. Hãy chờ phản hồi.” nhưng vẫn gửi trạng thái đang nhập trên Zalo để người dùng biết câu trả lời đang được xử lý.
-
----
-
-## 7. 🔍 Kiểm tra trạng thái nhà thông minh
-
-### Từ khóa
-
-`Kiểm tra`  
-`Xem trạng thái`  
-`Trạng thái`  
-`Cho tôi biết`  
-`Báo cáo`  
-`Thiết bị nào`  
-`Phòng nào`  
-`Khu vực nào`  
-`Tầng nào`  
-`Đang bật` · `Đang tắt` · `Đang khóa`
-
-### Ví dụ
+**Ví dụ**
 
 - `Kiểm tra trạng thái phòng khách`
 - `Thiết bị nào đang bật ở tầng 2?`
@@ -245,402 +87,249 @@ Có thể hỏi ngay trong câu bắt đầu, ví dụ:
 
 ---
 
-## 8. 🌦️ Tra cứu thời tiết
+## 4. 🌦️ Thời tiết
 
-### Từ khóa
+**Từ khóa:** `Thời tiết` · `Dự báo` · `Nhiệt độ` · `Độ ẩm` · `Khả năng mưa`
 
-`Thời tiết`  
-`Dự báo`  
-`Dự báo thời tiết`  
-`Nhiệt độ`  
-`Độ ẩm`
-
-### Ví dụ
+**Ví dụ**
 
 - `Thời tiết hôm nay thế nào?`
 - `Dự báo thời tiết ngày mai`
-- `Nhiệt độ hiện tại bao nhiêu?`
-- `Độ ẩm trong nhà là bao nhiêu?`
+- `Thời tiết 5 ngày tới tại Hà Nội`
+- `Cuối tuần này có mưa không?`
+
+Mỗi ngày dự báo được trình bày đủ:
+
+- 📅 Ngày và thứ
+- 🌤️ Điều kiện thời tiết
+- 🌡️ Nhiệt độ thấp nhất – cao nhất
+- 🌧️ Khả năng mưa
+- 💧 Độ ẩm
+- 💨 Sức gió
+
+> Tra cứu thời tiết và thông tin ngoài hệ thống được thực hiện bằng **AI Search** để lấy dữ liệu mới nhất.
 
 ---
 
-## 9. 📅 Tra cứu lịch và sự kiện
+## 5. 📅 Lịch và sự kiện
 
-### Từ khóa tra cứu
+### Tra cứu
 
-`Lịch`  
-`Xem lịch`  
-`Kiểm tra lịch`  
-`Tra lịch`  
-`Tra cứu lịch`  
-`Lịch của tôi`  
-`Lịch hôm nay`  
-`Lịch ngày mai`  
-`Lịch sắp tới`  
-`Lịch tuần này`  
-`Lịch tuần tới`  
-`Sự kiện`  
-`Các sự kiện`
-
-### Ví dụ
-
-- `Sự kiện trong 30 ngày tới`
 - `Xem lịch hôm nay`
 - `Tuần tới tôi có lịch gì?`
+- `Sự kiện trong 30 ngày tới`
 - `Kiểm tra các sự kiện tháng sau`
 
-### Từ khóa tạo sự kiện
-
-`Tạo sự kiện`  
-`Thêm sự kiện`  
-`Đặt sự kiện`  
-`Lên sự kiện`  
-`Tạo lịch`  
-`Thêm lịch`  
-`Tạo cuộc họp`  
-`Thêm cuộc họp`  
-`Tạo cuộc hẹn`  
-`Đặt cuộc hẹn`
-
-### Ví dụ
+### Tạo sự kiện
 
 - `Tạo sự kiện họp lúc 18 giờ 30 ngày mai`
 - `Thêm cuộc hẹn khám bệnh lúc 9 giờ thứ Hai`
 
-Sau khi tra cứu, các từ khóa quản lý là:
-
-`Sửa` · `Xóa` · `Bỏ qua`
+Sau khi tra cứu có thể dùng: `Sửa` · `Xóa` · `Bỏ qua`.
 
 ---
 
-## 10. ⏰ Tạo nhắc hẹn
+## 6. ⏰ Nhắc hẹn
 
-### Từ khóa
-
-`Nhắc tôi`  
-`Nhắc`  
-`Hẹn`  
-`Tạo nhắc`  
-`Tạo nhắc hẹn`  
-`Tạo nhắc nhở`  
-`Tạo lịch nhắc`  
-`Tạo hẹn giờ`  
-`Đặt nhắc hẹn`  
-`Thêm nhắc hẹn`
-
-### Ví dụ
+### Tạo nhắc hẹn
 
 - `Nhắc tôi uống thuốc sau 30 phút`
-- `Tạo nhắc hẹn đi họp lúc 8 giờ ngày mai`
+- `Nhắc tôi đi họp lúc 8 giờ ngày mai`
 - `Nhắc tôi tập thể dục mỗi thứ Hai lúc 7 giờ`
 
-### Xem danh sách nhắc hẹn
+### Xem hoặc xóa
 
-`Danh sách nhắc hẹn`  
-`Xem danh sách nhắc hẹn`  
-`Liệt kê nhắc hẹn`  
-`Đọc danh sách nhắc nhở`  
-`Nhắc hẹn tiếp theo là gì?`  
-`Tôi có những nhắc hẹn nào?`
-
-### Xóa nhắc hẹn
-
-`Xóa nhắc hẹn`  
-`Hủy nhắc hẹn`  
-`Xóa nhắc nhở`  
-`Hủy lịch nhắc`  
-`Xóa hẹn giờ`  
-`Xóa tất cả nhắc hẹn`
+- `Danh sách nhắc hẹn`
+- `Nhắc hẹn tiếp theo là gì?`
+- `Xóa nhắc hẹn số 2`
+- `Xóa tất cả nhắc hẹn`
 
 ---
 
-## 11. 📝 Tạo và quản lý ghi chú
+## 7. 📝 Ghi chú
 
-### Tạo ghi chú
-
-`Ghi chú`  
-`Ghi nhớ`  
-`Ghi lại`  
-`Nhớ`  
-`Nhớ rằng`  
-`Nhớ giúp tôi`  
-`Thêm ghi chú`  
-`Tạo ghi chú`  
-`Lưu ghi chú`  
-`Viết ghi chú`
-
-### Ví dụ
+### Tạo
 
 - `Ghi nhớ mã tủ đồ là 2468`
-- `Thêm ghi chú mua sữa vào chiều nay`
+- `Thêm ghi chú mua sữa chiều nay`
 
-### Xem danh sách
+### Quản lý
 
-`Danh sách ghi chú`  
-`Xem danh sách ghi chú`  
-`Liệt kê ghi chú`  
-`Các ghi chú`  
-`Ghi chú của tôi`  
-`Tôi có những ghi chú nào?`
-
-### Xem nội dung
-
-`Mở ghi chú`  
-`Đọc ghi chú số 2`  
-`Xem nội dung ghi chú`  
-`Xem ghi chú số 3`
-
-### Sửa và xóa
-
-`Sửa ghi chú`  
-`Chỉnh sửa ghi chú`  
-`Cập nhật ghi chú`  
-`Đổi ghi chú`  
-`Xóa ghi chú`  
-`Hủy ghi chú`
+- `Danh sách ghi chú`
+- `Đọc ghi chú số 2`
+- `Sửa ghi chú số 3`
+- `Xóa ghi chú số 1`
 
 ---
 
-## 12. 📸 Chụp ảnh camera
+## 8. 💬 Trò chuyện và hỏi đáp AI
 
-### Từ khóa
+### Bắt đầu
 
-`Chụp camera`  
-`Chụp ảnh camera`  
-`Chụp hình camera`  
-`Lấy ảnh camera`  
-`Lấy hình camera`  
-`Xem camera`  
-`Mở camera`  
-`Gửi ảnh camera`
+`Trò chuyện đi` · `Tám đi` · `Buôn đi`
 
-### Ví dụ
+**Ví dụ**
+
+- `Trò chuyện đi, kể tôi nghe một chuyện vui`
+- `Tám đi, giải thích cho tôi lỗ đen là gì`
+- `Buôn đi, hôm nay có tin công nghệ gì đáng chú ý?`
+
+Tích hợp ưu tiên dữ liệu và công cụ sẵn có của Home Assistant. Khi không có dữ liệu phù hợp, tích hợp mới dùng AI Agent; câu hỏi cần thông tin mới hoặc kiểm chứng sẽ dùng AI Search.
+
+Luồng trò chuyện được giữ **120 giây** sau mỗi phản hồi. Nếu không có trả lời, tích hợp hỏi lại một lần rồi tự kết thúc sau **10 giây**.
+
+---
+
+## 9. 🔎 Tìm kiếm Internet
+
+**Từ khóa:** `Tìm thông tin` · `Tìm kiếm trên mạng` · `Tra cứu` · `Search for` · `Look up`
+
+**Ví dụ**
+
+- `Tìm thông tin giá vàng hôm nay`
+- `Tìm kiếm tin tức Home Assistant mới nhất`
+- `Tra cứu thời gian diễn ra sự kiện này`
+
+---
+
+## 10. 🎨 Tạo ảnh bằng AI
+
+**Từ khóa:** `Tạo ảnh` · `Tạo bức ảnh` · `Generate image` · `Create image`
+
+**Ví dụ**
+
+- `Tạo ảnh một chú mèo phi hành gia`
+- `Tạo bức ảnh ngôi nhà thông minh vào ban đêm`
+
+---
+
+## 11. 📸 Camera
+
+### Chụp ảnh
 
 - `Chụp camera`
 - `Chụp ảnh camera cổng`
 - `Chụp camera phòng khách và sân trước`
 
-Khi danh sách camera xuất hiện, có thể trả lời:
-
-`1`  
-`1 3 10`  
-Tên camera  
-`Tất cả`  
-`Hủy`
-
----
-
-## 13. 🧠 Phân tích camera bằng AI
-
-### Từ khóa
-
-`Phân tích cam`  
-`Phân tích camera`  
-`Phân tích các camera`  
-`Kiểm tra cam`  
-`Kiểm tra camera`  
-`Kiểm tra các camera`  
-`Xem và phân tích camera`
-
-Các từ khóa tiếng Anh:
-
-`Analyze camera`  
-`Analyse camera`  
-`Camera analysis`  
-`Check camera`  
-`Inspect camera`
-
-### Ví dụ
+### Phân tích bằng AI
 
 - `Phân tích camera`
-- `Phân tích camera cổng và sân sau`
-- `Kiểm tra tất cả camera`
+- `Kiểm tra camera cổng và sân sau`
+- `Phân tích tất cả camera`
+
+Khi danh sách camera xuất hiện, có thể trả lời: `1` · `1 3 5` · tên camera · `Tất cả` · `Hủy`.
 
 ---
 
-## 14. 🔎 Tìm kiếm thông tin trên Internet
+## 12. 📣 Gửi thông báo Zalo
 
-### Từ khóa
+**Từ khóa:** `Gửi Zalo` · `Thông báo Zalo` · `Báo Zalo`
 
-`Tìm thông tin`  
-`Tìm kiếm`  
-`Tìm kiếm thông tin`  
-`Tìm kiếm trên mạng`  
-`Tìm trên mạng`  
-`Tra cứu`  
-`Tra cứu thông tin`
+**Ví dụ**
 
-Các từ khóa tiếng Anh:
+- `Gửi Zalo ngày mai 8 giờ tất cả nhân viên sale họp`
+- `Thông báo Zalo chiều nay 15 giờ họp tại phòng tầng 2`
+- `Báo Zalo hệ thống điện tầng 1 đang bảo trì`
 
-`Search for`  
-`Search the Internet for`  
-`Search the web for`  
-`Look up`  
-`Find information about`
+### Cách hoạt động
 
-### Ví dụ
-
-- `Tìm thông tin giá vàng hôm nay`
-- `Tìm kiếm trên mạng tin tức Home Assistant mới nhất`
-- `Tra cứu thời gian diễn ra sự kiện này`
+1. Tích hợp liệt kê người dùng và nhóm Zalo đã bật trong cấu hình.
+2. Chọn bằng số, tên, nhiều mục hoặc `Tất cả`.
+3. Tích hợp chỉ gửi sau khi xác nhận.
+4. Nếu nội dung có ngày giờ rõ ràng, tích hợp tạo thêm nhắc hẹn **trước 15 phút**.
+5. Nếu một đích lỗi, các đích còn lại vẫn tiếp tục được gửi và kết quả sẽ được báo lại.
 
 ---
 
-## 15. 🎨 Tạo ảnh bằng AI
+## 13. 🔊 Thông báo ra loa
 
-### Từ khóa
+**Từ khóa:** `Thông báo loa` · `Báo loa` · `Báo ra loa` · `Thông báo ra loa` · `Gửi loa` · `Nhắn loa`
 
-`Tạo ảnh`  
-`Tạo một ảnh`  
-`Tạo bức ảnh`  
-`Tạo một bức ảnh`
+**Ví dụ**
 
-Các từ khóa tiếng Anh:
+- `Thông báo loa đến giờ ăn cơm`
+- `Báo ra loa phòng khách khách đã đến`
+- `Gửi loa nhắc mọi người 8 giờ họp`
 
-`Generate image`  
-`Generate an image`  
-`Create image`  
-`Create an image`  
-`Make image`  
-`Draw image`
+### Cách hoạt động
 
-### Ví dụ
+1. Tích hợp liệt kê các loa có thể phát TTS.
+2. Chọn một hoặc nhiều loa bằng số, tên hoặc `Tất cả`.
+3. Tích hợp kiểm tra loa trước khi phát.
+4. Nếu loa đang `playing` hoặc `buffering`, tích hợp chờ **10 giây** rồi kiểm tra lại, tối đa **20 lần**.
+5. Nếu loa lỗi, mất kết nối, không khả dụng hoặc vẫn bận, tích hợp báo rõ nguyên nhân.
+6. Yêu cầu từ Zalo được phản hồi về Zalo đã gửi lệnh; yêu cầu Voice lỗi được báo về Zalo đầu tiên trong cấu hình.
 
-- `Tạo ảnh một chú mèo phi hành gia`
-- `Tạo một bức ảnh ngôi nhà thông minh vào ban đêm`
+Phần TTS tự loại emoji, Markdown, ký tự trang trí và xuống dòng; vẫn giữ dấu chấm, phẩy và nhịp câu để giọng đọc tự nhiên.
 
 ---
 
-## 16. 📣 Gửi thông báo Zalo
+## 14. 🌙 Tra cứu âm – dương lịch
 
-Có thể yêu cầu tích hợp gửi một nội dung bất kỳ đến người dùng hoặc nhóm Zalo đã được thêm và bật trong giao diện cấu hình.
+**Ví dụ**
 
-### Từ khóa
+- `Hôm nay âm lịch ngày bao nhiêu?`
+- `Đổi ngày 10 tháng 2 năm 2026 dương lịch sang âm lịch`
+- `Đổi mùng 1 tháng 7 âm lịch sang dương lịch`
+- `Cho tôi biết ngày âm lịch của ngày mai`
 
-`Gửi Zalo`  
-`Thông báo Zalo`  
-`Báo Zalo`
-
-### Ví dụ
-
-- `Gửi Zalo yêu cầu ngày mai 8 giờ tất cả nhân viên sale họp bàn chiến lược kinh doanh`
-- `Thông báo Zalo chiều nay 15 giờ họp tại phòng họp tầng 2`
-- `Báo Zalo hệ thống điện tầng 1 đang được bảo trì`
-- `Gửi Zalo nhắc nhóm kỹ thuật kiểm tra máy chủ lúc 22 giờ tối nay`
-
-### Chọn Zalo nhận thông báo
-
-Sau khi nhận yêu cầu, tích hợp sẽ liệt kê các người dùng và nhóm Zalo đã được cấu hình trong UI. Có thể trả lời bằng:
-
-`1`  
-`1 3 5`  
-Tên người dùng hoặc tên nhóm Zalo  
-`Tất cả`  
-`Hủy`
-
-Tích hợp chỉ gửi sau khi người dùng xác nhận đúng Zalo cần nhận. Nội dung được gửi giữ nguyên theo yêu cầu, không tự thêm cách xưng hô vào phần nội dung chuyển tiếp.
-
-### Tạo nhắc hẹn trên Zalo
-
-Nếu nội dung có ngày hoặc giờ rõ ràng, tích hợp sẽ tự tạo thêm nhắc hẹn cho đúng Zalo đã xác nhận. Thời điểm nhắc được đặt **trước thời gian trong nội dung 15 phút**.
-
-Ví dụ:
-
-- Nội dung có `ngày mai lúc 8 giờ` → nhắc lúc `7 giờ 45 ngày mai`.
-- Nội dung có `15 giờ chiều nay` → nhắc lúc `14 giờ 45 chiều nay`.
-- Nội dung không có thời gian cụ thể → chỉ gửi thông báo, không tạo nhắc hẹn.
-
-> Lệnh gửi thông báo Zalo có thể sử dụng trên Zalo và Home Assistant Assist/Voice. Nếu một đích Zalo gửi lỗi, tích hợp vẫn tiếp tục gửi đến các đích còn lại và thông báo kết quả cho người dùng.
+> Khi đổi ngày, nên nói rõ **âm lịch** hoặc **dương lịch** và đầy đủ ngày, tháng, năm.
 
 ---
 
-## 17. 🧩 Bộ nhớ câu lệnh
+## 15. 🧩 Bộ nhớ câu lệnh
 
-### Dạy câu lệnh mới
-
-`Học câu lệnh`  
-`Dạy câu lệnh`  
-`Thêm câu lệnh`  
-`Thêm câu lệnh tùy chỉnh`  
-`Thêm cách nói`  
-`Dạy cách nói`
-
-### Ví dụ
+### Dạy câu lệnh
 
 - `Học câu lệnh xem cổng để chụp ảnh camera`
 - `Thêm câu lệnh coi ngoài sân để phân tích camera`
 
-### Xem câu lệnh đã học
+### Xem hoặc xóa
 
-`Danh sách câu lệnh đã học`  
-`Liệt kê câu lệnh đã học`  
-`Xem câu lệnh đã học`  
-`Các câu lệnh đã học`  
-`Bộ nhớ câu lệnh`  
-`Tôi đã dạy những câu lệnh nào?`
-
-### Xóa câu lệnh
-
-`Xóa câu lệnh`  
-`Quên câu lệnh`  
-`Xóa câu lệnh đã học`  
-`Xóa câu lệnh tùy chỉnh`  
-`Xóa tất cả câu lệnh đã học`
+- `Danh sách câu lệnh đã học`
+- `Tôi đã dạy những câu lệnh nào?`
+- `Xóa câu lệnh đã học`
+- `Xóa tất cả câu lệnh đã học`
 
 ---
 
-## 18. ✅ Từ khóa lựa chọn và xác nhận
+## 16. ✅ Lựa chọn và xác nhận
 
 ### Đồng ý
 
-`Có`  
-`Đồng ý`  
-`Xác nhận`  
-`Được`  
-`OK`  
-`Làm đi`  
-`Gửi đi`
+`Có` · `Đồng ý` · `Xác nhận` · `Được` · `OK` · `Làm đi` · `Gửi đi`
 
-### Từ chối hoặc dừng
+### Hủy hoặc từ chối
 
-`Không`  
-`Hủy`  
-`Dừng`  
-`Thôi`  
-`Bỏ qua`  
-`Không xóa`
+`Không` · `Hủy` · `Dừng` · `Thôi` · `Bỏ qua`
 
-### Chọn nhiều mục
+### Chọn mục
 
-`1 3 10`  
-`Chọn 1 và 3`  
-`Tôi chọn camera cổng`  
-`Tất cả`  
-`Toàn bộ`
+`1` · `1 3 10` · `Chọn 1 và 3` · tên thiết bị · `Tất cả` · `Toàn bộ`
 
-### Khi không tìm thấy thiết bị
-
-- Nếu không tìm thấy đúng tên quạt hoặc điều hòa, tích hợp sẽ liệt kê các thiết bị phù hợp để người dùng lựa chọn.
-- Có thể trả lời bằng số thứ tự, tên thiết bị hoặc nhiều số nếu tác vụ cho phép chọn nhiều thiết bị.
-- Tích hợp chờ phản hồi trong **120 giây**. Hết thời gian này, yêu cầu đang chờ sẽ tự hủy.
-- Các số chỉ nhiệt độ, phần trăm hoặc thời gian không được hiểu là số thứ tự thiết bị.
-
-### Khi thiết bị không hỗ trợ thao tác
-
-- Tích hợp sẽ không cố gọi một action không tồn tại.
-- Tích hợp sẽ gợi ý các action, mode, preset hoặc mức điều khiển mà entity thực tế hỗ trợ.
-- Người dùng có thể gửi lại yêu cầu dựa trên danh sách được gợi ý trong vòng **120 giây**.
+- Nếu không tìm thấy đúng thiết bị, tích hợp sẽ liệt kê các thiết bị phù hợp để chọn lại.
+- Các số chỉ nhiệt độ, phần trăm hoặc thời gian không được hiểu nhầm là số thứ tự.
+- Yêu cầu chờ sẽ tự hủy sau **120 giây** nếu không có phản hồi.
 
 ---
 
-## 19. ℹ️ Lưu ý sử dụng
+## 17. 🎙️ Phản hồi Zalo, Voice và TTS
 
-- Tích hợp không phân biệt chữ hoa và chữ thường.
-- Có thể nhận câu tiếng Việt không dấu.
-- Có thể thêm `Hãy` ở đầu câu tiếng Việt.
-- Có thể thêm `Please` ở đầu câu tiếng Anh.
-- Khi tích hợp yêu cầu xác nhận, hãy nhập đúng từ khóa được hiển thị.
-- Có thể chọn nhiều camera hoặc nhiều mục bằng cách nhập các số cách nhau bằng dấu cách, ví dụ: `1 3 10`.
-- Tên chế độ, preset và mức điều khiển phụ thuộc vào từng entity và integration thiết bị trong Home Assistant.
-- Các lệnh điều khiển nâng cao và hẹn giờ có thể dùng trên Zalo; trên Assist/Voice, tích hợp chỉ bổ sung những phần Home Assistant chưa xử lý sẵn để hạn chế xung đột.
-- Với các tính năng cần thời gian xử lý trên Zalo, tích hợp có thể gửi thông báo chờ và trạng thái đang nhập. Riêng chế độ trò chuyện chỉ hiển thị trạng thái đang nhập, không gửi thông báo chờ.
+- **Zalo:** hiển thị đầy đủ emoji, tiêu đề, gạch đầu dòng và xuống dòng dễ đọc.
+- **Assist/Voice:** nội dung chat được ngắt câu, ngắt dòng và trình bày rõ ràng.
+- **TTS:** loại emoji, ký tự đặc biệt, Markdown và xuống dòng nhưng giữ dấu câu để đọc mượt, rõ và có nhấn nhá.
+- Tính năng nâng cao trên Voice chỉ được xử lý khi Home Assistant chưa thực hiện sẵn, tránh chạy lệnh hai lần.
+
+---
+
+## ℹ️ Nguyên tắc xử lý
+
+1. Ưu tiên công cụ, entity, service và dữ liệu có sẵn trong Home Assistant.
+2. Nếu Home Assistant không xử lý được, tích hợp mới chuyển sang AI Agent.
+3. Nội dung cần dữ liệu bên ngoài, thời tiết hoặc thông tin mới sẽ dùng AI Search.
+4. Tích hợp không tự gọi action mà thiết bị không hỗ trợ.
+5. Khi chưa đủ thông tin, tích hợp sẽ hỏi lại hoặc hiển thị danh sách để lựa chọn.
+
+---
+
+**Conversational Assistant** — điều khiển nhà thông minh và trợ lý AI bằng câu nói tự nhiên.
