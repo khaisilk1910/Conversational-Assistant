@@ -495,7 +495,7 @@ def calendar_has_time_reference(text: str) -> bool:
         return True
     return bool(
         re.search(
-            r"\b(?:thu\s+(?:hai|ba|tu|nam|sau|bay)|chu nhat|"
+            r"\b(?:thu\s+(?:[2-7]|hai|ba|tu|nam|sau|bay)|chu nhat|"
             r"monday|tuesday|wednesday|thursday|friday|saturday|sunday)\b",
             normalized,
         )
@@ -566,6 +566,9 @@ def calendar_window_from_text(text: str, now: datetime) -> CalendarWindow | None
         )
     )
 
+    if not duration_hint and "ngày kìa" in raw_calendar_text:
+        target = local_now.date() + timedelta(days=3)
+        return CalendarWindow(local_now, end_of_day(target), "đến hết ngày kìa")
     if not duration_hint and (
         "day after tomorrow" in normalized
         or "ngay kia" in normalized
@@ -1295,6 +1298,9 @@ def _absolute_month_end_from_text(
 
 
 def _weekday_from_text(normalized: str) -> int | None:
+    numeric = re.search(r"\bthu\s*(?P<weekday>[2-7])\b", normalized)
+    if numeric:
+        return int(numeric.group("weekday")) - 2
     mapping = {
         "thu hai": 0,
         "monday": 0,

@@ -218,6 +218,16 @@ LUNAR_DATE_CONVERSION_SENTENCES = [
     "[please ]convert {request} from lunar to gregorian",
     "[please ]convert {request} from solar to lunar",
     "[please ]convert {request} from gregorian to lunar",
+    "[hãy ]thứ mấy",
+    "[hãy ](âm lịch|lịch âm|dương lịch|lịch dương) [là ]bao nhiêu",
+    "[hãy ](hôm nay|ngày mai|ngày kia|ngày kìa) thứ mấy",
+    "[hãy ](hôm nay|ngày mai|ngày kia|ngày kìa) (âm lịch|lịch âm|dương lịch|lịch dương) [là ]bao nhiêu",
+    "[hãy ]{request} thứ mấy",
+    "[hãy ]{request} (âm lịch|lịch âm|dương lịch|lịch dương) [là ]bao nhiêu",
+    "[hãy ](xem|tra|tra cứu|cho biết) {request} (âm lịch|lịch âm|dương lịch|lịch dương|thứ mấy)",
+    "[please ]what weekday is {request}",
+    "[please ]what is the lunar date for {request}",
+    "[please ]what is the solar date for {request}",
 ]
 
 # Direct Zalo forwarding from Voice Assist or an inbound Zalo command.
