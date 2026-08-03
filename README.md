@@ -50,7 +50,7 @@ max: 50
 > 
 > `webhook_id` là webhook Zalo_bot bạn đang dùng Automation cho Zalo Bot.
 > 
-> Thêm từ chống chạy auto này vào `blocked = ['@bot']` nếu bạn muốn khÔng bị chạy trùng với webhook này cho automation khác.
+> Thêm từ chống chạy auto này vào `blocked = ['@bot']` nếu bạn muốn khÔng bị chạy trùng với webhook_id này mà bạn đang dùng cho automation khác.
 > 
 > Ví dụ: **`blocked = ['@bot','từ_bạn_muốn']`**
 >
