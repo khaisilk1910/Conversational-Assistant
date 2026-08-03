@@ -26,10 +26,16 @@ triggers:
 conditions:
   - condition: template
     value_template: |-
+      {% set content = trigger.json.data.content
+        | default('', true)
+        | string
+        | lower
+        | trim 
+      %}
+      {% set blocked = ['@bot'] %}
       {{
-        (trigger.json.data.uidFrom | string) != 'uid_cua_bot_de_tranh_tu_tra_loi_tin_cua_chinh_bot'
-        and
-        '@1080' in (trigger.json.data.content | default('') | string)
+        trigger.json.data.uidFrom | string != 'uid_cua_bot_de_tranh_tu_tra_loi_tin_cua_chinh_bot'
+        and not (blocked | select('in', content) | list | count > 0)
       }}
     enabled: true
 actions:
@@ -44,13 +50,9 @@ max: 50
 > 
 > `webhook_id` là webhook Zalo_bot bạn đang dùng Automation cho Zalo Bot.
 > 
-> Thêm `'@1080' in (trigger.json.data.content | default('') | string)` nếu bạn muốn khi yêu cầu phải nhập `@1080` + nội dung yêu cầu.
+> Thêm từ chống chạy auto này vào `blocked = ['@bot']` nếu bạn muốn khÔng bị chạy trùng với webhook này cho automation khác.
 > 
-> Ví dụ: **`@1080` hẹn 10h30 hàng ngày uống thuốc**
-> 
-> Nếu không muốn hãy bỏ đoạn `and '@1080' in (trigger.json.data.content | default('') | string)`.
-> 
-> Khi đó chỉ yêu cầu: **Hẹn 10h30 hàng ngày uống thuốc**
+> Ví dụ: **`blocked = ['@bot','từ_bạn_muốn']`**
 >
 > AI Search bạn phải vào cài đặt và **Tắt Assist** như ảnh dưới. Tham khảo [Tham Khảo Cài AI Ở Đây](https://github.com/luuquangvu/hass_local_openai_llm)
 > <img width="732" height="487" alt="image" src="https://github.com/user-attachments/assets/c41eddad-79ef-473b-910d-2e4312cc1cc7" />
