@@ -6407,29 +6407,181 @@ class ConversationalAssistantManager(NoteManagerMixin):
         )
 
     @staticmethod
-    def _weather_reply_is_usable(reply: str) -> bool:
-        """Reject known configuration, timeout, and empty-data weather messages."""
-        normalized = normalize_text(reply)
+    def _weather_reply_is_usable(
+        reply: str,
+        *,
+        expected_dates: tuple[str, ...] = (),
+    ) -> bool:
+        """Accept only a real forecast or a useful clarification question.
+
+        Conversation agents that cannot browse often answer politely that they have
+        no live-weather tool. Those answers must be treated as failed attempts so the
+        integration can continue to the next AI Search agent instead of forwarding
+        the disclaimer to Zalo or Voice Assist.
+        """
+        raw = str(reply or "").strip()
+        normalized = normalize_text(raw)
+        if not normalized:
+            return False
+
         blocked = (
             "chua cau hinh tra cuu thoi tiet",
             "chua chon ai agent search",
             "ai tra cuu thoi tiet chua phan hoi",
             "chua tim thay du lieu thoi tiet phu hop",
             "khong co cong cu tim kiem du lieu thoi tiet truc tuyen",
+            "khong co cong cu tim kiem thoi tiet truc tuyen",
+            "khong co cong cu tra cuu thoi tiet",
+            "khong co cong cu thoi tiet",
             "chua duoc ket noi voi cong cu cap nhat du lieu thoi tiet",
+            "chua duoc ket noi voi cong cu tra cuu thoi tiet",
+            "chua duoc ket noi voi cong cu thoi tiet",
+            "khong duoc ket noi voi cong cu tra cuu thoi tiet",
             "khong the truy cap du lieu thoi tiet",
             "khong co quyen truy cap du lieu thoi tiet",
             "khong co kha nang truy cap thoi tiet thoi gian thuc",
+            "khong co kha nang truy cap du lieu thoi tiet",
             "khong co du lieu thoi tiet truc tuyen",
+            "khong co du lieu thoi tiet thoi gian thuc",
+            "khong the cap nhat du lieu thoi tiet thoi gian thuc",
+            "tu kiem tra ung dung thoi tiet",
+            "kiem tra qua ung dung thoi tiet tren dien thoai",
+            "trang web cua trung tam du bao",
             "weather lookup is not configured",
             "weather agents unavailable",
             "no reliable weather data found",
             "do not have access to live weather data",
             "do not have a live weather tool",
+            "do not have a weather tool",
             "cannot access live weather data",
+            "cannot browse live weather",
             "not connected to a live weather service",
+            "not connected to a weather service",
         )
-        return bool(normalized) and not any(item in normalized for item in blocked)
+        if any(item in normalized for item in blocked):
+            return False
+
+        weather_context = (
+            "thoi tiet",
+            "du bao",
+            "nhiet do",
+            "mua",
+            "do am",
+            "gio",
+            "weather",
+            "forecast",
+            "temperature",
+            "rain",
+            "humidity",
+            "wind",
+        )
+        inability_cues = (
+            "khong co cong cu",
+            "chua co cong cu",
+            "khong the truy cap",
+            "khong co quyen truy cap",
+            "khong co kha nang truy cap",
+            "chua duoc ket noi",
+            "khong duoc ket noi",
+            "khong co du lieu truc tuyen",
+            "khong the tim kiem truc tuyen",
+            "i do not have access",
+            "i dont have access",
+            "i do not have a tool",
+            "i dont have a tool",
+            "i cannot access",
+            "i cannot browse",
+            "not connected to",
+        )
+        if (
+            any(cue in normalized for cue in inability_cues)
+            and any(cue in normalized for cue in weather_context)
+        ):
+            return False
+
+        # A concise request for a missing place is useful and should be returned.
+        clarification_cues = (
+            "dia diem nao",
+            "tinh thanh nao",
+            "thanh pho nao",
+            "ban muon xem thoi tiet o dau",
+            "vui long cho biet dia diem",
+            "which location",
+            "what location",
+            "which city",
+            "where would you like",
+        )
+        if "?" in raw and any(cue in normalized for cue in clarification_cues):
+            return True
+
+        forecast_cues = (
+            "nhiet do",
+            "cam giac nhu",
+            "kha nang mua",
+            "xac suat mua",
+            "luong mua",
+            "do am",
+            "toc do gio",
+            "huong gio",
+            "chi so uv",
+            "tam nhin",
+            "ap suat",
+            "troi nang",
+            "co may",
+            "mua rao",
+            "mua dong",
+            "temperature",
+            "feels like",
+            "precipitation",
+            "rainfall",
+            "humidity",
+            "wind speed",
+            "wind direction",
+            "uv index",
+            "visibility",
+            "pressure",
+            "sunny",
+            "cloudy",
+            "showers",
+            "thunderstorm",
+        )
+        if not any(cue in normalized for cue in forecast_cues):
+            return False
+
+        # The resolved multi-day request contains exact dates. Reject an agent that
+        # omits any requested date so failover can try a better search-capable agent.
+        for expected in expected_dates:
+            try:
+                day, month, year = (int(part) for part in expected.split("/"))
+            except (TypeError, ValueError):
+                continue
+            variants = (
+                f"{day:02d}/{month:02d}/{year:04d}",
+                f"{day}/{month}/{year}",
+                f"{day:02d}-{month:02d}-{year:04d}",
+                f"{day}-{month}-{year}",
+                f"{year:04d}-{month:02d}-{day:02d}",
+            )
+            written = f"ngay {day} thang {month} nam {year}"
+            if not any(value in raw for value in variants) and written not in normalized:
+                return False
+        return True
+
+    @staticmethod
+    def _expected_weather_dates_from_query(query: str) -> tuple[str, ...]:
+        """Extract unique exact dates appended by ``resolved_weather_query``."""
+        dates: list[str] = []
+        for day, month, year in re.findall(
+            r"(?<!\d)(\d{1,2})[./-](\d{1,2})[./-](\d{4})(?!\d)",
+            str(query or ""),
+        ):
+            try:
+                value = date(int(year), int(month), int(day)).strftime("%d/%m/%Y")
+            except ValueError:
+                continue
+            if value not in dates:
+                dates.append(value)
+        return tuple(dates)
 
     @staticmethod
     def _scheduled_weather_reply_is_usable(
@@ -6942,7 +7094,10 @@ class ConversationalAssistantManager(NoteManagerMixin):
                     and reply
                     and (
                         not is_weather
-                        or self._weather_reply_is_usable(reply)
+                        or self._weather_reply_is_usable(
+                            reply,
+                            expected_dates=self._expected_weather_dates_from_query(query),
+                        )
                     )
                 ):
                     next_conversation_id = str(
