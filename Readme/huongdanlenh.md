@@ -2,6 +2,21 @@
 
 > Điều khiển Home Assistant, tra cứu thông tin, nhắc hẹn, gửi Zalo, thông báo loa, camera và AI bằng câu nói tự nhiên.
 
+## ⚠️ LƯU Ý KHI GỬI LỆNH QUA ZALO
+
+> Khi bật tùy chọn **“Require an invocation keyword for Zalo”**, mọi **yêu cầu mới trên Zalo** phải bắt đầu bằng từ khóa đã cấu hình trong giao diện.
+>
+> **Từ khóa mặc định:** `@1080`  
+> **Ví dụ:** `@1080 chụp camera cổng`
+
+- Chỉ cần từ khóa khi **bắt đầu một yêu cầu mới**.
+- Khi đang trong luồng **chọn thiết bị, xác nhận, hủy, trả lời bổ sung hoặc trò chuyện tiếp**, không cần nhập lại từ khóa.
+- Khi luồng đã hoàn tất hoặc hết thời gian chờ, yêu cầu mới tiếp theo phải có từ khóa lại từ đầu.
+- Tin nhắn Zalo không có từ khóa và không thuộc luồng đang hoạt động sẽ bị bỏ qua.
+- **Home Assistant Assist/Voice không bị ảnh hưởng** bởi thiết lập này.
+
+---
+
 ## 🚀 Cách dùng nhanh
 
 - Gửi lệnh bằng **Zalo** hoặc **Home Assistant Assist/Voice**.
