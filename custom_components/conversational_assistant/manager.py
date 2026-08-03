@@ -1804,10 +1804,16 @@ class ConversationalAssistantManager(NoteManagerMixin):
             "bo qua",
             "giữ nguyên",
             "đồng ý",
+            "mở cửa",
+            "mở đi",
+            "mở",
             "tất cả",
             "tiếp tục",
             "giu nguyen",
             "dong y",
+            "mo cua",
+            "mo di",
+            "mo",
             "tat ca",
             "tiep tuc",
             "hủy",
@@ -1953,7 +1959,30 @@ class ConversationalAssistantManager(NoteManagerMixin):
 
         labels = (
             "Ngày diễn ra",
+            "Thứ",
+            "Ngày dương lịch",
+            "Ngày âm lịch",
+            "Năm Can Chi",
+            "Mốc yêu cầu",
             "Nội dung",
+            "Thiết bị",
+            "Điều kiện",
+            "Nhiệt độ",
+            "Cảm giác như",
+            "Khả năng mưa",
+            "Xác suất mưa",
+            "Lượng mưa",
+            "Độ ẩm",
+            "Gió",
+            "Sức gió",
+            "Hướng gió",
+            "Chỉ số UV",
+            "Tầm nhìn",
+            "Áp suất",
+            "Nguồn",
+            "Cập nhật",
+            "Phân tích",
+            "Lỗi",
             "Còn",
             "Địa điểm",
             "Chi tiết",
@@ -1975,6 +2004,21 @@ class ConversationalAssistantManager(NoteManagerMixin):
             "Calendar",
             "Event",
             "Date",
+            "Device",
+            "Condition",
+            "Temperature",
+            "Feels like",
+            "Precipitation",
+            "Rainfall",
+            "Humidity",
+            "Wind",
+            "UV index",
+            "Visibility",
+            "Pressure",
+            "Source",
+            "Updated",
+            "Analysis",
+            "Error",
             "Content",
             "Remaining",
             "Location",
@@ -1986,8 +2030,14 @@ class ConversationalAssistantManager(NoteManagerMixin):
         label_pattern = "|".join(
             sorted((re.escape(label) for label in labels), key=len, reverse=True)
         )
+        emoji_prefix_pattern = (
+            r"(?:[0-9#*]\ufe0f?\u20e3|"
+            r"[\u2600-\u27bf\U0001f1e6-\U0001f1ff"
+            r"\U0001f300-\U0001faff])\ufe0f?"
+        )
         message = re.sub(
-            rf"(?mi)^(?P<prefix>\s*(?:[-•]\s*|\d+[.)]\s*)?)"
+            rf"(?mi)^(?P<prefix>\s*(?:[-•]\s*|\d+[.)]\s*)?"
+            rf"(?:{emoji_prefix_pattern}\s*)?)"
             rf"(?P<label>{label_pattern})(?P<colon>\s*:)",
             lambda match: (
                 f"{match.group('prefix')}**{match.group('label')}**"
@@ -2046,6 +2096,264 @@ class ConversationalAssistantManager(NoteManagerMixin):
 
         return "\n".join(
             emphasize_choices(line) for line in message.split("\n")
+        )
+
+    @staticmethod
+    def _zalo_decorate_message(text: str) -> str:
+        """Add idempotent contextual emoji to every integration Zalo reply.
+
+        This final presentation pass is deliberately deterministic instead of
+        relying only on an AI agent to follow formatting instructions. It keeps
+        existing emoji, Markdown, command words, and code blocks intact while
+        making weather fields, dates, confirmations, warnings, lists, and normal
+        explanatory lines easier to scan in Zalo.
+        """
+        message = str(text or "").replace("\r\n", "\n").strip()
+        if not message:
+            return message
+
+        leading_emoji_pattern = re.compile(
+            r"^[\s>*#`~_\-•]*(?:\*\*)?"
+            r"(?:[0-9#*]\ufe0f?\u20e3|"
+            r"[\u2600-\u27bf\U0001f1e6-\U0001f1ff"
+            r"\U0001f300-\U0001faff])"
+        )
+        date_heading_pattern = re.compile(
+            r"^\s*(?:[-•]\s*)?(?:📅\s*)?(?:\*\*)?"
+            r"(?P<weekday>Thứ\s+(?:Hai|Ba|Tư|Năm|Sáu|Bảy)|Chủ\s+Nhật|"
+            r"Monday|Tuesday|Wednesday|Thursday|Friday|Saturday|Sunday)"
+            r"\s*,?\s*(?:ngày\s+)?"
+            r"(?P<date>\d{1,2}[./-]\d{1,2}[./-]\d{4})"
+            r"(?:\*\*)?\s*$",
+            re.IGNORECASE,
+        )
+        weekday_labels = {
+            "thu hai": "Thứ Hai",
+            "thu ba": "Thứ Ba",
+            "thu tu": "Thứ Tư",
+            "thu nam": "Thứ Năm",
+            "thu sau": "Thứ Sáu",
+            "thu bay": "Thứ Bảy",
+            "chu nhat": "Chủ Nhật",
+            "monday": "Monday",
+            "tuesday": "Tuesday",
+            "wednesday": "Wednesday",
+            "thursday": "Thursday",
+            "friday": "Friday",
+            "saturday": "Saturday",
+            "sunday": "Sunday",
+        }
+
+        def has_leading_emoji(value: str) -> bool:
+            return bool(leading_emoji_pattern.search(value))
+
+        def contextual_icon(value: str) -> str:
+            raw_label = (
+                re.sub(r"^[\s>*#`~_\-•\d.)]+", "", value)
+                .replace("**", "")
+                .strip()
+            )
+            raw_lower = raw_label.casefold()
+            normalized = normalize_text(raw_label)
+            if not normalized:
+                return ""
+            if raw_lower.startswith(("gió", "sức gió", "hướng gió")):
+                return "💨"
+            if raw_lower.startswith(("giờ", "thời gian")):
+                return "🕒"
+            if raw_lower.startswith(("bão", "áp thấp nhiệt đới")):
+                return "🌪️"
+
+            rules: tuple[tuple[tuple[str, ...], str], ...] = (
+                (
+                    (
+                        "du bao thoi tiet",
+                        "ket qua tra cuu thoi tiet",
+                        "weather forecast",
+                        "weather lookup",
+                    ),
+                    "🌦️",
+                ),
+                (("dieu kien", "tinh trang thoi tiet", "condition", "weather condition"), "🌤️"),
+                (("nhiet do", "cam giac nhu", "temperature", "feels like"), "🌡️"),
+                (
+                    (
+                        "kha nang mua",
+                        "xac suat mua",
+                        "luong mua",
+                        "mua du kien",
+                        "precipitation",
+                        "rainfall",
+                        "chance of rain",
+                    ),
+                    "🌧️",
+                ),
+                (("do am", "humidity"), "💧"),
+                (("suc gio", "huong gio", "wind"), "💨"),
+                (("chi so uv", "uv index"), "☀️"),
+                (("tam nhin", "visibility"), "👁️"),
+                (("ap suat", "pressure"), "🌀"),
+                (("canh bao", "luu y", "chu y", "warning", "alert"), "⚠️"),
+                (("nguon", "source"), "🔗"),
+                (("cap nhat", "thoi diem cap nhat", "update time", "updated"), "🕒"),
+                (("ngay duong lich", "ngay am lich", "ngay dien ra", "moc yeu cau", "date"), "📅"),
+                (("lich", "su kien", "calendar", "event"), "📆"),
+                (("nhac nho", "nhac hen", "hen gio", "reminder"), "⏰"),
+                (("camera", "da chup anh", "phan tich camera"), "📷"),
+                (("loa", "thong bao loa", "tts", "speaker"), "🔊"),
+                (("thiet bi", "dieu hoa", "quat", "cua cuon", "device"), "🏠"),
+                (("zalo", "noi nhan", "gui tin", "send message", "recipient"), "📨"),
+                (("noi dung", "ghi chu", "content", "note"), "📝"),
+                (("trang thai", "status"), "📊"),
+                (("ket qua", "result"), "📌"),
+                (("thanh cong", "da thuc hien", "da gui", "hoan tat", "success", "completed"), "✅"),
+                (("that bai", "khong the", "khong tim thay", "loi", "error", "failed"), "❌"),
+                (("can xac nhan", "xac nhan", "dong y", "tra loi", "reply", "confirm"), "✅"),
+                (("huy", "dung", "cancel", "stop"), "🛑"),
+                (("chon", "lua chon", "select", "choose"), "🔢"),
+                (("dang xu ly", "vui long cho", "please wait", "processing"), "⏳"),
+                (("huong dan", "guide", "help"), "📘"),
+            )
+            for phrases, icon in rules:
+                if any(
+                    normalized == phrase
+                    or normalized.startswith(f"{phrase} ")
+                    or normalized.startswith(f"{phrase}:")
+                    for phrase in phrases
+                ):
+                    return icon
+
+            weather_words = (
+                "nắng",
+                "mưa",
+                "mưa rào",
+                "dông",
+                "giông",
+                "nhiều mây",
+                "ít mây",
+                "mây thay đổi",
+                "trời quang",
+                "áp thấp nhiệt đới",
+                "sunny",
+                "cloudy",
+                "rain",
+                "storm",
+                "showers",
+            )
+            if any(word in raw_lower for word in weather_words):
+                return "🌤️"
+            if re.match(r"^(?:https?://|www\.)", value.strip(), re.IGNORECASE):
+                return "🔗"
+            if re.match(r"^\d+\s*(?:[.)-])\s+", value.strip()):
+                return "🔹"
+            if value.lstrip().startswith(("•", "-")):
+                return "🔹"
+            if value.strip().startswith("**"):
+                return "📌"
+            if normalized.startswith(("sep ", "hello", "xin chao", "chao ")):
+                return "👋"
+            if normalized.startswith(("hay ", "vui long ", "please ")):
+                return "👉"
+            return "💬"
+
+        expanded_lines: list[str] = []
+        for original_line in message.split("\n"):
+            stripped_original = original_line.strip()
+            if " | " in stripped_original:
+                parts = [part.strip() for part in stripped_original.split(" | ")]
+                recognized = sum(
+                    normalize_text(part).startswith((
+                        "cap nhat",
+                        "nguon",
+                        "updated",
+                        "source",
+                    ))
+                    for part in parts
+                )
+                if recognized >= 2:
+                    expanded_lines.extend(parts)
+                    continue
+            expanded_lines.append(original_line)
+
+        decorated: list[str] = []
+        in_code_block = False
+        for raw_line in expanded_lines:
+            line = raw_line.rstrip()
+            stripped = line.strip()
+            if stripped.startswith("```"):
+                in_code_block = not in_code_block
+                decorated.append(line)
+                continue
+            if in_code_block or not stripped:
+                decorated.append(line)
+                continue
+            if re.fullmatch(r"[-━_=~•·.\s]{3,}", stripped):
+                decorated.append(line)
+                continue
+
+            date_match = date_heading_pattern.fullmatch(stripped)
+            if date_match is not None:
+                weekday_key = normalize_text(date_match.group("weekday"))
+                weekday = weekday_labels.get(
+                    weekday_key, date_match.group("weekday").strip()
+                )
+                date_parts = re.split(r"[./-]", date_match.group("date"))
+                date_text = (
+                    f"{int(date_parts[0]):02d}/"
+                    f"{int(date_parts[1]):02d}/{date_parts[2]}"
+                )
+                decorated.append(f"📅 **{weekday}, {date_text}**")
+                continue
+
+            if has_leading_emoji(stripped):
+                decorated.append(line)
+                continue
+
+            icon = contextual_icon(stripped)
+            if not icon:
+                decorated.append(line)
+                continue
+
+            bullet_match = re.match(
+                r"^(?P<indent>\s*)(?P<bullet>(?:[-•]|\d+\s*(?:[.)-])))\s*(?P<body>.*)$",
+                line,
+            )
+            if bullet_match is not None:
+                body = bullet_match.group("body").strip()
+                if body and not has_leading_emoji(body):
+                    decorated.append(
+                        f"{bullet_match.group('indent')}"
+                        f"{bullet_match.group('bullet')} {icon} {body}"
+                    )
+                else:
+                    decorated.append(line)
+                continue
+
+            if stripped.startswith("**") and stripped.endswith("**"):
+                decorated.append(f"{icon} {stripped}")
+                continue
+            normalized_line = normalize_text(stripped.replace("**", ""))
+            if (
+                normalized_line.startswith((
+                    "du bao thoi tiet",
+                    "ket qua",
+                    "canh bao",
+                    "can xac nhan",
+                    "huong dan",
+                ))
+                or (stripped.isupper() and len(stripped) <= 160)
+            ):
+                decorated.append(f"{icon} **{stripped}**")
+                continue
+            decorated.append(f"{icon} {stripped}")
+
+        return "\n".join(decorated).strip()
+
+    @classmethod
+    def _prepare_zalo_message(cls, text: str) -> str:
+        """Return one consistently decorated and emphasized Zalo message."""
+        return cls._zalo_emphasize_important_text(
+            cls._zalo_decorate_message(text)
         )
 
     def _zalo_owner_has_pending_confirmation(self, owner_key: str) -> bool:
@@ -3628,7 +3936,7 @@ class ConversationalAssistantManager(NoteManagerMixin):
             "chuyển điều hòa sang dry lúc 22 giờ`.\n\n"
             "2️⃣ **🌦️ DỰ BÁO THỜI TIẾT VÀ CẢNH BÁO BÃO**\n"
             "• Có trên cả Zalo và Voice Assist. Hỗ trợ hỏi một ngày như `Thời tiết hôm nay`, `Thời tiết ngày mai`, một ngày tương đối như `Thời tiết 2 ngày nữa`, hoặc liệt kê từng ngày bằng `Thời tiết 3 ngày tiếp theo`, `Dự báo 7 ngày tới`.\n"
-            "• Khi yêu cầu nhiều ngày, integration chuẩn hóa đúng mốc ngày, yêu cầu AI liệt kê riêng từng ngày theo thứ/ngày tháng, điều kiện thời tiết, nhiệt độ thấp-cao, khả năng mưa, độ ẩm và gió khi nguồn có dữ liệu. Chỉ hỗ trợ tối đa 7 ngày liên tiếp; yêu cầu vượt quá sẽ được báo giới hạn.\n"
+            "• Khi yêu cầu nhiều ngày, integration chuẩn hóa đúng mốc ngày, yêu cầu AI liệt kê riêng từng ngày theo thứ/ngày tháng, điều kiện thời tiết, nhiệt độ thấp-cao, khả năng mưa, độ ẩm và gió khi nguồn có dữ liệu. Trên Zalo, mỗi ngày được đánh dấu dạng `📅 **Thứ Hai, 03/08/2026**` và từng chỉ số có emoji riêng để dễ đọc. Chỉ hỗ trợ tối đa 7 ngày liên tiếp; yêu cầu vượt quá sẽ được báo giới hạn.\n"
             "• Các mốc phức tạp như `thứ Ba tuần sau` hoặc `cuối tuần này` được AI phân tích ngày trước khi tra cứu. Nếu không nêu địa điểm, integration dùng địa điểm trong **Weather settings**; khi ô này để trống mới dùng vị trí Home Assistant.\n"
             "• Dùng `Kiểm tra bão`, `Tình hình bão`, `Có bão không` hoặc hỏi về áp thấp nhiệt đới/xoáy thuận nhiệt đới. Integration chỉ cảnh báo hệ thống có khả năng ảnh hưởng Việt Nam; nếu không có sẽ trả lời **Không có bão**.\n"
             "• Tại **Configure > Weather settings**, có thể bật lịch gửi dự báo hằng ngày, nhập nhiều giờ chạy, chọn số ngày từ 1 đến 7 và chọn một hay nhiều Zalo nhận. Cũng có thể bật lịch kiểm tra bão ở nhiều giờ; bản tin bão chỉ được gửi khi thực sự có cảnh báo ảnh hưởng Việt Nam, còn không có bão hoặc kiểm tra lỗi thì không gửi.\n"
@@ -3958,7 +4266,7 @@ class ConversationalAssistantManager(NoteManagerMixin):
     ) -> bool:
         """Reply to the exact user/group that sent a webhook command."""
         message = self._address_response(message)
-        message = self._zalo_emphasize_important_text(message)
+        message = self._prepare_zalo_message(message)
         if not self.hass.services.has_service(
             ZALO_DOMAIN, ZALO_SERVICE_SEND_MESSAGE
         ):
@@ -4944,7 +5252,7 @@ class ConversationalAssistantManager(NoteManagerMixin):
                         "type": context.thread_type,
                         "ttl": 0,
                         "image_path": image_path,
-                        "message": self._zalo_emphasize_important_text(
+                        "message": self._prepare_zalo_message(
                             f"📷 **Đã chụp ảnh:** {camera_name}"
                         ),
                         "thread_id": context.thread_id,
@@ -5046,9 +5354,9 @@ class ConversationalAssistantManager(NoteManagerMixin):
                             "type": thread_type,
                             "ttl": 0,
                             "image_path": image_path,
-                            "message": self._zalo_emphasize_important_text(
-                            f"📷 **Đã chụp ảnh:** {camera_name}"
-                        ),
+                            "message": self._prepare_zalo_message(
+                                f"📷 **Đã chụp ảnh:** {camera_name}"
+                            ),
                             "thread_id": thread_id,
                             "account_selection": account_selection,
                         },
@@ -5103,7 +5411,7 @@ class ConversationalAssistantManager(NoteManagerMixin):
                         "type": context.thread_type,
                         "ttl": 0,
                         "image_path": item.image_path,
-                        "message": self._zalo_emphasize_important_text(
+                        "message": self._prepare_zalo_message(
                             self._camera_analysis_zalo_message(item)
                         ),
                         "thread_id": context.thread_id,
@@ -5166,7 +5474,7 @@ class ConversationalAssistantManager(NoteManagerMixin):
                             "type": thread_type,
                             "ttl": 0,
                             "image_path": item.image_path,
-                            "message": self._zalo_emphasize_important_text(
+                            "message": self._prepare_zalo_message(
                                 self._camera_analysis_zalo_message(item)
                             ),
                             "thread_id": thread_id,
@@ -6196,7 +6504,7 @@ class ConversationalAssistantManager(NoteManagerMixin):
             return 0, [
                 f"Service {ZALO_DOMAIN}.{ZALO_SERVICE_SEND_MESSAGE} không khả dụng"
             ]
-        formatted = self._zalo_emphasize_important_text(message)
+        formatted = self._prepare_zalo_message(message)
         chunks = self._split_zalo_text(formatted)
         sent_count = 0
         errors: list[str] = []
@@ -6402,9 +6710,12 @@ class ConversationalAssistantManager(NoteManagerMixin):
                 "🕒 update time/source. Wrap important values and warnings in **double "
                 "asterisks**. For a one-day request, keep the complete answer "
                 "concise, normally 4-8 lines. For a multi-day request, create one "
-                "separate section per exact requested date, headed by 📅 and the "
-                "weekday plus dd/mm/yyyy; under each date include condition, low-high "
-                "temperature, precipitation chance, humidity, and wind when supported. "
+                "separate section per exact requested date. Every date heading must "
+                "use exactly this visual pattern: 📅 **Thứ Hai, 03/08/2026** "
+                "(localized weekday and actual date), with the weekday/date enclosed "
+                "in double asterisks. Under each date, put every available field on "
+                "its own line with a suitable emoji: 🌤️ condition, 🌡️ low-high "
+                "temperature, 🌧️ precipitation chance, 💧 humidity, and 💨 wind. "
                 "List every requested day in chronological order and never collapse "
                 "multiple days into one summary. Do not use a Markdown table. "
             )
@@ -7098,7 +7409,7 @@ class ConversationalAssistantManager(NoteManagerMixin):
                     "type": context.thread_type,
                     "ttl": 0,
                     "image_path": image_path,
-                    "message": self._zalo_emphasize_important_text(message),
+                    "message": self._prepare_zalo_message(message),
                     "thread_id": context.thread_id,
                     "account_selection": account_selection,
                 },
@@ -10339,7 +10650,7 @@ class ConversationalAssistantManager(NoteManagerMixin):
             _LOGGER.error(message_error)
             return 0, [message_error]
 
-        message = self._zalo_emphasize_important_text(message)
+        message = self._prepare_zalo_message(message)
         sent_count = 0
         for target in targets:
             thread_id = str(target.get(CONF_ZALO_THREAD_ID, "") or "").strip()
@@ -12903,7 +13214,7 @@ class ConversationalAssistantManager(NoteManagerMixin):
         ).strip()
         if not thread_id or not account_selection:
             return False
-        prepared = self._zalo_emphasize_important_text(
+        prepared = self._prepare_zalo_message(
             self._address_response(message)
         )
         for chunk in self._split_zalo_text(prepared):
@@ -13291,7 +13602,7 @@ class ConversationalAssistantManager(NoteManagerMixin):
                     {
                         "type": zalo_type,
                         "ttl": 0,
-                        "message": self._zalo_emphasize_important_text(
+                        "message": self._prepare_zalo_message(
                             "⏰ **Nhắc nhở**\n"
                             f"📝 **{reminder.message.strip()}**"
                         ),
