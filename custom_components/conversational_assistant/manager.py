@@ -74,6 +74,8 @@ from .const import (
     ACTION_CHAT,
     ACTION_DISMISS,
     ACTION_SNOOZE,
+    AI_SEARCH_AGENT_TIMEOUT_SECONDS,
+    AI_SEARCH_MAX_CANDIDATES,
     AI_TASK_DOMAIN,
     AI_TASK_SERVICE_GENERATE_DATA,
     AI_TASK_SERVICE_GENERATE_IMAGE,
@@ -1613,6 +1615,63 @@ class ConversationalAssistantManager(NoteManagerMixin):
             for agent_id in agent_ids
         ]
 
+    def _ai_search_agent_candidates(
+        self, primary_agent_id: str
+    ) -> list[tuple[str, str]]:
+        """Return Internet-capable candidates in a safe, useful order.
+
+        Home Assistant does not currently expose a universal capability flag for
+        web browsing on Conversation agents.  The explicitly selected AI Search
+        agent is therefore always first.  Failover then includes only agents whose
+        entity ID or display name indicates web/search grounding, skips the native
+        Home Assistant and device-control agents, and caps the queue so unrelated
+        Conversation agents cannot block a weather or Internet lookup.
+        """
+        primary = str(primary_agent_id or "").strip()
+        control_agent = str(self.zalo_conversation_agent_id or "").strip()
+        discovered = self._conversation_agent_candidates(primary)
+        search_markers = (
+            "search",
+            "web",
+            "internet",
+            "browse",
+            "browser",
+            "ground",
+            "grounding",
+            "online",
+            "perplexity",
+            "duckduckgo",
+            "bing",
+            "google search",
+            "tim kiem",
+            "tra cuu",
+            "truc tuyen",
+        )
+        ranked: list[tuple[int, int, int, str, str]] = []
+        for order, (agent_id, agent_name) in enumerate(discovered):
+            if agent_id == HOME_ASSISTANT_AGENT:
+                continue
+            haystack = normalize_text(f"{agent_id} {agent_name}")
+            score = sum(1 for marker_text in search_markers if marker_text in haystack)
+            if agent_id == primary:
+                tier = 0
+            elif score:
+                tier = 1
+            else:
+                # Generic Conversation agents are intentionally excluded. The
+                # selected primary remains allowed because the user explicitly
+                # assigned it to the AI Search role in the integration settings.
+                continue
+            ranked.append((tier, -score, order, agent_id, agent_name))
+
+        ranked.sort(key=lambda item: (item[0], item[1], item[2]))
+        return [
+            (agent_id, agent_name)
+            for _tier, _score, _order, agent_id, agent_name in ranked[
+                :AI_SEARCH_MAX_CANDIDATES
+            ]
+        ]
+
     def _ai_task_agent_display_name(self, entity_id: str) -> str:
         """Return a stable, user-facing name for an AI Task entity."""
         state = self.hass.states.get(entity_id)
@@ -2661,7 +2720,7 @@ class ConversationalAssistantManager(NoteManagerMixin):
                 self.zalo_conversation_agent_id
             )
         else:
-            candidates = self._conversation_agent_candidates(
+            candidates = self._ai_search_agent_candidates(
                 self.ai_search_agent_id
             )
         return max(1, len(candidates))
@@ -3935,8 +3994,9 @@ class ConversationalAssistantManager(NoteManagerMixin):
             "`Bật quay đảo quạt`; `Hẹn giờ tắt quạt sau 30 phút`; `Lên lịch "
             "chuyển điều hòa sang dry lúc 22 giờ`.\n\n"
             "2️⃣ **🌦️ DỰ BÁO THỜI TIẾT VÀ CẢNH BÁO BÃO**\n"
-            "• Có trên cả Zalo và Voice Assist. Hỗ trợ hỏi một ngày như `Thời tiết hôm nay`, `Thời tiết ngày mai`, một ngày tương đối như `Thời tiết 2 ngày nữa`, hoặc liệt kê từng ngày bằng `Thời tiết 3 ngày tiếp theo`, `Dự báo 7 ngày tới`.\n"
-            "• Khi yêu cầu nhiều ngày, integration chuẩn hóa đúng mốc ngày, yêu cầu AI liệt kê riêng từng ngày theo thứ/ngày tháng, điều kiện thời tiết, nhiệt độ thấp-cao, khả năng mưa, độ ẩm và gió khi nguồn có dữ liệu. Trên Zalo, mỗi ngày được đánh dấu dạng `📅 **Thứ Hai, 03/08/2026**` và từng chỉ số có emoji riêng để dễ đọc. Chỉ hỗ trợ tối đa 7 ngày liên tiếp; yêu cầu vượt quá sẽ được báo giới hạn.\n"
+            "• Có trên cả Zalo và Voice Assist. Hỗ trợ hỏi một ngày như `Thời tiết hôm nay`, `Thời tiết ngày mai`, một ngày tương đối như `Thời tiết 2 ngày nữa`, hoặc liệt kê từng ngày bằng `Thời tiết 3 ngày tiếp theo`, `Dự báo 7 ngày tới`. Cụm **N ngày tiếp theo/tới** bắt đầu từ ngày mai; ví dụ 2 ngày tiếp theo là ngày mai và ngày kia.\n"
+            "• Integration ưu tiên bộ phân tích và công cụ có sẵn của Home Assistant để xác định mốc ngày. Chỉ khi mốc phức tạp mới dùng AI Agent để phân tích; phần lấy dữ liệu thời tiết trực tuyến luôn dùng **AI Agent Search**, không dùng agent điều khiển thiết bị.\n"
+            "• Khi yêu cầu nhiều ngày, integration bắt buộc liệt kê riêng từng ngày với đủ năm đầu mục: điều kiện thời tiết, nhiệt độ thấp-cao, khả năng mưa, độ ẩm và sức gió. Trên Zalo, mỗi ngày được đánh dấu dạng `📅 **Thứ Hai, 03/08/2026**`; giá trị thiếu nhãn từ AI được chuẩn hóa lại, còn phản hồi thiếu dữ liệu của bất kỳ ngày nào sẽ bị loại để thử AI Search dự phòng. Chỉ hỗ trợ tối đa 7 ngày liên tiếp.\n"
             "• Các mốc phức tạp như `thứ Ba tuần sau` hoặc `cuối tuần này` được AI phân tích ngày trước khi tra cứu. Nếu không nêu địa điểm, integration dùng địa điểm trong **Weather settings**; khi ô này để trống mới dùng vị trí Home Assistant.\n"
             "• Dùng `Kiểm tra bão`, `Tình hình bão`, `Có bão không` hoặc hỏi về áp thấp nhiệt đới/xoáy thuận nhiệt đới. Integration chỉ cảnh báo hệ thống có khả năng ảnh hưởng Việt Nam; nếu không có sẽ trả lời **Không có bão**.\n"
             "• Tại **Configure > Weather settings**, có thể bật lịch gửi dự báo hằng ngày, nhập nhiều giờ chạy, chọn số ngày từ 1 đến 7 và chọn một hay nhiều Zalo nhận. Cũng có thể bật lịch kiểm tra bão ở nhiều giờ; bản tin bão chỉ được gửi khi thực sự có cảnh báo ảnh hưởng Việt Nam, còn không có bão hoặc kiểm tra lỗi thì không gửi.\n"
@@ -6139,7 +6199,9 @@ class ConversationalAssistantManager(NoteManagerMixin):
         language: str,
     ) -> WeatherQueryPlan | None:
         """Use AI only for complex weather dates that local parsing cannot resolve."""
-        candidates = self._conversation_agent_candidates(self.ai_search_agent_id)
+        candidates = self._conversation_agent_candidates(
+            self.zalo_conversation_agent_id
+        )
         if not candidates:
             return None
         prompt = (
@@ -6359,7 +6421,7 @@ class ConversationalAssistantManager(NoteManagerMixin):
         language: str = "vi",
     ) -> tuple[str, str]:
         """Check current Vietnam storm risk through the configured AI Search agent."""
-        candidates = self._conversation_agent_candidates(self.ai_search_agent_id)
+        candidates = self._ai_search_agent_candidates(self.ai_search_agent_id)
         if not candidates:
             return "error", self._weather_unavailable_text(language, zalo=zalo)
         prompt = self._storm_search_prompt(
@@ -6369,7 +6431,7 @@ class ConversationalAssistantManager(NoteManagerMixin):
         )
         for agent_id, _agent_name in candidates:
             try:
-                async with asyncio.timeout(ZALO_SEARCH_TIMEOUT_SECONDS):
+                async with asyncio.timeout(AI_SEARCH_AGENT_TIMEOUT_SECONDS):
                     result = await async_converse(
                         hass=self.hass,
                         text=prompt,
@@ -6405,6 +6467,261 @@ class ConversationalAssistantManager(NoteManagerMixin):
             if zalo
             else message
         )
+
+    @staticmethod
+    def _weather_clean_line(line: str) -> tuple[str, str]:
+        """Return one weather line without decoration and its leading emoji."""
+        raw = str(line or "").strip()
+        emoji_match = re.match(
+            r"^[\s>*#`~_\-•]*(?P<emoji>"
+            r"(?:[0-9#*]\ufe0f?\u20e3|"
+            r"[\u2600-\u27bf\U0001f1e6-\U0001f1ff"
+            r"\U0001f300-\U0001faff])\ufe0f?)?\s*",
+            raw,
+        )
+        emoji = str(emoji_match.group("emoji") or "") if emoji_match else ""
+        if emoji_match:
+            raw = raw[emoji_match.end():]
+        raw = re.sub(r"^(?:[-•]|\d+\s*[.)-])\s*", "", raw)
+        raw = raw.replace("**", "").strip()
+        return raw, emoji
+
+    @staticmethod
+    def _weather_date_in_line(line: str) -> str | None:
+        """Return a normalized DD/MM/YYYY date found in one line."""
+        match = re.search(
+            r"(?<!\d)(\d{1,2})[./-](\d{1,2})[./-](\d{4})(?!\d)",
+            str(line or ""),
+        )
+        if match is None:
+            return None
+        try:
+            return date(
+                int(match.group(3)), int(match.group(2)), int(match.group(1))
+            ).strftime("%d/%m/%Y")
+        except ValueError:
+            return None
+
+    @classmethod
+    def _normalize_weather_zalo_reply(
+        cls, reply: str, *, language: str
+    ) -> str:
+        """Label bare AI weather values and produce stable Zalo day sections."""
+        raw_lines = str(reply or "").replace("\r\n", "\n").split("\n")
+        output: list[str] = []
+        in_day = False
+        seen: set[str] = set()
+        english = language == "en"
+
+        label_specs = (
+            (("dieu kien", "tinh trang", "condition"), "condition"),
+            (("nhiet do", "temperature", "feels like", "cam giac nhu"), "temperature"),
+            (("kha nang mua", "xac suat mua", "precipitation", "chance of rain", "rainfall"), "rain"),
+            (("do am", "humidity"), "humidity"),
+            (("suc gio", "toc do gio", "huong gio", "wind"), "wind"),
+        )
+        labels_vi = {
+            "condition": ("🌤️", "Điều kiện"),
+            "temperature": ("🌡️", "Nhiệt độ"),
+            "rain": ("🌧️", "Khả năng mưa"),
+            "humidity": ("💧", "Độ ẩm"),
+            "wind": ("💨", "Sức gió"),
+        }
+        labels_en = {
+            "condition": ("🌤️", "Condition"),
+            "temperature": ("🌡️", "Temperature"),
+            "rain": ("🌧️", "Precipitation"),
+            "humidity": ("💧", "Humidity"),
+            "wind": ("💨", "Wind"),
+        }
+        labels = labels_en if english else labels_vi
+
+        def emit(field: str, value: str) -> None:
+            icon, label = labels[field]
+            cleaned = value.strip(" :-–—\t")
+            if cleaned:
+                output.append(f"{icon} **{label}**: {cleaned}")
+                seen.add(field)
+
+        for original in raw_lines:
+            stripped = original.strip()
+            if not stripped:
+                if output and output[-1] != "":
+                    output.append("")
+                continue
+
+            found_date = cls._weather_date_in_line(stripped)
+            normalized_line = normalize_text(stripped.replace("**", ""))
+            weekday_match = re.search(
+                r"(?:thu\s+(?:hai|ba|tu|nam|sau|bay)|chu\s+nhat|"
+                r"monday|tuesday|wednesday|thursday|friday|saturday|sunday)",
+                normalized_line,
+            )
+            if found_date and weekday_match:
+                clean, _emoji = cls._weather_clean_line(stripped)
+                clean = re.sub(r"^ngay\s+", "", clean, flags=re.IGNORECASE)
+                output.append(f"📅 **{clean.strip()}**")
+                in_day = True
+                seen = set()
+                continue
+
+            clean, leading_emoji = cls._weather_clean_line(stripped)
+            normalized = normalize_text(clean)
+            if not in_day:
+                output.append(original.strip())
+                continue
+
+            field: str | None = None
+            value = clean
+            for prefixes, candidate in label_specs:
+                matched_prefix = next(
+                    (
+                        prefix
+                        for prefix in prefixes
+                        if normalized == prefix
+                        or normalized.startswith(f"{prefix} ")
+                        or normalized.startswith(f"{prefix}:")
+                    ),
+                    None,
+                )
+                if matched_prefix is not None:
+                    field = candidate
+                    value = re.sub(
+                        rf"^\s*{re.escape(clean[:len(matched_prefix)])}\s*:?\s*",
+                        "",
+                        clean,
+                        count=1,
+                        flags=re.IGNORECASE,
+                    )
+                    # Accent removal changes length; split at the first colon as a
+                    # reliable fallback for already labeled natural-language lines.
+                    if ":" in clean:
+                        value = clean.split(":", 1)[1].strip()
+                    break
+
+            if field is None:
+                if leading_emoji in {"🌡️", "🌡"} or re.search(
+                    r"-?\d+(?:[.,]\d+)?\s*(?:°\s*)?c\b",
+                    clean,
+                    re.IGNORECASE,
+                ):
+                    field = "temperature"
+                elif leading_emoji in {"💨", "🌬️", "🌬"} or re.search(
+                    r"\b(?:km\s*/?\s*h|mph|m\s*/?\s*s)\b",
+                    clean,
+                    re.IGNORECASE,
+                ):
+                    field = "wind"
+                elif leading_emoji in {"🌧️", "🌧", "☔"}:
+                    field = "rain"
+                elif leading_emoji in {"💧", "💦"}:
+                    field = "humidity"
+                elif re.search(r"\d+(?:[.,]\d+)?\s*%", clean):
+                    field = "rain" if "rain" not in seen else "humidity"
+                elif leading_emoji in {
+                    "🌤️", "🌤", "☀️", "☀", "⛅", "☁️", "☁",
+                    "🌦️", "🌦", "⛈️", "⛈", "🌩️", "🌩", "🌫️", "🌫",
+                } or any(
+                    cue in normalized
+                    for cue in (
+                        "nang", "mua", "may", "mua dong", "giong",
+                        "troi quang", "bao", "sunny", "rain", "cloud",
+                        "storm", "shower", "fog",
+                    )
+                ):
+                    field = "condition"
+
+            if field is not None:
+                emit(field, value)
+            else:
+                output.append(original.strip())
+
+        while output and not output[-1]:
+            output.pop()
+        return "\n".join(output)
+
+    @classmethod
+    def _weather_section_fields(
+        cls, section: str
+    ) -> set[str]:
+        """Infer the core fields present in one dated weather section."""
+        fields: set[str] = set()
+        unlabeled_percentages = 0
+        for line in str(section or "").splitlines():
+            clean, emoji = cls._weather_clean_line(line)
+            normalized = normalize_text(clean)
+            if not normalized:
+                continue
+            if any(cue in normalized for cue in ("dieu kien", "condition")):
+                fields.add("condition")
+            if any(cue in normalized for cue in ("nhiet do", "temperature", "cam giac nhu", "feels like")) or re.search(
+                r"-?\d+(?:[.,]\d+)?\s*(?:°\s*)?c\b",
+                clean,
+                re.IGNORECASE,
+            ):
+                fields.add("temperature")
+            if any(cue in normalized for cue in ("kha nang mua", "xac suat mua", "precipitation", "chance of rain", "rainfall")) or emoji in {"🌧️", "🌧", "☔"}:
+                fields.add("rain")
+            if any(cue in normalized for cue in ("do am", "humidity")) or emoji in {"💧", "💦"}:
+                fields.add("humidity")
+            if any(cue in normalized for cue in ("suc gio", "toc do gio", "huong gio", "wind")) or emoji in {"💨", "🌬️", "🌬"} or re.search(
+                r"\b(?:km\s*/?\s*h|mph|m\s*/?\s*s)\b",
+                clean,
+                re.IGNORECASE,
+            ):
+                fields.add("wind")
+            if emoji in {"🌤️", "🌤", "☀️", "☀", "⛅", "☁️", "☁", "🌦️", "🌦", "⛈️", "⛈", "🌩️", "🌩", "🌫️", "🌫"} or any(
+                cue in normalized
+                for cue in (
+                    "nang", "mua", "may", "mua dong", "giong",
+                    "troi quang", "bao", "sunny", "rain", "cloud",
+                    "storm", "shower", "fog",
+                )
+            ):
+                fields.add("condition")
+            if re.fullmatch(r"[^%]*\d+(?:[.,]\d+)?\s*%[^%]*", clean):
+                unlabeled_percentages += 1
+        if unlabeled_percentages >= 1 and "rain" not in fields:
+            fields.add("rain")
+        if unlabeled_percentages >= 2 and "humidity" not in fields:
+            fields.add("humidity")
+        return fields
+
+    @classmethod
+    def _weather_dates_have_complete_fields(
+        cls, reply: str, expected_dates: tuple[str, ...]
+    ) -> bool:
+        """Require all five requested weather fields under every exact date."""
+        if not expected_dates:
+            return True
+        lines = str(reply or "").splitlines()
+        positions: list[tuple[int, str]] = []
+        weekday_heading = re.compile(
+            r"(?:thu\s+(?:hai|ba|tu|nam|sau|bay)|chu\s+nhat|"
+            r"monday|tuesday|wednesday|thursday|friday|saturday|sunday)"
+        )
+        for index, line in enumerate(lines):
+            found = cls._weather_date_in_line(line)
+            normalized_line = normalize_text(str(line or "").replace("**", ""))
+            is_heading = str(line or "").lstrip().startswith("📅") or bool(
+                weekday_heading.search(normalized_line)
+            )
+            if found in expected_dates and is_heading:
+                positions.append((index, found))
+        first_positions: dict[str, int] = {}
+        for index, found in positions:
+            first_positions.setdefault(found, index)
+        required = {"condition", "temperature", "rain", "humidity", "wind"}
+        for expected in expected_dates:
+            start = first_positions.get(expected)
+            if start is None:
+                return False
+            following = [index for index, _found in positions if index > start]
+            end = min(following) if following else len(lines)
+            section = "\n".join(lines[start + 1:end])
+            if not required.issubset(cls._weather_section_fields(section)):
+                return False
+        return True
 
     @staticmethod
     def _weather_reply_is_usable(
@@ -6565,7 +6882,9 @@ class ConversationalAssistantManager(NoteManagerMixin):
             written = f"ngay {day} thang {month} nam {year}"
             if not any(value in raw for value in variants) and written not in normalized:
                 return False
-        return True
+        return ConversationalAssistantManager._weather_dates_have_complete_fields(
+            raw, expected_dates
+        )
 
     @staticmethod
     def _expected_weather_dates_from_query(query: str) -> tuple[str, ...]:
@@ -6753,7 +7072,7 @@ class ConversationalAssistantManager(NoteManagerMixin):
                 + (f" tại {location}" if location else "")
             )
             plan = WeatherQueryPlan(
-                start_date=dt_util.now().date(),
+                start_date=dt_util.now().date() + timedelta(days=1),
                 day_count=self.weather_forecast_days,
                 explicit_period=True,
             )
@@ -6865,11 +7184,17 @@ class ConversationalAssistantManager(NoteManagerMixin):
                 "separate section per exact requested date. Every date heading must "
                 "use exactly this visual pattern: 📅 **Thứ Hai, 03/08/2026** "
                 "(localized weekday and actual date), with the weekday/date enclosed "
-                "in double asterisks. Under each date, put every available field on "
-                "its own line with a suitable emoji: 🌤️ condition, 🌡️ low-high "
-                "temperature, 🌧️ precipitation chance, 💧 humidity, and 💨 wind. "
-                "List every requested day in chronological order and never collapse "
-                "multiple days into one summary. Do not use a Markdown table. "
+                "in double asterisks. Under EVERY requested date output exactly one "
+                "line for each core field, using these literal Vietnamese labels and "
+                "never returning a bare number or percentage: "
+                "🌤️ **Điều kiện**: ..., 🌡️ **Nhiệt độ**: ... °C, "
+                "🌧️ **Khả năng mưa**: ... %, 💧 **Độ ẩm**: ... %, and "
+                "💨 **Sức gió**: direction and speed in km/h. If several values are "
+                "available for daytime/nighttime, keep them on the same labeled line. "
+                "A multi-day answer is incomplete when any requested date lacks one "
+                "of those five labeled fields. List every requested day in "
+                "chronological order and never collapse multiple days into one "
+                "summary. Do not use a Markdown table. "
             )
         else:
             format_rules = (
@@ -7011,7 +7336,7 @@ class ConversationalAssistantManager(NoteManagerMixin):
                 )
             return prompt, None
 
-        candidates = self._conversation_agent_candidates(self.ai_search_agent_id)
+        candidates = self._ai_search_agent_candidates(self.ai_search_agent_id)
         if not candidates:
             if is_chat:
                 body = (
@@ -7058,7 +7383,7 @@ class ConversationalAssistantManager(NoteManagerMixin):
         for index, (agent_id, agent_name) in enumerate(candidates):
             attempted_agents.append(agent_name)
             try:
-                async with asyncio.timeout(ZALO_SEARCH_TIMEOUT_SECONDS):
+                async with asyncio.timeout(AI_SEARCH_AGENT_TIMEOUT_SECONDS):
                     result = await async_converse(
                         hass=self.hass,
                         text=prompt_text,
@@ -7073,7 +7398,7 @@ class ConversationalAssistantManager(NoteManagerMixin):
                 _LOGGER.warning(
                     "AI Search agent %s timed out after %s seconds for %s query %s",
                     agent_id,
-                    ZALO_SEARCH_TIMEOUT_SECONDS,
+                    AI_SEARCH_AGENT_TIMEOUT_SECONDS,
                     feature,
                     query,
                 )
@@ -7089,6 +7414,10 @@ class ConversationalAssistantManager(NoteManagerMixin):
                 reply = self._clean_search_reply(
                     self._conversation_reply_text(result)
                 )
+                if is_weather and zalo and reply:
+                    reply = self._normalize_weather_zalo_reply(
+                        reply, language=language
+                    )
                 if (
                     not error_code
                     and reply
@@ -12436,6 +12765,8 @@ class ConversationalAssistantManager(NoteManagerMixin):
             if action == ACTION_IMAGE_GENERATION
             else CAMERA_ANALYSIS_TIMEOUT_SECONDS
             if action == ACTION_CAMERA_ANALYSIS
+            else AI_SEARCH_AGENT_TIMEOUT_SECONDS
+            if action in {ACTION_SEARCH, ACTION_WEATHER, ACTION_CHAT}
             else ZALO_SEARCH_TIMEOUT_SECONDS
         )
         candidate_count = self._ai_long_running_candidate_count(action)
@@ -15062,13 +15393,22 @@ class ConversationalAssistantManager(NoteManagerMixin):
                 user_input, reply, ai_generated=True
             )
         if command.action == ACTION_WEATHER:
+            language = _request_language(request or user_input.text)
             query = weather_search_request(transformed_text) or transformed_text
-            reply, _conversation_id = await self._async_ai_search(
+            resolved_query, error = await self._async_resolve_weather_query(
                 query,
+                user_input.context,
+                zalo=False,
+                language=language,
+            )
+            if error is not None:
+                return await self._async_voice_response(user_input, error)
+            reply, _conversation_id = await self._async_ai_search(
+                resolved_query or query,
                 conversation_id=None,
                 service_context=user_input.context,
                 zalo=False,
-                language_hint=_request_language(request or user_input.text),
+                language_hint=language,
                 feature="weather",
             )
             return await self._async_voice_response(

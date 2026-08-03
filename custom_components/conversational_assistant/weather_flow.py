@@ -209,31 +209,54 @@ def parse_weather_query_plan(
     explicit_date = _explicit_weather_date(text, normalized, reference_time)
 
     # Consecutive ranges: "3 ngày tiếp theo", "5 days forecast", etc.
-    range_patterns = (
-        rf"(?P<n>{_NUMBER_PATTERN})\s+ngay\s+(?:tiep theo|toi|sap toi|ke tiep)",
-        rf"(?:du bao|thoi tiet)\s+(?P<n>{_NUMBER_PATTERN})\s+ngay(?!\s+nua)(?:\s|$)",
-        rf"(?P<n>{_NUMBER_PATTERN})\s+day(?:s)?\s+(?:forecast|ahead|next)",
-        rf"(?:weather|forecast)\s+(?:for\s+)?(?P<n>{_NUMBER_PATTERN})\s+day(?:s)?(?!\s+from\s+now)(?:\s|$)",
-        rf"next\s+(?P<n>{_NUMBER_PATTERN})\s+day(?:s)?",
-        rf"(?P<n>{_NUMBER_PATTERN})[- ]day\s+forecast",
+    range_patterns: tuple[tuple[str, bool], ...] = (
+        # "N ngày tiếp theo/tới" always begins after the current date.
+        # Thus one next day means tomorrow, and two next days means tomorrow
+        # plus the day after tomorrow.
+        (
+            rf"(?P<n>{_NUMBER_PATTERN})\s+ngay\s+"
+            rf"(?:tiep(?:\s+theo)?|toi|sap toi|ke tiep)",
+            True,
+        ),
+        (rf"next\s+(?P<n>{_NUMBER_PATTERN})\s+day(?:s)?", True),
+        (
+            rf"(?P<n>{_NUMBER_PATTERN})\s+day(?:s)?\s+"
+            rf"(?:ahead|next)",
+            True,
+        ),
+        # A plain "weather N days" request keeps the historical behaviour of
+        # including today unless the wording explicitly says next/tomorrow.
+        (
+            rf"(?:du bao|thoi tiet)\s+(?P<n>{_NUMBER_PATTERN})\s+"
+            rf"ngay(?!\s+nua)(?:\s|$)",
+            False,
+        ),
+        (
+            rf"(?:weather|forecast)\s+(?:for\s+)?"
+            rf"(?P<n>{_NUMBER_PATTERN})\s+day(?:s)?"
+            rf"(?!\s+from\s+now)(?:\s|$)",
+            False,
+        ),
+        (rf"(?P<n>{_NUMBER_PATTERN})[- ]day\s+forecast", False),
     )
-    for pattern in range_patterns:
+    for pattern, starts_after_today in range_patterns:
         match = re.search(pattern, normalized)
         if match:
             parsed = _small_number(match.group("n"))
             if parsed is not None and parsed > 0:
+                explicit_tomorrow = any(
+                    phrase in normalized
+                    for phrase in (
+                        "tu ngay mai",
+                        "bat dau ngay mai",
+                        "starting tomorrow",
+                    )
+                )
                 start = explicit_date or (
                     today
                     + timedelta(
                         days=1
-                        if any(
-                            phrase in normalized
-                            for phrase in (
-                                "tu ngay mai",
-                                "bat dau ngay mai",
-                                "starting tomorrow",
-                            )
-                        )
+                        if starts_after_today or explicit_tomorrow
                         else 0
                     )
                 )
@@ -250,8 +273,14 @@ def parse_weather_query_plan(
             explicit_period=True,
         )
 
-    if any(phrase in normalized for phrase in ("tuan toi", "7 ngay toi", "next week")):
-        return WeatherQueryPlan(today, 7, explicit_period=True)
+    if "7 ngay toi" in normalized:
+        return WeatherQueryPlan(
+            today + timedelta(days=1), 7, explicit_period=True
+        )
+    if any(phrase in normalized for phrase in ("tuan toi", "next week")):
+        return WeatherQueryPlan(
+            today, 7, needs_ai=True, explicit_period=True
+        )
 
     if any(
         phrase in normalized

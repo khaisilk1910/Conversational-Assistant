@@ -136,6 +136,11 @@ ZALO_TYPING_REFRESH_SECONDS = 4
 # automation can finish promptly. These limits guarantee a final error message
 # instead of leaving the user waiting forever when an AI provider stalls.
 ZALO_SEARCH_TIMEOUT_SECONDS = 180
+# Internet lookup agents are rotated more quickly than local/control agents.
+# This prevents one non-browsing Conversation agent from blocking the entire
+# weather/search request for several minutes before failover can continue.
+AI_SEARCH_AGENT_TIMEOUT_SECONDS = 60
+AI_SEARCH_MAX_CANDIDATES = 8
 ZALO_IMAGE_TIMEOUT_SECONDS = 360
 CAMERA_ANALYSIS_TIMEOUT_SECONDS = 180
 
