@@ -124,6 +124,38 @@ class ConversationalAssistantCountSensor(ConversationalAssistantSensorBase):
                 self.manager.zalo_conversation_agent_id
             ),
             "ai_search_agent_id": self.manager.ai_search_agent_id,
+            "weather_location": self.manager.weather_location,
+            "weather_forecast_enabled": self.manager.weather_forecast_enabled,
+            "weather_forecast_times": [
+                item.strftime("%H:%M:%S")
+                for item in self.manager.weather_forecast_times
+            ],
+            "weather_forecast_days": self.manager.weather_forecast_days,
+            "weather_forecast_zalo_targets": (
+                self.manager.weather_forecast_zalo_target_ids
+            ),
+            "weather_last_forecast_at": (
+                self.manager.weather_last_forecast_at.isoformat()
+                if self.manager.weather_last_forecast_at is not None
+                else None
+            ),
+            "weather_last_forecast_result": (
+                self.manager.weather_last_forecast_result
+            ),
+            "weather_storm_enabled": self.manager.weather_storm_enabled,
+            "weather_storm_times": [
+                item.strftime("%H:%M:%S")
+                for item in self.manager.weather_storm_times
+            ],
+            "weather_storm_zalo_targets": (
+                self.manager.weather_storm_zalo_target_ids
+            ),
+            "weather_last_storm_at": (
+                self.manager.weather_last_storm_at.isoformat()
+                if self.manager.weather_last_storm_at is not None
+                else None
+            ),
+            "weather_last_storm_result": self.manager.weather_last_storm_result,
         }
 
 

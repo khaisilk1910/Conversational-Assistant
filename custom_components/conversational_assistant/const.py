@@ -42,6 +42,16 @@ CONF_AI_CAMERA_TASK_ENTITY_ID = "ai_camera_task_entity_id"
 CONF_AI_CAMERA_INSTRUCTIONS = "ai_camera_instructions"
 CONF_AI_AGENT_FAILOVER_ENABLED = "ai_agent_failover_enabled"
 
+# Scheduled weather forecast and Vietnam tropical-storm alert settings.
+CONF_WEATHER_LOCATION = "weather_location"
+CONF_WEATHER_FORECAST_ENABLED = "weather_forecast_enabled"
+CONF_WEATHER_FORECAST_TIMES = "weather_forecast_times"
+CONF_WEATHER_FORECAST_DAYS = "weather_forecast_days"
+CONF_WEATHER_FORECAST_ZALO_TARGETS = "weather_forecast_zalo_targets"
+CONF_WEATHER_STORM_ENABLED = "weather_storm_enabled"
+CONF_WEATHER_STORM_TIMES = "weather_storm_times"
+CONF_WEATHER_STORM_ZALO_TARGETS = "weather_storm_zalo_targets"
+
 # Legacy single-Zalo options, retained for automatic migration.
 CONF_ZALO_ENABLED = "zalo_enabled"
 CONF_ZALO_TYPE = "zalo_type"
@@ -78,6 +88,13 @@ DEFAULT_AI_SEARCH_AGENT_ID = ""
 DEFAULT_AI_IMAGE_TASK_ENTITY_ID = ""
 DEFAULT_AI_CAMERA_TASK_ENTITY_ID = ""
 DEFAULT_AI_AGENT_FAILOVER_ENABLED = True
+DEFAULT_WEATHER_LOCATION = ""
+DEFAULT_WEATHER_FORECAST_ENABLED = False
+DEFAULT_WEATHER_FORECAST_TIMES = ["07:00:00"]
+DEFAULT_WEATHER_FORECAST_DAYS = 3
+DEFAULT_WEATHER_STORM_ENABLED = False
+DEFAULT_WEATHER_STORM_TIMES = ["06:30:00", "12:00:00", "21:00:00"]
+MAX_WEATHER_FORECAST_DAYS = 7
 
 AI_TASK_DOMAIN = "ai_task"
 AI_TASK_SERVICE_GENERATE_IMAGE = "generate_image"
@@ -353,6 +370,18 @@ WEATHER_SENTENCES = [
     "[hãy ]tra cứu thời tiết {request}",
     "[hãy ]dự báo thời tiết",
     "[hãy ]dự báo thời tiết {request}",
+    "[hãy ]dự báo {request} ngày tới",
+    "[hãy ]dự báo {request} ngày tiếp theo",
+    "[hãy ]dự báo tuần tới",
+    "[hãy ]kiểm tra bão",
+    "[hãy ]kiểm tra bão {request}",
+    "[hãy ]kiểm tra tin bão",
+    "[hãy ]kiểm tra tin bão {request}",
+    "[hãy ]tình hình bão",
+    "[hãy ]tình hình bão {request}",
+    "[hãy ]có bão không",
+    "[hãy ]áp thấp nhiệt đới",
+    "[hãy ]áp thấp nhiệt đới {request}",
     "weather",
     "weather {request}",
     "weather forecast",

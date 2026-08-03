@@ -60,6 +60,7 @@
         "menu_options": {
           "general": "Cài đặt chung",
           "calendar": "Cài đặt lịch",
+          "weather": "Cài đặt thời tiết",
           "zalo": "Cài đặt Zalo",
           "ai": "Cài đặt AI",
           "tts": "Cài đặt TTS",
@@ -212,10 +213,35 @@
       },
       "finish": {
         "title": "Lưu tùy chọn Conversational Assistant"
+      },
+      "weather": {
+        "title": "Cài đặt thời tiết",
+        "description": "Thiết lập lịch gửi dự báo hằng ngày và lịch kiểm tra bão/áp thấp có khả năng ảnh hưởng Việt Nam. Có {zalo_count} nơi nhận Zalo đang bật. Nhấn Gửi để lưu ngay và đăng ký lại toàn bộ giờ chạy.",
+        "data": {
+          "weather_location": "Địa điểm mặc định cho tra cứu và bản tin thời tiết",
+          "weather_forecast_enabled": "Bật gửi dự báo thời tiết hằng ngày",
+          "weather_forecast_times": "Các giờ gửi dự báo mỗi ngày",
+          "weather_forecast_days": "Số ngày dự báo cần lấy",
+          "weather_forecast_zalo_targets": "Zalo nhận bản tin dự báo",
+          "weather_storm_enabled": "Bật kiểm tra bão/áp thấp ảnh hưởng Việt Nam",
+          "weather_storm_times": "Các giờ kiểm tra bão mỗi ngày",
+          "weather_storm_zalo_targets": "Zalo nhận cảnh báo bão"
+        },
+        "data_description": {
+          "weather_location": "Dùng cho lệnh tra cứu không nêu địa điểm và cho bản tin theo lịch. Để trống để dùng tên vị trí cùng tọa độ đã cấu hình trong Home Assistant. Có thể nhập địa điểm cụ thể như Hà Nội, Đà Nẵng hoặc Bangkok.",
+          "weather_forecast_enabled": "Khi bật, AI Agent Search sẽ lấy dự báo vào từng giờ đã nhập và gửi tới các Zalo đã chọn. Nếu AI không trả về dự báo hợp lệ thì integration không gửi nội dung lỗi thay cho bản tin.",
+          "weather_forecast_times": "Nhập nhiều giờ theo định dạng HH:MM hoặc HH:MM:SS, mỗi giờ một dòng hoặc ngăn cách bằng dấu phẩy. Ví dụ: 06:30, 12:00, 21:00. Tối đa 24 mốc giờ khác nhau.",
+          "weather_forecast_days": "Từ 1 đến 7 ngày. Bản tin bắt đầu từ ngày chạy và liệt kê riêng từng ngày theo thứ/ngày tháng, điều kiện, nhiệt độ thấp-cao, mưa, độ ẩm và gió khi nguồn có dữ liệu.",
+          "weather_forecast_zalo_targets": "Chọn một hoặc nhiều nơi nhận Zalo đã tạo trong Cài đặt Zalo. Bắt buộc khi bật gửi dự báo.",
+          "weather_storm_enabled": "Khi bật, integration tìm bão, áp thấp nhiệt đới hoặc xoáy thuận nhiệt đới có khả năng ảnh hưởng lãnh thổ hoặc vùng biển Việt Nam. Chỉ gửi Zalo khi AI trả trạng thái có cảnh báo; không có bão hoặc tra cứu lỗi sẽ không gửi.",
+          "weather_storm_times": "Nhập nhiều giờ theo định dạng HH:MM hoặc HH:MM:SS, mỗi giờ một dòng hoặc ngăn cách bằng dấu phẩy. Mặc định gợi ý: 06:30, 12:00 và 21:00.",
+          "weather_storm_zalo_targets": "Chọn một hoặc nhiều nơi nhận cảnh báo bão. Bắt buộc khi bật kiểm tra bão theo lịch."
+        }
       }
     },
     "error": {
-      "required": "Trường này là bắt buộc."
+      "required": "Trường này là bắt buộc.",
+      "invalid_time_list": "Có giờ không hợp lệ. Hãy dùng HH:MM hoặc HH:MM:SS, mỗi giờ một dòng hoặc ngăn cách bằng dấu phẩy."
     }
   },
   "services": {

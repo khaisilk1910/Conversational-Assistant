@@ -170,6 +170,24 @@ def weather_search_request(text: str) -> str | None:
         "giong set",
         "chi so uv",
         "canh bao thoi tiet",
+        "kiem tra bao",
+        "kiem tra tin bao",
+        "tin bao moi nhat",
+        "thong tin bao",
+        "tinh hinh bao",
+        "co bao khong",
+        "bao anh huong viet nam",
+        "bao vao viet nam",
+        "canh bao bao",
+        "ap thap nhiet doi",
+        "xoay thuan nhiet doi",
+        "check storm",
+        "check typhoon",
+        "tropical storm",
+        "tropical depression",
+        "tropical cyclone",
+        "storm affecting vietnam",
+        "typhoon affecting vietnam",
         "will it rain",
         "chance of rain",
         "rain probability",
@@ -183,6 +201,17 @@ def weather_search_request(text: str) -> str | None:
         or normalized.startswith(f"{phrase} ")
         or f" {phrase} " in f" {normalized} "
         for phrase in weather_phrases
+    ):
+        return raw
+
+    # Natural shorthand such as "Dự báo 7 ngày tới" omits the word
+    # "thời tiết" but still clearly requests a weather forecast. Keep the
+    # condition narrow so unrelated forecasts (economy, sales, sports) remain
+    # available to the normal conversation/search routes.
+    if re.search(
+        r"^du bao (?:(?:\d+|mot|hai|ba|bon|tu|nam|sau|bay|tam|chin|muoi) "
+        r"ngay\b|tuan (?:toi|sau)\b)",
+        normalized,
     ):
         return raw
 

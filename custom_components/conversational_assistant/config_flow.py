@@ -3,8 +3,9 @@
 from __future__ import annotations
 
 from copy import deepcopy
-from datetime import time
+from datetime import datetime, time
 from typing import Any
+import re
 import uuid
 
 import voluptuous as vol
@@ -30,6 +31,14 @@ from .const import (
     CONF_CALENDAR_NOTIFICATION_MOBILE_DEVICES,
     CONF_CALENDAR_NOTIFICATION_TIME,
     CONF_CALENDAR_NOTIFICATION_ZALO_TARGETS,
+    CONF_WEATHER_FORECAST_DAYS,
+    CONF_WEATHER_FORECAST_ENABLED,
+    CONF_WEATHER_FORECAST_TIMES,
+    CONF_WEATHER_FORECAST_ZALO_TARGETS,
+    CONF_WEATHER_LOCATION,
+    CONF_WEATHER_STORM_ENABLED,
+    CONF_WEATHER_STORM_TIMES,
+    CONF_WEATHER_STORM_ZALO_TARGETS,
     CONF_CONFIRM_TARGETS,
     CONF_DISMISS_ON_CLEAR,
     CONF_SPEAKER_ENABLED,
@@ -60,6 +69,12 @@ from .const import (
     DEFAULT_CALENDAR_LOOKAHEAD_DAYS,
     DEFAULT_CALENDAR_NOTIFICATION_ENABLED,
     DEFAULT_CALENDAR_NOTIFICATION_TIME,
+    DEFAULT_WEATHER_FORECAST_DAYS,
+    DEFAULT_WEATHER_FORECAST_ENABLED,
+    DEFAULT_WEATHER_FORECAST_TIMES,
+    DEFAULT_WEATHER_LOCATION,
+    DEFAULT_WEATHER_STORM_ENABLED,
+    DEFAULT_WEATHER_STORM_TIMES,
     DEFAULT_CONFIRM_TARGETS,
     DEFAULT_DISMISS_ON_CLEAR,
     DEFAULT_SPEAKER_ENABLED,
@@ -77,6 +92,7 @@ from .const import (
     DOMAIN,
     INTEGRATION_NAME,
     MAX_CALENDAR_LOOKAHEAD_DAYS,
+    MAX_WEATHER_FORECAST_DAYS,
     ZALO_TYPE_GROUP,
     ZALO_TYPE_USER,
 )
@@ -495,14 +511,257 @@ def _normalize_calendar_settings(
     ):
         value = normalized.get(key, [])
         if isinstance(value, (list, tuple, set)):
-            normalized[key] = [
-                str(item).strip() for item in value if str(item).strip()
-            ]
+            normalized[key] = list(
+                dict.fromkeys(
+                    str(item).strip()
+                    for item in value
+                    if str(item).strip()
+                )
+            )
         elif value:
             normalized[key] = [str(value).strip()]
         else:
             normalized[key] = []
     return normalized
+
+
+def _weather_times_text(value: Any) -> str:
+    """Return one stored time per line for the multiline selector."""
+    if isinstance(value, str):
+        raw_values = re.split(r"[,;\n]+", value)
+    elif isinstance(value, (list, tuple, set)):
+        raw_values = list(value)
+    else:
+        raw_values = []
+    result: list[str] = []
+    for raw in raw_values:
+        item = str(raw or "").strip()
+        if not item:
+            continue
+        for pattern in ("%H:%M:%S", "%H:%M"):
+            try:
+                parsed = datetime.strptime(item, pattern).time()
+            except ValueError:
+                continue
+            canonical = parsed.strftime("%H:%M:%S")
+            if canonical not in result:
+                result.append(canonical)
+            break
+    return "\n".join(
+        item[:5] if item.endswith(":00") else item for item in result
+    )
+
+
+def _weather_settings_schema(
+    location: str,
+    forecast_enabled: bool,
+    forecast_times: Any,
+    forecast_days: int,
+    selected_forecast_zalo_targets: list[str],
+    storm_enabled: bool,
+    storm_times: Any,
+    selected_storm_zalo_targets: list[str],
+    zalo_choices: dict[str, str],
+) -> vol.Schema:
+    """Build scheduled forecast and Vietnam storm-alert settings."""
+    valid_forecast_targets = [
+        value for value in selected_forecast_zalo_targets if value in zalo_choices
+    ]
+    valid_storm_targets = [
+        value for value in selected_storm_zalo_targets if value in zalo_choices
+    ]
+    return vol.Schema(
+        {
+            vol.Optional(
+                CONF_WEATHER_LOCATION,
+                default=location,
+            ): selector.TextSelector(
+                selector.TextSelectorConfig(type=selector.TextSelectorType.TEXT)
+            ),
+            vol.Optional(
+                CONF_WEATHER_FORECAST_ENABLED,
+                default=forecast_enabled,
+            ): selector.BooleanSelector(),
+            vol.Optional(
+                CONF_WEATHER_FORECAST_TIMES,
+                default=_weather_times_text(forecast_times),
+            ): selector.TextSelector(
+                selector.TextSelectorConfig(
+                    type=selector.TextSelectorType.TEXT,
+                    multiline=True,
+                )
+            ),
+            vol.Optional(
+                CONF_WEATHER_FORECAST_DAYS,
+                default=max(
+                    1,
+                    min(MAX_WEATHER_FORECAST_DAYS, int(forecast_days)),
+                ),
+            ): selector.NumberSelector(
+                selector.NumberSelectorConfig(
+                    min=1,
+                    max=MAX_WEATHER_FORECAST_DAYS,
+                    step=1,
+                    mode=selector.NumberSelectorMode.BOX,
+                    unit_of_measurement="ngày",
+                )
+            ),
+            vol.Optional(
+                CONF_WEATHER_FORECAST_ZALO_TARGETS,
+                default=valid_forecast_targets,
+            ): _select_multiple_schema(zalo_choices),
+            vol.Optional(
+                CONF_WEATHER_STORM_ENABLED,
+                default=storm_enabled,
+            ): selector.BooleanSelector(),
+            vol.Optional(
+                CONF_WEATHER_STORM_TIMES,
+                default=_weather_times_text(storm_times),
+            ): selector.TextSelector(
+                selector.TextSelectorConfig(
+                    type=selector.TextSelectorType.TEXT,
+                    multiline=True,
+                )
+            ),
+            vol.Optional(
+                CONF_WEATHER_STORM_ZALO_TARGETS,
+                default=valid_storm_targets,
+            ): _select_multiple_schema(zalo_choices),
+        }
+    )
+
+
+def _parse_weather_times(value: Any) -> tuple[list[str], bool]:
+    """Normalize a comma/newline-separated time list and report invalid input."""
+    if isinstance(value, str):
+        raw_values = re.split(r"[,;\n]+", value)
+    elif isinstance(value, (list, tuple, set)):
+        raw_values = list(value)
+    else:
+        raw_values = []
+    result: list[str] = []
+    invalid = False
+    for raw in raw_values:
+        item = str(raw or "").strip()
+        if not item:
+            continue
+        parsed = None
+        for pattern in ("%H:%M:%S", "%H:%M"):
+            try:
+                parsed = datetime.strptime(item, pattern).time()
+                break
+            except ValueError:
+                continue
+        if parsed is None:
+            invalid = True
+            continue
+        canonical = parsed.strftime("%H:%M:%S")
+        if canonical not in result:
+            result.append(canonical)
+    return result[:24], invalid
+
+
+def _normalize_weather_settings(user_input: dict[str, Any]) -> dict[str, Any]:
+    """Normalize Weather settings into JSON-safe option values."""
+    normalized = dict(user_input)
+    normalized[CONF_WEATHER_LOCATION] = " ".join(
+        str(
+            normalized.get(
+                CONF_WEATHER_LOCATION, DEFAULT_WEATHER_LOCATION
+            )
+            or ""
+        ).split()
+    )[:160]
+    normalized[CONF_WEATHER_FORECAST_ENABLED] = bool(
+        normalized.get(
+            CONF_WEATHER_FORECAST_ENABLED,
+            DEFAULT_WEATHER_FORECAST_ENABLED,
+        )
+    )
+    forecast_times, _ = _parse_weather_times(
+        normalized.get(
+            CONF_WEATHER_FORECAST_TIMES,
+            DEFAULT_WEATHER_FORECAST_TIMES,
+        )
+    )
+    normalized[CONF_WEATHER_FORECAST_TIMES] = forecast_times
+    try:
+        forecast_days = int(
+            float(
+                normalized.get(
+                    CONF_WEATHER_FORECAST_DAYS,
+                    DEFAULT_WEATHER_FORECAST_DAYS,
+                )
+            )
+        )
+    except (TypeError, ValueError):
+        forecast_days = DEFAULT_WEATHER_FORECAST_DAYS
+    normalized[CONF_WEATHER_FORECAST_DAYS] = max(
+        1, min(MAX_WEATHER_FORECAST_DAYS, forecast_days)
+    )
+    normalized[CONF_WEATHER_STORM_ENABLED] = bool(
+        normalized.get(
+            CONF_WEATHER_STORM_ENABLED,
+            DEFAULT_WEATHER_STORM_ENABLED,
+        )
+    )
+    storm_times, _ = _parse_weather_times(
+        normalized.get(
+            CONF_WEATHER_STORM_TIMES,
+            DEFAULT_WEATHER_STORM_TIMES,
+        )
+    )
+    normalized[CONF_WEATHER_STORM_TIMES] = storm_times
+    for key in (
+        CONF_WEATHER_FORECAST_ZALO_TARGETS,
+        CONF_WEATHER_STORM_ZALO_TARGETS,
+    ):
+        value = normalized.get(key, [])
+        if isinstance(value, (list, tuple, set)):
+            normalized[key] = list(
+                dict.fromkeys(
+                    str(item).strip()
+                    for item in value
+                    if str(item).strip()
+                )
+            )
+        elif value:
+            normalized[key] = [str(value).strip()]
+        else:
+            normalized[key] = []
+    return normalized
+
+
+def _validate_weather_settings(user_input: dict[str, Any]) -> dict[str, str]:
+    """Validate scheduled Weather setting requirements."""
+    errors: dict[str, str] = {}
+    forecast_times, invalid_forecast = _parse_weather_times(
+        user_input.get(
+            CONF_WEATHER_FORECAST_TIMES,
+            DEFAULT_WEATHER_FORECAST_TIMES,
+        )
+    )
+    storm_times, invalid_storm = _parse_weather_times(
+        user_input.get(
+            CONF_WEATHER_STORM_TIMES,
+            DEFAULT_WEATHER_STORM_TIMES,
+        )
+    )
+    if invalid_forecast:
+        errors[CONF_WEATHER_FORECAST_TIMES] = "invalid_time_list"
+    if invalid_storm:
+        errors[CONF_WEATHER_STORM_TIMES] = "invalid_time_list"
+    if bool(user_input.get(CONF_WEATHER_FORECAST_ENABLED, False)):
+        if not forecast_times:
+            errors.setdefault(CONF_WEATHER_FORECAST_TIMES, "required")
+        if not user_input.get(CONF_WEATHER_FORECAST_ZALO_TARGETS):
+            errors[CONF_WEATHER_FORECAST_ZALO_TARGETS] = "required"
+    if bool(user_input.get(CONF_WEATHER_STORM_ENABLED, False)):
+        if not storm_times:
+            errors.setdefault(CONF_WEATHER_STORM_TIMES, "required")
+        if not user_input.get(CONF_WEATHER_STORM_ZALO_TARGETS):
+            errors[CONF_WEATHER_STORM_ZALO_TARGETS] = "required"
+    return errors
 
 
 def _merge_schemas(*schemas: vol.Schema) -> vol.Schema:
@@ -1046,6 +1305,59 @@ class ConversationalAssistantOptionsFlow(config_entries.OptionsFlow):
             ),
         )
         options.setdefault(
+            CONF_WEATHER_LOCATION,
+            self.config_entry.data.get(
+                CONF_WEATHER_LOCATION, DEFAULT_WEATHER_LOCATION
+            ),
+        )
+        options.setdefault(
+            CONF_WEATHER_FORECAST_ENABLED,
+            self.config_entry.data.get(
+                CONF_WEATHER_FORECAST_ENABLED,
+                DEFAULT_WEATHER_FORECAST_ENABLED,
+            ),
+        )
+        options.setdefault(
+            CONF_WEATHER_FORECAST_TIMES,
+            self.config_entry.data.get(
+                CONF_WEATHER_FORECAST_TIMES,
+                list(DEFAULT_WEATHER_FORECAST_TIMES),
+            ),
+        )
+        options.setdefault(
+            CONF_WEATHER_FORECAST_DAYS,
+            self.config_entry.data.get(
+                CONF_WEATHER_FORECAST_DAYS,
+                DEFAULT_WEATHER_FORECAST_DAYS,
+            ),
+        )
+        options.setdefault(
+            CONF_WEATHER_FORECAST_ZALO_TARGETS,
+            self.config_entry.data.get(
+                CONF_WEATHER_FORECAST_ZALO_TARGETS, []
+            ),
+        )
+        options.setdefault(
+            CONF_WEATHER_STORM_ENABLED,
+            self.config_entry.data.get(
+                CONF_WEATHER_STORM_ENABLED,
+                DEFAULT_WEATHER_STORM_ENABLED,
+            ),
+        )
+        options.setdefault(
+            CONF_WEATHER_STORM_TIMES,
+            self.config_entry.data.get(
+                CONF_WEATHER_STORM_TIMES,
+                list(DEFAULT_WEATHER_STORM_TIMES),
+            ),
+        )
+        options.setdefault(
+            CONF_WEATHER_STORM_ZALO_TARGETS,
+            self.config_entry.data.get(
+                CONF_WEATHER_STORM_ZALO_TARGETS, []
+            ),
+        )
+        options.setdefault(
             CONF_TTS_ENTITY_ID,
             self.config_entry.data.get(
                 CONF_TTS_ENTITY_ID, _first_tts_entity_id(self.hass)
@@ -1154,7 +1466,15 @@ class ConversationalAssistantOptionsFlow(config_entries.OptionsFlow):
         """Show the options navigation menu."""
         return self.async_show_menu(
             step_id="init",
-            menu_options=["general", "calendar", "zalo", "ai", "tts", "finish"],
+            menu_options=[
+                "general",
+                "calendar",
+                "weather",
+                "zalo",
+                "ai",
+                "tts",
+                "finish",
+            ],
             description_placeholders={
                 "zalo_count": str(len(self._zalo_targets()))
             },
@@ -1221,6 +1541,47 @@ class ConversationalAssistantOptionsFlow(config_entries.OptionsFlow):
             description_placeholders={
                 "calendar_count": str(len(calendar_choices)),
                 "mobile_count": str(len(mobile_choices)),
+                "zalo_count": str(len(zalo_choices)),
+            },
+        )
+
+    async def async_step_weather(
+        self, user_input: dict[str, Any] | None = None
+    ) -> ConfigFlowResult:
+        """Edit scheduled forecast and Vietnam storm-alert settings."""
+        options = self._ensure_options()
+        errors: dict[str, str] = {}
+        if user_input is not None:
+            errors = _validate_weather_settings(user_input)
+            if not errors:
+                options.update(_normalize_weather_settings(user_input))
+                # Scheduling changes must take effect immediately after Submit.
+                return self.async_create_entry(title="", data=options)
+
+        values = user_input or options
+        normalized = _normalize_weather_settings(values)
+        zalo_choices = _zalo_target_choices(self._zalo_targets())
+        return self.async_show_form(
+            step_id="weather",
+            data_schema=_weather_settings_schema(
+                str(normalized.get(CONF_WEATHER_LOCATION, "") or ""),
+                bool(normalized[CONF_WEATHER_FORECAST_ENABLED]),
+                values.get(
+                    CONF_WEATHER_FORECAST_TIMES,
+                    DEFAULT_WEATHER_FORECAST_TIMES,
+                ),
+                int(normalized[CONF_WEATHER_FORECAST_DAYS]),
+                list(normalized[CONF_WEATHER_FORECAST_ZALO_TARGETS]),
+                bool(normalized[CONF_WEATHER_STORM_ENABLED]),
+                values.get(
+                    CONF_WEATHER_STORM_TIMES,
+                    DEFAULT_WEATHER_STORM_TIMES,
+                ),
+                list(normalized[CONF_WEATHER_STORM_ZALO_TARGETS]),
+                zalo_choices,
+            ),
+            errors=errors,
+            description_placeholders={
                 "zalo_count": str(len(zalo_choices)),
             },
         )

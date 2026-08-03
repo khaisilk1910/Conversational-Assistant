@@ -96,6 +96,14 @@ from .const import (
     CONF_CALENDAR_NOTIFICATION_MOBILE_DEVICES,
     CONF_CALENDAR_NOTIFICATION_TIME,
     CONF_CALENDAR_NOTIFICATION_ZALO_TARGETS,
+    CONF_WEATHER_FORECAST_DAYS,
+    CONF_WEATHER_FORECAST_ENABLED,
+    CONF_WEATHER_FORECAST_TIMES,
+    CONF_WEATHER_FORECAST_ZALO_TARGETS,
+    CONF_WEATHER_LOCATION,
+    CONF_WEATHER_STORM_ENABLED,
+    CONF_WEATHER_STORM_TIMES,
+    CONF_WEATHER_STORM_ZALO_TARGETS,
     CONF_CONFIRM_TARGETS,
     CONF_DISMISS_ON_CLEAR,
     CONF_SPEAKER_ENABLED,
@@ -127,6 +135,12 @@ from .const import (
     DEFAULT_CALENDAR_LOOKAHEAD_DAYS,
     DEFAULT_CALENDAR_NOTIFICATION_ENABLED,
     DEFAULT_CALENDAR_NOTIFICATION_TIME,
+    DEFAULT_WEATHER_FORECAST_DAYS,
+    DEFAULT_WEATHER_FORECAST_ENABLED,
+    DEFAULT_WEATHER_FORECAST_TIMES,
+    DEFAULT_WEATHER_LOCATION,
+    DEFAULT_WEATHER_STORM_ENABLED,
+    DEFAULT_WEATHER_STORM_TIMES,
     DEFAULT_CONFIRM_TARGETS,
     DEFAULT_DISMISS_ON_CLEAR,
     DEFAULT_SPEAKER_ENABLED,
@@ -154,6 +168,7 @@ from .const import (
     LUNAR_CALENDAR_SERVICE_CONVERT_DATE,
     LUNAR_DATE_CONVERSION_SENTENCES,
     MAX_CALENDAR_LOOKAHEAD_DAYS,
+    MAX_WEATHER_FORECAST_DAYS,
     MEDIA_PLAYER_DOMAIN,
     PENDING_FOLLOWUP_SENTENCES,
     PENDING_CONFIRMATION_TIMEOUT_SECONDS,
@@ -259,6 +274,14 @@ from .lunar_calendar import (
     parse_lunar_date_conversion_request,
     request_from_ai_payload,
     unwrap_action_response,
+)
+from .weather_flow import (
+    WeatherQueryPlan,
+    is_storm_check_request,
+    parse_weather_query_plan,
+    resolved_weather_query,
+    weather_limit_message,
+    weather_plan_from_ai_payload,
 )
 from .models import Reminder
 from .note_flow import (
@@ -1021,6 +1044,13 @@ class ConversationalAssistantManager(NoteManagerMixin):
         self._unsub_pending_expiry_timer: Callable[[], None] | None = None
         self._unsub_calendar_refresh_interval: Callable[[], None] | None = None
         self._unsub_calendar_notification_timer: Callable[[], None] | None = None
+        self._weather_schedule_unsubs: list[Callable[[], None]] = []
+        self._weather_forecast_lock = asyncio.Lock()
+        self._weather_storm_lock = asyncio.Lock()
+        self._weather_last_forecast_at: datetime | None = None
+        self._weather_last_forecast_result: str | None = None
+        self._weather_last_storm_at: datetime | None = None
+        self._weather_last_storm_result: str | None = None
         self._calendar_refresh_task: asyncio.Task[Any] | None = None
         self._calendar_refresh_lock = asyncio.Lock()
         self._calendar_events: list[CalendarDisplayEvent] = []
@@ -1245,6 +1275,126 @@ class ConversationalAssistantManager(NoteManagerMixin):
             if normalized and normalized not in result:
                 result.append(normalized)
         return result
+
+    @staticmethod
+    def _normalized_time_option_list(
+        value: Any, defaults: list[str]
+    ) -> list[time]:
+        """Return unique valid local times from stored weather options."""
+        raw_values = (
+            re.split(r"[,;\n]+", value)
+            if isinstance(value, str)
+            else list(value)
+            if isinstance(value, (list, tuple, set))
+            else list(defaults)
+        )
+        result: list[time] = []
+        for raw in raw_values:
+            parsed = dt_util.parse_time(str(raw or "").strip())
+            if parsed is None:
+                continue
+            parsed = parsed.replace(tzinfo=None)
+            if parsed not in result:
+                result.append(parsed)
+        return result
+
+    @property
+    def weather_location(self) -> str:
+        """Return the configured scheduled-weather location."""
+        configured = str(
+            self._option(CONF_WEATHER_LOCATION, DEFAULT_WEATHER_LOCATION) or ""
+        ).strip()
+        return configured or self._weather_default_location()
+
+    @property
+    def weather_forecast_enabled(self) -> bool:
+        """Return whether scheduled daily forecasts are enabled."""
+        return bool(
+            self._option(
+                CONF_WEATHER_FORECAST_ENABLED,
+                DEFAULT_WEATHER_FORECAST_ENABLED,
+            )
+        )
+
+    @property
+    def weather_forecast_times(self) -> list[time]:
+        """Return configured daily forecast run times."""
+        return self._normalized_time_option_list(
+            self._option(
+                CONF_WEATHER_FORECAST_TIMES,
+                DEFAULT_WEATHER_FORECAST_TIMES,
+            ),
+            DEFAULT_WEATHER_FORECAST_TIMES,
+        )
+
+    @property
+    def weather_forecast_days(self) -> int:
+        """Return the configured scheduled forecast length."""
+        try:
+            days = int(
+                float(
+                    self._option(
+                        CONF_WEATHER_FORECAST_DAYS,
+                        DEFAULT_WEATHER_FORECAST_DAYS,
+                    )
+                )
+            )
+        except (TypeError, ValueError):
+            days = DEFAULT_WEATHER_FORECAST_DAYS
+        return max(1, min(MAX_WEATHER_FORECAST_DAYS, days))
+
+    @property
+    def weather_forecast_zalo_target_ids(self) -> list[str]:
+        """Return fixed Zalo destinations for scheduled forecasts."""
+        return self._normalized_option_list(
+            self._option(CONF_WEATHER_FORECAST_ZALO_TARGETS, [])
+        )
+
+    @property
+    def weather_storm_enabled(self) -> bool:
+        """Return whether scheduled Vietnam storm checks are enabled."""
+        return bool(
+            self._option(
+                CONF_WEATHER_STORM_ENABLED, DEFAULT_WEATHER_STORM_ENABLED
+            )
+        )
+
+    @property
+    def weather_storm_times(self) -> list[time]:
+        """Return configured daily storm-check run times."""
+        return self._normalized_time_option_list(
+            self._option(
+                CONF_WEATHER_STORM_TIMES, DEFAULT_WEATHER_STORM_TIMES
+            ),
+            DEFAULT_WEATHER_STORM_TIMES,
+        )
+
+    @property
+    def weather_storm_zalo_target_ids(self) -> list[str]:
+        """Return fixed Zalo destinations for storm alerts."""
+        return self._normalized_option_list(
+            self._option(CONF_WEATHER_STORM_ZALO_TARGETS, [])
+        )
+
+    @property
+    def weather_last_forecast_at(self) -> datetime | None:
+        """Return the last scheduled forecast run time."""
+        return self._weather_last_forecast_at
+
+    @property
+    def weather_last_forecast_result(self) -> str | None:
+        """Return the last scheduled forecast delivery result."""
+        return self._weather_last_forecast_result
+
+    @property
+    def weather_last_storm_at(self) -> datetime | None:
+        """Return the last scheduled storm-check time."""
+        return self._weather_last_storm_at
+
+    @property
+    def weather_last_storm_result(self) -> str | None:
+        """Return the last scheduled storm-check result."""
+        return self._weather_last_storm_result
 
     @property
     def calendar_notification_mobile_device_ids(self) -> list[str]:
@@ -2409,6 +2559,7 @@ class ConversationalAssistantManager(NoteManagerMixin):
         self._schedule_next()
         self._schedule_all_device_actions()
         self._start_calendar_monitoring()
+        self._start_weather_scheduling()
 
     async def async_unload(self) -> None:
         """Unload listeners and timer."""
@@ -2427,6 +2578,9 @@ class ConversationalAssistantManager(NoteManagerMixin):
         if self._unsub_calendar_notification_timer is not None:
             self._unsub_calendar_notification_timer()
             self._unsub_calendar_notification_timer = None
+        for unsub in self._weather_schedule_unsubs:
+            unsub()
+        self._weather_schedule_unsubs.clear()
         calendar_refresh_task = self._calendar_refresh_task
         if calendar_refresh_task is not None:
             calendar_refresh_task.cancel()
@@ -3472,9 +3626,13 @@ class ConversationalAssistantManager(NoteManagerMixin):
             "điều hòa 2 độ`; `Bật đảo gió ngang`; `Tăng tốc độ quạt 20%`; "
             "`Bật quay đảo quạt`; `Hẹn giờ tắt quạt sau 30 phút`; `Lên lịch "
             "chuyển điều hòa sang dry lúc 22 giờ`.\n\n"
-            "2️⃣ **🌦️ THỜI TIẾT BẰNG AI SEARCH**\n"
-            "• AI Search tự hiểu đúng địa điểm và mốc thời gian, rồi tra cứu dự báo Internet mới nhất.\n"
-            "• Ví dụ: `Thời tiết Hà Nội chiều mai`; `Will it rain in Bangkok this weekend?`.\n\n"
+            "2️⃣ **🌦️ DỰ BÁO THỜI TIẾT VÀ CẢNH BÁO BÃO**\n"
+            "• Có trên cả Zalo và Voice Assist. Hỗ trợ hỏi một ngày như `Thời tiết hôm nay`, `Thời tiết ngày mai`, một ngày tương đối như `Thời tiết 2 ngày nữa`, hoặc liệt kê từng ngày bằng `Thời tiết 3 ngày tiếp theo`, `Dự báo 7 ngày tới`.\n"
+            "• Khi yêu cầu nhiều ngày, integration chuẩn hóa đúng mốc ngày, yêu cầu AI liệt kê riêng từng ngày theo thứ/ngày tháng, điều kiện thời tiết, nhiệt độ thấp-cao, khả năng mưa, độ ẩm và gió khi nguồn có dữ liệu. Chỉ hỗ trợ tối đa 7 ngày liên tiếp; yêu cầu vượt quá sẽ được báo giới hạn.\n"
+            "• Các mốc phức tạp như `thứ Ba tuần sau` hoặc `cuối tuần này` được AI phân tích ngày trước khi tra cứu. Nếu không nêu địa điểm, integration dùng địa điểm trong **Weather settings**; khi ô này để trống mới dùng vị trí Home Assistant.\n"
+            "• Dùng `Kiểm tra bão`, `Tình hình bão`, `Có bão không` hoặc hỏi về áp thấp nhiệt đới/xoáy thuận nhiệt đới. Integration chỉ cảnh báo hệ thống có khả năng ảnh hưởng Việt Nam; nếu không có sẽ trả lời **Không có bão**.\n"
+            "• Tại **Configure > Weather settings**, có thể bật lịch gửi dự báo hằng ngày, nhập nhiều giờ chạy, chọn số ngày từ 1 đến 7 và chọn một hay nhiều Zalo nhận. Cũng có thể bật lịch kiểm tra bão ở nhiều giờ; bản tin bão chỉ được gửi khi thực sự có cảnh báo ảnh hưởng Việt Nam, còn không có bão hoặc kiểm tra lỗi thì không gửi.\n"
+            "• Ví dụ: `Thời tiết Hà Nội chiều mai`; `Thời tiết 5 ngày tiếp theo`; `Kiểm tra bão`; `Will it rain in Bangkok this weekend?`.\n\n"
             "3️⃣ **📅 LỊCH VÀ SỰ KIỆN**\n"
             "• Tra cứu, tạo, sửa hoặc xóa sự kiện; kết quả được nhóm theo từng lịch.\n"
             "• Ví dụ: `Sự kiện trong 15 ngày tới`; `Tạo sự kiện họp lúc 18h30 ngày mai`.\n"
@@ -5664,6 +5822,540 @@ class ConversationalAssistantManager(NoteManagerMixin):
             f"USER CHAT MESSAGE: {message}"
         )
 
+    async def _async_ai_weather_plan(
+        self,
+        text: str,
+        reference_time: datetime,
+        service_context: Context | None,
+        *,
+        language: str,
+    ) -> WeatherQueryPlan | None:
+        """Use AI only for complex weather dates that local parsing cannot resolve."""
+        candidates = self._conversation_agent_candidates(self.ai_search_agent_id)
+        if not candidates:
+            return None
+        prompt = (
+            "You are a strict weather-date parser. Do not search the Internet and "
+            "do not answer the weather question. Return exactly one JSON object and "
+            "no prose. Resolve the requested forecast date window using the Home "
+            f"Assistant local reference datetime {reference_time.isoformat()}. "
+            "JSON fields: start_date as YYYY-MM-DD, day_count as an integer, and "
+            "confidence from 0 to 1. A request for N consecutive days has day_count "
+            "N. A request such as 'N days from now' or 'N ngày nữa' asks about one "
+            "specific date, so day_count is 1 and start_date is offset by N days. "
+            "A weekday such as 'thứ Ba tuần sau' asks for one date. 'Next week' or "
+            "'tuần tới' asks for 7 consecutive days. Never return more days than the "
+            "user requested. If the period cannot be resolved, return confidence 0.\n"
+            f"User request: {text!r}"
+        )
+        for agent_id, _agent_name in candidates:
+            try:
+                async with asyncio.timeout(min(30, ZALO_SEARCH_TIMEOUT_SECONDS)):
+                    result = await async_converse(
+                        hass=self.hass,
+                        text=prompt,
+                        conversation_id=None,
+                        context=service_context or Context(),
+                        language=language,
+                        agent_id=agent_id,
+                    )
+            except TimeoutError:
+                _LOGGER.warning("Weather date parser AI %s timed out", agent_id)
+                continue
+            except Exception:  # noqa: BLE001 - try the next configured agent
+                _LOGGER.exception("Weather date parser AI %s failed", agent_id)
+                continue
+            if self._conversation_result_error_code(result):
+                continue
+            payload = self._calendar_json_object(
+                self._conversation_reply_text(result)
+            )
+            if payload is None:
+                continue
+            plan = weather_plan_from_ai_payload(payload, reference_time)
+            if plan is not None:
+                return plan
+        return None
+
+    async def _async_resolve_weather_query(
+        self,
+        text: str,
+        service_context: Context | None,
+        *,
+        zalo: bool,
+        language: str,
+    ) -> tuple[str | None, str | None]:
+        """Resolve a natural forecast window and enforce the seven-day limit."""
+        reference_time = dt_util.now()
+        plan = parse_weather_query_plan(text, reference_time)
+        if plan.needs_ai:
+            ai_plan = await self._async_ai_weather_plan(
+                text,
+                reference_time,
+                service_context,
+                language=language,
+            )
+            if ai_plan is None:
+                # Let the Internet-capable weather agent interpret the original
+                # complex phrase rather than forcing an incorrect local date.
+                return text, None
+            plan = ai_plan
+        if plan.exceeds_limit:
+            return None, weather_limit_message(zalo=zalo, language=language)
+        return (
+            resolved_weather_query(text, plan, language=language),
+            None,
+        )
+
+    @staticmethod
+    def _storm_search_prompt(
+        *,
+        zalo: bool,
+        language: str,
+        reference_time: datetime,
+    ) -> str:
+        """Build a strict Internet storm check with a machine-readable status."""
+        format_rule = (
+            "For an alert, after the status line return a compact Vietnamese Zalo "
+            "message with a warning title and these labeled lines when supported: "
+            "storm name/code, current position, movement, chance and type of impact "
+            "on Vietnam, areas to watch, expected impact time, and source/update "
+            "time. Use suitable emoji and bold important values, but no table."
+            if zalo
+            else "For an alert, after the status line return short natural sentences "
+            "without emoji, Markdown, bullets, or decorative characters, suitable "
+            "for text-to-speech."
+        )
+        language_name = "English" if language == "en" else "Vietnamese"
+        return (
+            "Search the latest reliable information about typhoons, tropical storms, "
+            "tropical depressions, or tropical cyclones that have a credible chance "
+            "of affecting Vietnam's land territory, coastal waters, or directly "
+            "adjacent sea areas. Prioritize official meteorological agencies and "
+            "current dated sources. Do not treat a distant system with no credible "
+            "Vietnam impact as an alert. The first non-empty line MUST be exactly "
+            "STORM_STATUS: NONE when there is no qualifying system, with no other "
+            "content, or STORM_STATUS: ALERT when at least one qualifying system "
+            "exists. Never omit or alter this status line. "
+            f"Current Home Assistant local time: {reference_time.isoformat()}. "
+            f"Answer in {language_name}. {format_rule}"
+        )
+
+    @staticmethod
+    def _parse_storm_status_reply(
+        reply: str,
+        *,
+        zalo: bool,
+        language: str,
+    ) -> tuple[str, str] | None:
+        """Parse the strict storm status marker and format the user-facing reply."""
+        cleaned = ConversationalAssistantManager._clean_search_reply(reply)
+        if not cleaned:
+            return None
+        lines = [line.strip() for line in cleaned.splitlines() if line.strip()]
+        if not lines:
+            return None
+        first = re.sub(
+            r"^[#>*_`\s-]+|[#>*_`\s-]+$", "", lines[0].upper()
+        ).strip().rstrip(".!;")
+        marker = re.fullmatch(r"STORM_STATUS\s*:\s*(NONE|ALERT)", first)
+        status = marker.group(1) if marker is not None else ""
+        if status == "NONE":
+            if language == "en":
+                return "none", (
+                    "🌤️ **No storm threat to Vietnam**"
+                    if zalo
+                    else "There is currently no storm threat to Vietnam."
+                )
+            return "none", (
+                "🌤️ **Không có bão**"
+                if zalo
+                else "Hiện không có bão hoặc áp thấp nhiệt đới có khả năng ảnh hưởng đến Việt Nam."
+            )
+        if status != "ALERT":
+            normalized = normalize_text(cleaned)
+            if normalized in {"khong co bao", "no storm", "no storm threat"}:
+                return ConversationalAssistantManager._parse_storm_status_reply(
+                    "STORM_STATUS: NONE",
+                    zalo=zalo,
+                    language=language,
+                )
+            return None
+        body = "\n".join(lines[1:]).strip()
+        if not body:
+            return None
+        normalized_body = normalize_text(body)
+        storm_cues = (
+            "bao",
+            "ap thap nhiet doi",
+            "xoay thuan nhiet doi",
+            "typhoon",
+            "tropical storm",
+            "tropical depression",
+            "tropical cyclone",
+        )
+        vietnam_cues = (
+            "viet nam",
+            "bien dong",
+            "vung bien viet nam",
+            "ven bien viet nam",
+            "vietnam",
+        )
+        source_cues = (
+            "nguon",
+            "cap nhat",
+            "thoi diem cap nhat",
+            "trung tam du bao",
+            "nchmf",
+            "jma",
+            "jtwc",
+            "source",
+            "updated",
+            "update time",
+            "meteorological agency",
+        )
+        negative_impact_cues = (
+            "khong anh huong viet nam",
+            "khong co kha nang anh huong viet nam",
+            "khong de doa viet nam",
+            "no impact on vietnam",
+            "not expected to affect vietnam",
+            "unlikely to affect vietnam",
+            "no threat to vietnam",
+        )
+        if any(cue in normalized_body for cue in negative_impact_cues):
+            return None
+        if not (
+            any(cue in normalized_body for cue in storm_cues)
+            and any(cue in normalized_body for cue in vietnam_cues)
+            and any(cue in normalized_body for cue in source_cues)
+        ):
+            _LOGGER.warning(
+                "Rejected storm alert without storm, Vietnam-impact, and source evidence"
+            )
+            return None
+        if zalo and not body.startswith(("🚨", "🌪️", "⚠️", "🌀")):
+            title = (
+                "🚨 **Storm alert for Vietnam**"
+                if language == "en"
+                else "🚨 **CẢNH BÁO BÃO/ÁP THẤP ẢNH HƯỞNG VIỆT NAM**"
+            )
+            body = f"{title}\n\n{body}"
+        return "alert", body
+
+    async def _async_storm_search(
+        self,
+        *,
+        service_context: Context | None,
+        zalo: bool,
+        language: str = "vi",
+    ) -> tuple[str, str]:
+        """Check current Vietnam storm risk through the configured AI Search agent."""
+        candidates = self._conversation_agent_candidates(self.ai_search_agent_id)
+        if not candidates:
+            return "error", self._weather_unavailable_text(language, zalo=zalo)
+        prompt = self._storm_search_prompt(
+            zalo=zalo,
+            language=language,
+            reference_time=dt_util.now(),
+        )
+        for agent_id, _agent_name in candidates:
+            try:
+                async with asyncio.timeout(ZALO_SEARCH_TIMEOUT_SECONDS):
+                    result = await async_converse(
+                        hass=self.hass,
+                        text=prompt,
+                        conversation_id=None,
+                        context=service_context or Context(),
+                        language=language,
+                        agent_id=agent_id,
+                    )
+            except TimeoutError:
+                _LOGGER.warning("Storm AI Search agent %s timed out", agent_id)
+                continue
+            except Exception:  # noqa: BLE001 - rotate through AI failover list
+                _LOGGER.exception("Storm AI Search agent %s failed", agent_id)
+                continue
+            if self._conversation_result_error_code(result):
+                continue
+            parsed = self._parse_storm_status_reply(
+                self._conversation_reply_text(result),
+                zalo=zalo,
+                language=language,
+            )
+            if parsed is not None:
+                return parsed
+        message = (
+            "Không thể kiểm tra thông tin bão lúc này vì các AI Search agent đều lỗi hoặc hết thời gian chờ."
+            if language != "en"
+            else "Storm information could not be checked because all AI Search agents failed or timed out."
+        )
+        return "error", (
+            f"⚠️ **Kiểm tra bão thất bại**\n\n{message}"
+            if zalo and language != "en"
+            else f"⚠️ **Storm check failed**\n\n{message}"
+            if zalo
+            else message
+        )
+
+    @staticmethod
+    def _weather_reply_is_usable(reply: str) -> bool:
+        """Reject known configuration, timeout, and empty-data weather messages."""
+        normalized = normalize_text(reply)
+        blocked = (
+            "chua cau hinh tra cuu thoi tiet",
+            "chua chon ai agent search",
+            "ai tra cuu thoi tiet chua phan hoi",
+            "chua tim thay du lieu thoi tiet phu hop",
+            "khong co cong cu tim kiem du lieu thoi tiet truc tuyen",
+            "chua duoc ket noi voi cong cu cap nhat du lieu thoi tiet",
+            "khong the truy cap du lieu thoi tiet",
+            "khong co quyen truy cap du lieu thoi tiet",
+            "khong co kha nang truy cap thoi tiet thoi gian thuc",
+            "khong co du lieu thoi tiet truc tuyen",
+            "weather lookup is not configured",
+            "weather agents unavailable",
+            "no reliable weather data found",
+            "do not have access to live weather data",
+            "do not have a live weather tool",
+            "cannot access live weather data",
+            "not connected to a live weather service",
+        )
+        return bool(normalized) and not any(item in normalized for item in blocked)
+
+    @staticmethod
+    def _scheduled_weather_reply_is_usable(
+        reply: str,
+        plan: WeatherQueryPlan,
+    ) -> bool:
+        """Require a scheduled bulletin to cover every exact requested date."""
+        if not ConversationalAssistantManager._weather_reply_is_usable(reply):
+            return False
+        raw = str(reply or "")
+        normalized = normalize_text(raw)
+        for offset in range(plan.day_count):
+            target = plan.start_date + timedelta(days=offset)
+            accepted_dates = (
+                target.strftime("%d/%m/%Y"),
+                target.strftime("%d-%m-%Y"),
+                target.strftime("%d.%m.%Y"),
+                f"{target.day}/{target.month}/{target.year}",
+                target.isoformat(),
+            )
+            written_date = (
+                f"ngay {target.day} thang {target.month} nam {target.year}"
+            )
+            if not (
+                any(value in raw for value in accepted_dates)
+                or written_date in normalized
+            ):
+                return False
+        weather_cues = (
+            "nhiet do",
+            "temperature",
+            "kha nang mua",
+            "xac suat mua",
+            "precipitation",
+            "rain",
+            "do am",
+            "humidity",
+            "gio",
+            "wind",
+            "dieu kien",
+            "condition",
+        )
+        return any(cue in normalized for cue in weather_cues)
+
+    def _fixed_weather_zalo_targets(
+        self, selected_ids: list[str]
+    ) -> list[dict[str, Any]]:
+        """Resolve fixed Weather-setting target IDs against enabled Zalo targets."""
+        selected = set(selected_ids)
+        if not selected:
+            return []
+        return [
+            target
+            for target in self._configured_zalo_targets()
+            if str(target.get(CONF_ZALO_TARGET_ID, "")) in selected
+        ]
+
+    async def _async_send_fixed_weather_zalo_message(
+        self,
+        message: str,
+        selected_ids: list[str],
+    ) -> tuple[int, list[str]]:
+        """Send a scheduled forecast or storm alert to fixed Zalo destinations."""
+        targets = self._fixed_weather_zalo_targets(selected_ids)
+        if not selected_ids:
+            return 0, ["Chưa chọn nơi nhận Zalo"]
+        if not targets:
+            return 0, ["Không tìm thấy nơi nhận Zalo đã chọn hoặc nơi nhận đang tắt"]
+        if not self.hass.services.has_service(
+            ZALO_DOMAIN, ZALO_SERVICE_SEND_MESSAGE
+        ):
+            return 0, [
+                f"Service {ZALO_DOMAIN}.{ZALO_SERVICE_SEND_MESSAGE} không khả dụng"
+            ]
+        formatted = self._zalo_emphasize_important_text(message)
+        chunks = self._split_zalo_text(formatted)
+        sent_count = 0
+        errors: list[str] = []
+        for target in targets:
+            thread_id = str(target.get(CONF_ZALO_THREAD_ID, "") or "").strip()
+            account_selection = str(
+                target.get(CONF_ZALO_ACCOUNT_SELECTION, "") or ""
+            ).strip()
+            zalo_type = str(
+                target.get(CONF_ZALO_TYPE, DEFAULT_ZALO_TYPE)
+            ).strip()
+            if not thread_id or not account_selection:
+                errors.append("Nơi nhận Zalo thiếu thread_id hoặc tài khoản gửi")
+                continue
+            try:
+                await self._async_send_zalo_typing_to_target(
+                    thread_id, account_selection
+                )
+                for chunk in chunks:
+                    await self.hass.services.async_call(
+                        ZALO_DOMAIN,
+                        ZALO_SERVICE_SEND_MESSAGE,
+                        {
+                            "type": zalo_type,
+                            "ttl": 0,
+                            "message": chunk,
+                            "thread_id": thread_id,
+                            "account_selection": account_selection,
+                        },
+                        blocking=True,
+                    )
+                sent_count += 1
+            except Exception as err:  # noqa: BLE001 - continue other targets
+                errors.append(
+                    f"Zalo {thread_id}: {str(err) or err.__class__.__name__}"
+                )
+                _LOGGER.exception(
+                    "Failed sending scheduled weather message to %s", thread_id
+                )
+        return sent_count, errors
+
+    @callback
+    def _start_weather_scheduling(self) -> None:
+        """Register every configured forecast and storm local-time callback."""
+        for unsub in self._weather_schedule_unsubs:
+            unsub()
+        self._weather_schedule_unsubs.clear()
+        if self.weather_forecast_enabled:
+            for configured_time in self.weather_forecast_times:
+                self._weather_schedule_unsubs.append(
+                    async_track_time_change(
+                        self.hass,
+                        self._async_scheduled_weather_forecast_due,
+                        hour=configured_time.hour,
+                        minute=configured_time.minute,
+                        second=configured_time.second,
+                    )
+                )
+        if self.weather_storm_enabled:
+            for configured_time in self.weather_storm_times:
+                self._weather_schedule_unsubs.append(
+                    async_track_time_change(
+                        self.hass,
+                        self._async_scheduled_weather_storm_due,
+                        hour=configured_time.hour,
+                        minute=configured_time.minute,
+                        second=configured_time.second,
+                    )
+                )
+        _LOGGER.debug(
+            "Weather schedules registered: forecast=%s storm=%s",
+            [item.strftime("%H:%M:%S") for item in self.weather_forecast_times]
+            if self.weather_forecast_enabled
+            else [],
+            [item.strftime("%H:%M:%S") for item in self.weather_storm_times]
+            if self.weather_storm_enabled
+            else [],
+        )
+
+    async def _async_scheduled_weather_forecast_due(
+        self, _now: datetime
+    ) -> None:
+        """Generate and send one configured daily multi-day forecast."""
+        if not self.weather_forecast_enabled:
+            return
+        if self._weather_forecast_lock.locked():
+            _LOGGER.warning("Skipping overlapping scheduled weather forecast")
+            return
+        async with self._weather_forecast_lock:
+            target_ids = self.weather_forecast_zalo_target_ids
+            location = self.weather_location
+            query = (
+                f"Dự báo thời tiết {self.weather_forecast_days} ngày tiếp theo"
+                + (f" tại {location}" if location else "")
+            )
+            plan = WeatherQueryPlan(
+                start_date=dt_util.now().date(),
+                day_count=self.weather_forecast_days,
+                explicit_period=True,
+            )
+            resolved_query = resolved_weather_query(
+                query, plan, language="vi"
+            )
+            reply, _conversation_id = await self._async_ai_search(
+                resolved_query,
+                conversation_id=None,
+                service_context=None,
+                zalo=True,
+                language_hint="vi",
+                feature="weather",
+            )
+            self._weather_last_forecast_at = dt_util.now()
+            if not self._scheduled_weather_reply_is_usable(reply, plan):
+                self._weather_last_forecast_result = (
+                    "Không gửi: AI không trả đủ dự báo cho từng ngày"
+                )
+                self._notify_update()
+                return
+            sent, errors = await self._async_send_fixed_weather_zalo_message(
+                reply, target_ids
+            )
+            self._weather_last_forecast_result = (
+                f"Đã gửi {sent}/{len(target_ids)} nơi nhận"
+                + (f"; lỗi: {'; '.join(errors)}" if errors else "")
+            )
+            self._notify_update()
+
+    async def _async_scheduled_weather_storm_due(self, _now: datetime) -> None:
+        """Check Vietnam storm risk and send only when an alert really exists."""
+        if not self.weather_storm_enabled:
+            return
+        if self._weather_storm_lock.locked():
+            _LOGGER.warning("Skipping overlapping scheduled storm check")
+            return
+        async with self._weather_storm_lock:
+            status, message = await self._async_storm_search(
+                service_context=None,
+                zalo=True,
+                language="vi",
+            )
+            self._weather_last_storm_at = dt_util.now()
+            if status == "none":
+                self._weather_last_storm_result = "Không gửi: không có bão ảnh hưởng Việt Nam"
+                self._notify_update()
+                return
+            if status != "alert":
+                self._weather_last_storm_result = "Không gửi: kiểm tra bão thất bại"
+                self._notify_update()
+                return
+            target_ids = self.weather_storm_zalo_target_ids
+            sent, errors = await self._async_send_fixed_weather_zalo_message(
+                message, target_ids
+            )
+            self._weather_last_storm_result = (
+                f"Đã gửi cảnh báo {sent}/{len(target_ids)} nơi nhận"
+                + (f"; lỗi: {'; '.join(errors)}" if errors else "")
+            )
+            self._notify_update()
+
     def _weather_default_location(self) -> str:
         """Return Home Assistant's configured location for weather fallback."""
         config = getattr(self.hass, "config", None)
@@ -5708,14 +6400,21 @@ class ConversationalAssistantManager(NoteManagerMixin):
                 "emoji: 🌡️ temperature/feels-like, 🌧️ precipitation probability or "
                 "rainfall, 💧 humidity, 💨 wind, ☀️ UV, 👁️ visibility, ⚠️ warning, "
                 "🕒 update time/source. Wrap important values and warnings in **double "
-                "asterisks**. Keep the complete answer concise, normally 4-8 lines. "
-                "Do not use a Markdown table. "
+                "asterisks**. For a one-day request, keep the complete answer "
+                "concise, normally 4-8 lines. For a multi-day request, create one "
+                "separate section per exact requested date, headed by 📅 and the "
+                "weekday plus dd/mm/yyyy; under each date include condition, low-high "
+                "temperature, precipitation chance, humidity, and wind when supported. "
+                "List every requested day in chronological order and never collapse "
+                "multiple days into one summary. Do not use a Markdown table. "
             )
         else:
             format_rules = (
-                "Return a short voice/chat answer with clear sentences, no emoji, no "
-                "Markdown table, and no decorative Markdown. Mention only the most "
-                "relevant weather fields. "
+                "Return clear natural sentences with no emoji, no Markdown table, "
+                "and no decorative Markdown. For a multi-day request, speak one short "
+                "dated segment for every requested day in chronological order; never "
+                "merge or omit requested dates. Mention only the most relevant weather "
+                "fields. "
             )
         return (
             "Act as an Internet weather lookup specialist. Interpret the user's exact "
@@ -5884,7 +6583,7 @@ class ConversationalAssistantManager(NoteManagerMixin):
                 zalo=zalo,
                 language=language,
                 reference_time=dt_util.now(),
-                default_location=self._weather_default_location(),
+                default_location=self.weather_location,
             )
         elif is_chat:
             prompt_text = self._chat_prompt(query, language=language)
@@ -5927,7 +6626,14 @@ class ConversationalAssistantManager(NoteManagerMixin):
                 reply = self._clean_search_reply(
                     self._conversation_reply_text(result)
                 )
-                if not error_code and reply:
+                if (
+                    not error_code
+                    and reply
+                    and (
+                        not is_weather
+                        or self._weather_reply_is_usable(reply)
+                    )
+                ):
                     next_conversation_id = str(
                         getattr(result, "conversation_id", "") or ""
                     ).strip() or None
@@ -6127,14 +6833,30 @@ class ConversationalAssistantManager(NoteManagerMixin):
         context: ZaloWebhookContext,
         service_context: Context | None,
     ) -> str:
-        """Look up weather through the configured Internet AI Search agent."""
+        """Look up one-to-seven-day weather or current Vietnam storm risk."""
         query = weather_search_request(context.text) or context.text
-        reply, _conversation_id = await self._async_ai_search(
+        language = _request_language(context.text)
+        if is_storm_check_request(query):
+            _status, reply = await self._async_storm_search(
+                service_context=service_context,
+                zalo=True,
+                language=language,
+            )
+            return reply
+        resolved_query, error = await self._async_resolve_weather_query(
             query,
+            service_context,
+            zalo=True,
+            language=language,
+        )
+        if error is not None:
+            return error
+        reply, _conversation_id = await self._async_ai_search(
+            resolved_query or query,
             conversation_id=None,
             service_context=service_context,
             zalo=True,
-            language_hint=_request_language(context.text),
+            language_hint=language,
             zalo_context=context,
             feature="weather",
         )
@@ -13707,7 +14429,7 @@ class ConversationalAssistantManager(NoteManagerMixin):
     async def _async_weather_from_voice(
         self, user_input: ConversationInput, _result: RecognizeResult
     ) -> str:
-        """Look up weather through the configured Internet AI Search agent."""
+        """Look up one-to-seven-day weather or current Vietnam storm risk."""
         self._clear_pending_for_source(self._source_keys(user_input))
         self._sync_pending_followup_trigger()
         query = weather_search_request(user_input.text)
@@ -13715,12 +14437,30 @@ class ConversationalAssistantManager(NoteManagerMixin):
             return await self._async_home_assistant_conversation_from_voice(
                 user_input, user_input.text
             )
-        reply, _conversation_id = await self._async_ai_search(
+        language = _request_language(user_input.text)
+        if is_storm_check_request(query):
+            _status, reply = await self._async_storm_search(
+                service_context=user_input.context,
+                zalo=False,
+                language=language,
+            )
+            return await self._async_voice_response(
+                user_input, reply, ai_generated=True
+            )
+        resolved_query, error = await self._async_resolve_weather_query(
             query,
+            user_input.context,
+            zalo=False,
+            language=language,
+        )
+        if error is not None:
+            return await self._async_voice_response(user_input, error)
+        reply, _conversation_id = await self._async_ai_search(
+            resolved_query or query,
             conversation_id=None,
             service_context=user_input.context,
             zalo=False,
-            language_hint=_request_language(user_input.text),
+            language_hint=language,
             feature="weather",
         )
         return await self._async_voice_response(
