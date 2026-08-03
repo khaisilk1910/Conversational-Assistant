@@ -103,6 +103,8 @@ from .const import (
     CONF_TTS_LANGUAGE,
     CONF_TTS_VOICE,
     CONF_USER_ADDRESS,
+    CONF_ZALO_INVOCATION_KEYWORD,
+    CONF_ZALO_INVOCATION_KEYWORD_ENABLED,
     CONF_ZALO_ACCOUNT_SELECTION,
     CONF_ZALO_CONVERSATION_AGENT_ID,
     CONF_ZALO_ENABLED,
@@ -131,6 +133,8 @@ from .const import (
     DEFAULT_TTS_LANGUAGE,
     DEFAULT_TTS_VOICE,
     DEFAULT_USER_ADDRESS,
+    DEFAULT_ZALO_INVOCATION_KEYWORD,
+    DEFAULT_ZALO_INVOCATION_KEYWORD_ENABLED,
     DEFAULT_SNOOZE_MINUTES,
     DEFAULT_ZALO_ENABLED,
     DEFAULT_ZALO_CONVERSATION_AGENT_ID,
@@ -816,6 +820,7 @@ class ZaloWebhookContext:
     owner_key: str
     message_id: str
     text: str
+    active_flow_reply: bool = False
 
 
 @dataclass(slots=True)
@@ -1059,6 +1064,30 @@ class ConversationalAssistantManager(NoteManagerMixin):
                 CONF_ZALO_WEBHOOK_ENABLED, DEFAULT_ZALO_WEBHOOK_ENABLED
             )
         )
+
+    @property
+    def zalo_invocation_keyword_enabled(self) -> bool:
+        """Return whether Zalo commands require a leading keyword."""
+        return bool(
+            self._option(
+                CONF_ZALO_INVOCATION_KEYWORD_ENABLED,
+                DEFAULT_ZALO_INVOCATION_KEYWORD_ENABLED,
+            )
+        )
+
+    @property
+    def zalo_invocation_keyword(self) -> str:
+        """Return the configured leading keyword for Zalo commands."""
+        value = " ".join(
+            str(
+                self._option(
+                    CONF_ZALO_INVOCATION_KEYWORD,
+                    DEFAULT_ZALO_INVOCATION_KEYWORD,
+                )
+                or ""
+            ).split()
+        )
+        return (value or DEFAULT_ZALO_INVOCATION_KEYWORD)[:80]
 
     @property
     def zalo_webhook_bot_account_id(self) -> str:
@@ -1887,6 +1916,13 @@ class ConversationalAssistantManager(NoteManagerMixin):
             item is not None and item.expires_at > now for item in pending_items
         )
 
+    def _zalo_owner_has_active_flow(self, owner_key: str) -> bool:
+        """Return whether a Zalo chat may reply without the invocation keyword."""
+        if self._zalo_owner_has_pending_confirmation(owner_key):
+            return True
+        session = self._zalo_chat_sessions.get(owner_key)
+        return session is not None and session.expires_at > dt_util.now()
+
     def _append_zalo_confirmation_timeout_notice(
         self, context: ZaloWebhookContext, message: str
     ) -> str:
@@ -1896,16 +1932,29 @@ class ConversationalAssistantManager(NoteManagerMixin):
             context.owner_key
         ):
             return response
+        keyword = self.zalo_invocation_keyword.replace("`", "'")
         if _request_language(context.text) == "en":
             notice = (
                 "⏱️ Each confirmation step is valid for **120 seconds**. "
                 "After that, the pending request is cancelled automatically."
             )
+            if self.zalo_invocation_keyword_enabled:
+                notice += (
+                    " 🔓 While this flow is waiting, reply directly without the "
+                    f"**`{keyword}`** keyword. A new request requires the keyword "
+                    "again after the flow finishes, is cancelled, or expires."
+                )
         else:
             notice = (
                 "⏱️ Mỗi bước xác nhận có hiệu lực trong **120 giây**. "
                 "Quá thời gian, yêu cầu đang chờ sẽ tự hủy."
             )
+            if self.zalo_invocation_keyword_enabled:
+                notice += (
+                    " 🔓 Trong lúc luồng này đang chờ, bạn trả lời trực tiếp, "
+                    f"không cần nhập **`{keyword}`**. Khi luồng hoàn tất, bị hủy "
+                    "hoặc hết hạn, yêu cầu mới lại phải bắt đầu bằng từ khóa."
+                )
         if notice in response:
             return response
         return f"{response}\n\n{notice}"
@@ -3044,6 +3093,29 @@ class ConversationalAssistantManager(NoteManagerMixin):
             return text[length:].lstrip(" ,:;-\t\n")
         return text.strip()
 
+    def _strip_zalo_invocation_keyword(
+        self, text: str
+    ) -> tuple[str | None, str]:
+        """Validate and remove the configured leading Zalo keyword."""
+        candidate = str(text or "").lstrip()
+        keyword = self.zalo_invocation_keyword
+        if len(candidate) < len(keyword) or (
+            candidate[: len(keyword)].casefold() != keyword.casefold()
+        ):
+            return None, "missing_invocation_keyword"
+
+        remainder = candidate[len(keyword) :]
+        if remainder and not (
+            remainder[0].isspace()
+            or remainder[0] in ",.:;|/-–—"
+        ):
+            return None, "missing_invocation_keyword"
+
+        command = remainder.lstrip().lstrip(",.:;|/-–—").lstrip()
+        if not command:
+            return "", "invocation_keyword_only"
+        return command, "ok"
+
     def _normalize_zalo_webhook_context(
         self, payload: Any
     ) -> tuple[ZaloWebhookContext | None, str]:
@@ -3074,8 +3146,8 @@ class ConversationalAssistantManager(NoteManagerMixin):
         if sender_id and sender_id in account_ids:
             return None, "self_message"
 
-        content = data.get("content")
-        if not isinstance(content, str) or not content.strip():
+        raw_content = data.get("content")
+        if not isinstance(raw_content, str) or not raw_content.strip():
             return None, "unsupported_content"
 
         raw_thread_type = str(
@@ -3092,9 +3164,29 @@ class ConversationalAssistantManager(NoteManagerMixin):
         if not sender_id or not thread_id:
             return None, "missing_sender_or_thread"
 
-        content = self._strip_zalo_bot_mention(content, data, account_ids)
-        if not content:
-            return None, "empty_message"
+        owner_key = f"zalo:{thread_type}:{thread_id}"
+        active_flow_reply = False
+        normalization_reason = "ok"
+        if self.zalo_invocation_keyword_enabled:
+            content, normalization_reason = (
+                self._strip_zalo_invocation_keyword(raw_content)
+            )
+            if content is None:
+                if not self._zalo_owner_has_active_flow(owner_key):
+                    return None, normalization_reason
+                content = self._strip_zalo_bot_mention(
+                    raw_content, data, account_ids
+                )
+                active_flow_reply = True
+                normalization_reason = "active_flow_without_keyword"
+                if not content:
+                    return None, "empty_message"
+        else:
+            content = self._strip_zalo_bot_mention(
+                raw_content, data, account_ids
+            )
+            if not content:
+                return None, "empty_message"
 
         message_id = str(
             data.get("msgId")
@@ -3105,7 +3197,6 @@ class ConversationalAssistantManager(NoteManagerMixin):
         display_name = str(data.get("dName", "") or "").strip()
         if not display_name:
             display_name = sender_id
-        owner_key = f"zalo:{thread_type}:{thread_id}"
         return (
             ZaloWebhookContext(
                 account_id=event_account_id or configured_account_id,
@@ -3116,8 +3207,9 @@ class ConversationalAssistantManager(NoteManagerMixin):
                 owner_key=owner_key,
                 message_id=message_id,
                 text=content[:4000],
+                active_flow_reply=active_flow_reply,
             ),
-            "ok",
+            normalization_reason,
         )
 
     def _is_duplicate_zalo_message(self, message_id: str) -> bool:
@@ -3319,12 +3411,46 @@ class ConversationalAssistantManager(NoteManagerMixin):
                 return normalized[len(prefix) :].strip()
         return normalized
 
-    @staticmethod
-    def _integration_help_text() -> str:
+    def _integration_help_text(self) -> str:
         """Return the shared concise guide for Voice Assist and Zalo."""
+        keyword = self.zalo_invocation_keyword.replace("`", "'")
+        if self.zalo_invocation_keyword_enabled:
+            invocation_guide = (
+                "🔑 **TỪ KHÓA GỌI TÍCH HỢP TRÊN ZALO**\n"
+                f"• Đang bật. Mọi yêu cầu Zalo mới phải bắt đầu "
+                f"bằng **`{keyword}`**; nội dung không có từ khóa ở đầu và không "
+                "thuộc một luồng đang hoạt động sẽ được "
+                "bỏ qua im lặng để tránh nhầm với trò chuyện thông thường.\n"
+                f"• Ví dụ mở một yêu cầu mới: **`{keyword} chụp cam`**, "
+                f"**`{keyword} thời tiết Hà Nội`**.\n"
+                "• Khi integration đã hỏi chọn mục, xác nhận, hủy hoặc đang trong "
+                "phòng trò chuyện tiếp nối, hãy trả lời trực tiếp như **`1 3`**, "
+                "**`đồng ý`**, **`hủy`**; không cần lặp lại từ khóa. Sau khi luồng "
+                "hoàn tất, bị hủy hoặc hết thời gian chờ, yêu cầu mới lại phải bắt "
+                f"đầu bằng **`{keyword}`**.\n"
+                "• Đổi từ khóa hoặc tắt yêu cầu từ khóa tại **Configure > Zalo settings > Zalo webhook and Home Assistant**. "
+                "Tùy chọn này chỉ lọc tin nhắn webhook Zalo; Voice Assist vẫn dùng lệnh "
+                "bình thường, không cần đọc từ khóa.\n"
+                "• Automation webhook nên tiếp tục chuyển toàn bộ payload vào "
+                "`conversational_assistant.process_zalo_webhook`; không nên hard-code "
+                "từ khóa trong automation vì từ khóa có thể đổi trong UI.\n"
+                "• Condition mẫu có `blocked = ['@bot']` vẫn dùng được với từ khóa "
+                "mặc định `@1080`. Nếu đổi từ khóa thành `@bot`, hãy bỏ hoặc sửa mục "
+                "blocked đó, nếu không automation sẽ chặn lệnh trước khi tới integration.\n\n"
+            )
+        else:
+            invocation_guide = (
+                "🔑 **TỪ KHÓA GỌI TÍCH HỢP TRÊN ZALO**\n"
+                "• Đang tắt. Tin nhắn webhook Zalo được xử lý như trước, không cần từ khóa "
+                "ở đầu và có thể dễ trùng với nội dung trò chuyện thông thường.\n"
+                f"• Có thể bật tại **Configure > Zalo settings > Zalo webhook and Home Assistant**; từ khóa mặc định là "
+                f"**`{keyword}`**. Voice Assist không bị ảnh hưởng.\n\n"
+            )
+
         return (
             "📘 **HƯỚNG DẪN SỬ DỤNG CONVERSATIONAL ASSISTANT**\n"
             "🇻🇳 Dùng tiếng Việt hoặc 🇬🇧 English trên Voice Assist và Zalo.\n\n"
+            f"{invocation_guide}"
             "1️⃣ **🏠 NHÀ THÔNG MINH: ZALO VÀ VOICE ASSIST**\n"
             "• Home Assistant Assist tiếp tục xử lý trực tiếp các lệnh gốc như "
             "bật/tắt, đặt nhiệt độ, đặt tốc độ quạt và lệnh trì hoãn cơ bản; "
@@ -3340,7 +3466,8 @@ class ConversationalAssistantManager(NoteManagerMixin):
             "chọn trong 120 giây. Nếu thao tác không được thiết bị hỗ trợ, bot "
             "chỉ gợi ý các action và mode Home Assistant đang công bố.\n"
             "• Lệnh hợp lệ được thực hiện ngay; chỉ **mở cửa cuốn/cửa gara** "
-            "mới yêu cầu **Đồng ý** hoặc **Hủy** trong 120 giây.\n"
+            "mới yêu cầu xác nhận trong 120 giây. Có thể trả lời **Có**, "
+            "**Đồng ý** hoặc **Mở** để thực hiện; trả lời **Hủy** để dừng.\n"
             "• Ví dụ: `Chuyển điều hòa phòng ngủ sang cool`; `Tăng nhiệt độ "
             "điều hòa 2 độ`; `Bật đảo gió ngang`; `Tăng tốc độ quạt 20%`; "
             "`Bật quay đảo quạt`; `Hẹn giờ tắt quạt sau 30 phút`; `Lên lịch "
@@ -3544,7 +3671,10 @@ class ConversationalAssistantManager(NoteManagerMixin):
         if self._is_cancel_pending_text(context.text):
             return True
         if pending.phase == "confirm_door":
-            return explicit_ha_kind is None
+            return (
+                self._is_device_power_confirmation(context.text)
+                or explicit_ha_kind is None
+            )
         if pending.phase == "select_target":
             selected = parse_device_target_selection(
                 context.text, pending.targets
@@ -6915,14 +7045,16 @@ class ConversationalAssistantManager(NoteManagerMixin):
                 "⚠️ **Rolling-door opening confirmation required**\n\n"
                 f"{prefix}**Action:** {summary}\n"
                 f"**Device:** {names}{schedule_line}\n\n"
-                "Reply **Agree** to continue or **Cancel** to stop."
+                "Reply **Yes**, **Agree**, or **Open** to continue; "
+                "reply **Cancel** to stop."
             )
         prefix = "Tôi vẫn cần bạn xác nhận rõ.\n" if invalid else ""
         return (
             "⚠️ **Cần xác nhận mở cửa cuốn**\n\n"
             f"{prefix}**Thao tác:** {summary}\n"
             f"**Thiết bị:** {names}{schedule_line}\n\n"
-            "Trả lời **Đồng ý** để tiếp tục hoặc **Hủy** để dừng."
+            "Trả lời **Có**, **Đồng ý** hoặc **Mở** để thực hiện; "
+            "trả lời **Hủy** để dừng."
         )
 
     @staticmethod
@@ -6948,6 +7080,14 @@ class ConversationalAssistantManager(NoteManagerMixin):
             "oke",
             "tien hanh",
             "thuc hien",
+            "mo",
+            "mo di",
+            "mo cua",
+            "mo cua di",
+            "hay mo",
+            "open",
+            "open it",
+            "open door",
         }
 
     @staticmethod
@@ -10701,10 +10841,13 @@ class ConversationalAssistantManager(NoteManagerMixin):
         pending_calendar_management = self._zalo_pending_calendar_management(
             context.owner_key
         )
+        flow_reply = context.active_flow_reply
         if (
             pending_send is not None
-            and command is None
-            and explicit_ha_kind is None
+            and (
+                flow_reply
+                or (command is None and explicit_ha_kind is None)
+            )
         ):
             return await self._async_zalo_pending_send_reply(
                 context, pending_send
@@ -10716,8 +10859,10 @@ class ConversationalAssistantManager(NoteManagerMixin):
             self._schedule_pending_expiry()
         if (
             pending_speaker is not None
-            and command is None
-            and explicit_ha_kind is None
+            and (
+                flow_reply
+                or (command is None and explicit_ha_kind is None)
+            )
         ):
             return await self._async_zalo_pending_speaker_reply(
                 context, pending_speaker
@@ -10731,33 +10876,47 @@ class ConversationalAssistantManager(NoteManagerMixin):
             self._schedule_pending_expiry()
         if (
             pending_calendar_management is not None
-            and command is None
-            and explicit_ha_kind is None
+            and (
+                flow_reply
+                or (command is None and explicit_ha_kind is None)
+            )
         ):
             return await self._async_zalo_pending_calendar_management_reply(
                 context, pending_calendar_management, service_context
             )
         if (
             pending_calendar is not None
-            and command is None
-            and explicit_ha_kind is None
+            and (
+                flow_reply
+                or (command is None and explicit_ha_kind is None)
+            )
         ):
             return await self._async_zalo_pending_calendar_event_reply(
                 context, pending_calendar, service_context
             )
         if (
             pending_camera is not None
-            and command is None
-            and explicit_ha_kind in {None, "camera", "camera_analysis"}
+            and (
+                flow_reply
+                or (
+                    command is None
+                    and explicit_ha_kind in {None, "camera", "camera_analysis"}
+                )
+            )
         ):
             return await self._async_zalo_pending_camera_reply(
                 context, pending_camera, service_context
             )
         pending_device_followup = (
             pending_device_power is not None
-            and command is None
-            and self._is_zalo_pending_device_power_followup(
-                context, pending_device_power, explicit_ha_kind
+            and (
+                flow_reply
+                or (
+                    command is None
+                    and self._is_zalo_pending_device_power_followup(
+                        context, pending_device_power, explicit_ha_kind
+                    )
+                )
             )
         )
         if pending_device_followup:
@@ -10772,24 +10931,30 @@ class ConversationalAssistantManager(NoteManagerMixin):
             self._schedule_pending_expiry()
         if (
             pending_note is not None
-            and command is None
-            and explicit_ha_kind is None
+            and (
+                flow_reply
+                or (command is None and explicit_ha_kind is None)
+            )
         ):
             return await self._async_pending_note_reply_from_zalo(
                 context, pending_note
             )
         if (
             pending_creation is not None
-            and command is None
-            and explicit_ha_kind is None
+            and (
+                flow_reply
+                or (command is None and explicit_ha_kind is None)
+            )
         ):
             return await self._async_zalo_pending_creation_reply(
                 context, pending_creation
             )
         if (
             pending_deletion is not None
-            and command is None
-            and explicit_ha_kind is None
+            and (
+                flow_reply
+                or (command is None and explicit_ha_kind is None)
+            )
         ):
             return await self._async_zalo_pending_deletion_reply(
                 context, pending_deletion
@@ -10904,6 +11069,15 @@ class ConversationalAssistantManager(NoteManagerMixin):
             )
             if selected:
                 return ACTION_CAMERA_ANALYSIS
+
+        # A reply without the invocation keyword belongs to the active pending
+        # flow. Do not reinterpret it as a separate slow feature request. A
+        # keyword-prefixed message can still intentionally start a new request.
+        if (
+            context.active_flow_reply
+            and self._zalo_owner_has_pending_confirmation(context.owner_key)
+        ):
+            return None
 
         command = self._zalo_command_kind(text)
         effective_text = text
@@ -11207,6 +11381,20 @@ class ConversationalAssistantManager(NoteManagerMixin):
             return {"ok": True, "handled": False, "reason": reason}
         if self._is_duplicate_zalo_message(context.message_id):
             return {"ok": True, "handled": False, "reason": "duplicate"}
+
+        if reason == "invocation_keyword_only":
+            keyword = self.zalo_invocation_keyword.replace("`", "'")
+            reply_sent = await self._async_send_zalo_webhook_reply(
+                context,
+                "🔑 Hãy nhập nội dung yêu cầu sau từ khóa "
+                f"**`{keyword}`**. Ví dụ: **`{keyword} chụp cam`**.",
+            )
+            return {
+                "ok": True,
+                "handled": True,
+                "reason": reason,
+                "reply_sent": reply_sent,
+            }
 
         if (
             context.owner_key in self._zalo_chat_sessions

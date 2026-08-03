@@ -37,6 +37,8 @@ from .const import (
     CONF_TTS_LANGUAGE,
     CONF_TTS_VOICE,
     CONF_USER_ADDRESS,
+    CONF_ZALO_INVOCATION_KEYWORD,
+    CONF_ZALO_INVOCATION_KEYWORD_ENABLED,
     CONF_ZALO_ACCOUNT_SELECTION,
     CONF_ZALO_CONVERSATION_AGENT_ID,
     CONF_ZALO_ENABLED,
@@ -64,6 +66,8 @@ from .const import (
     DEFAULT_TTS_LANGUAGE,
     DEFAULT_TTS_VOICE,
     DEFAULT_USER_ADDRESS,
+    DEFAULT_ZALO_INVOCATION_KEYWORD,
+    DEFAULT_ZALO_INVOCATION_KEYWORD_ENABLED,
     DEFAULT_ZALO_ENABLED,
     DEFAULT_ZALO_CONVERSATION_AGENT_ID,
     DEFAULT_ZALO_HOME_ASSISTANT_ENABLED,
@@ -113,6 +117,10 @@ def _zalo_settings_schema(
     zalo_webhook_bot_account_id: str,
     zalo_webhook_account_selection: str,
     zalo_home_assistant_enabled: bool,
+    zalo_invocation_keyword_enabled: bool = (
+        DEFAULT_ZALO_INVOCATION_KEYWORD_ENABLED
+    ),
+    zalo_invocation_keyword: str = DEFAULT_ZALO_INVOCATION_KEYWORD,
 ) -> vol.Schema:
     """Build the global Zalo settings schema."""
     return vol.Schema(
@@ -125,6 +133,21 @@ def _zalo_settings_schema(
                 CONF_ZALO_HOME_ASSISTANT_ENABLED,
                 default=zalo_home_assistant_enabled,
             ): selector.BooleanSelector(),
+            vol.Optional(
+                CONF_ZALO_INVOCATION_KEYWORD_ENABLED,
+                default=zalo_invocation_keyword_enabled,
+            ): selector.BooleanSelector(),
+            vol.Optional(
+                CONF_ZALO_INVOCATION_KEYWORD,
+                default=(
+                    zalo_invocation_keyword
+                    or DEFAULT_ZALO_INVOCATION_KEYWORD
+                ),
+            ): selector.TextSelector(
+                selector.TextSelectorConfig(
+                    type=selector.TextSelectorType.TEXT
+                )
+            ),
             vol.Optional(
                 CONF_ZALO_WEBHOOK_BOT_ACCOUNT_ID,
                 default=zalo_webhook_bot_account_id,
@@ -494,6 +517,8 @@ def _initial_schema(
     dismiss_on_clear: bool,
     confirm_targets: bool,
     user_address: str,
+    zalo_invocation_keyword_enabled: bool,
+    zalo_invocation_keyword: str,
     speaker_enabled: bool,
     tts_entity_id: str | None,
     tts_language: str,
@@ -511,12 +536,18 @@ def _initial_schema(
 ) -> vol.Schema:
     """Build the initial installation form with all setting groups."""
     return _merge_schemas(
-        _general_settings_schema(dismiss_on_clear, confirm_targets, user_address),
+        _general_settings_schema(
+            dismiss_on_clear,
+            confirm_targets,
+            user_address,
+        ),
         _zalo_settings_schema(
             zalo_webhook_enabled,
             zalo_webhook_bot_account_id,
             zalo_webhook_account_selection,
             zalo_home_assistant_enabled,
+            zalo_invocation_keyword_enabled,
+            zalo_invocation_keyword,
         ),
         _ai_settings_schema(
             zalo_conversation_agent_id,
@@ -547,8 +578,23 @@ def _validate_zalo_settings(user_input: dict[str, Any]) -> dict[str, str]:
         user_input.get(CONF_ZALO_WEBHOOK_BOT_ACCOUNT_ID, "") or ""
     ).strip():
         errors[CONF_ZALO_WEBHOOK_BOT_ACCOUNT_ID] = "required"
-    return errors
 
+    keyword_enabled = bool(
+        user_input.get(
+            CONF_ZALO_INVOCATION_KEYWORD_ENABLED,
+            DEFAULT_ZALO_INVOCATION_KEYWORD_ENABLED,
+        )
+    )
+    keyword = str(
+        user_input.get(
+            CONF_ZALO_INVOCATION_KEYWORD,
+            DEFAULT_ZALO_INVOCATION_KEYWORD,
+        )
+        or ""
+    ).strip()
+    if keyword_enabled and not keyword:
+        errors[CONF_ZALO_INVOCATION_KEYWORD] = "required"
+    return errors
 
 def _normalize_zalo_settings(user_input: dict[str, Any]) -> dict[str, Any]:
     """Normalize global Zalo text values before storing them."""
@@ -559,6 +605,22 @@ def _normalize_zalo_settings(user_input: dict[str, Any]) -> dict[str, Any]:
     normalized[CONF_ZALO_WEBHOOK_ACCOUNT_SELECTION] = str(
         normalized.get(CONF_ZALO_WEBHOOK_ACCOUNT_SELECTION, "") or ""
     ).strip()
+    normalized[CONF_ZALO_INVOCATION_KEYWORD_ENABLED] = bool(
+        normalized.get(
+            CONF_ZALO_INVOCATION_KEYWORD_ENABLED,
+            DEFAULT_ZALO_INVOCATION_KEYWORD_ENABLED,
+        )
+    )
+    keyword = " ".join(
+        str(
+            normalized.get(
+                CONF_ZALO_INVOCATION_KEYWORD,
+                DEFAULT_ZALO_INVOCATION_KEYWORD,
+            )
+            or ""
+        ).split()
+    )
+    normalized[CONF_ZALO_INVOCATION_KEYWORD] = keyword[:80]
     return normalized
 
 
@@ -756,6 +818,19 @@ class ConversationalAssistantConfigFlow(config_entries.ConfigFlow, domain=DOMAIN
                 ).strip(),
                 bool(
                     values.get(
+                        CONF_ZALO_INVOCATION_KEYWORD_ENABLED,
+                        DEFAULT_ZALO_INVOCATION_KEYWORD_ENABLED,
+                    )
+                ),
+                str(
+                    values.get(
+                        CONF_ZALO_INVOCATION_KEYWORD,
+                        DEFAULT_ZALO_INVOCATION_KEYWORD,
+                    )
+                    or ""
+                ).strip(),
+                bool(
+                    values.get(
                         CONF_SPEAKER_ENABLED,
                         DEFAULT_SPEAKER_ENABLED,
                     )
@@ -908,6 +983,20 @@ class ConversationalAssistantOptionsFlow(config_entries.OptionsFlow):
             CONF_USER_ADDRESS,
             self.config_entry.data.get(
                 CONF_USER_ADDRESS, DEFAULT_USER_ADDRESS
+            ),
+        )
+        options.setdefault(
+            CONF_ZALO_INVOCATION_KEYWORD_ENABLED,
+            self.config_entry.data.get(
+                CONF_ZALO_INVOCATION_KEYWORD_ENABLED,
+                DEFAULT_ZALO_INVOCATION_KEYWORD_ENABLED,
+            ),
+        )
+        options.setdefault(
+            CONF_ZALO_INVOCATION_KEYWORD,
+            self.config_entry.data.get(
+                CONF_ZALO_INVOCATION_KEYWORD,
+                DEFAULT_ZALO_INVOCATION_KEYWORD,
             ),
         )
         options.setdefault(
@@ -1074,13 +1163,13 @@ class ConversationalAssistantOptionsFlow(config_entries.OptionsFlow):
     async def async_step_general(
         self, user_input: dict[str, Any] | None = None
     ) -> ConfigFlowResult:
-        """Edit general discovery and voice-confirmation settings."""
+        """Edit shared confirmation and notification settings."""
         options = self._ensure_options()
         if user_input is not None:
             options.update(_normalize_general_settings(user_input))
             return await self.async_step_init()
 
-        values = user_input or options
+        values = options
 
         return self.async_show_form(
             step_id="general",
@@ -1192,6 +1281,19 @@ class ConversationalAssistantOptionsFlow(config_entries.OptionsFlow):
                         DEFAULT_ZALO_HOME_ASSISTANT_ENABLED,
                     )
                 ),
+                bool(
+                    values.get(
+                        CONF_ZALO_INVOCATION_KEYWORD_ENABLED,
+                        DEFAULT_ZALO_INVOCATION_KEYWORD_ENABLED,
+                    )
+                ),
+                str(
+                    values.get(
+                        CONF_ZALO_INVOCATION_KEYWORD,
+                        DEFAULT_ZALO_INVOCATION_KEYWORD,
+                    )
+                    or ""
+                ).strip(),
             ),
             errors=errors,
         )
