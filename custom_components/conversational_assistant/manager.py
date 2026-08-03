@@ -146,6 +146,9 @@ from .const import (
     HELP_SENTENCES,
     IMAGE_GENERATION_PREFIXES,
     LIST_SENTENCES,
+    LUNAR_CALENDAR_DOMAIN,
+    LUNAR_CALENDAR_SERVICE_CONVERT_DATE,
+    LUNAR_DATE_CONVERSION_SENTENCES,
     MAX_CALENDAR_LOOKAHEAD_DAYS,
     MEDIA_PLAYER_DOMAIN,
     PENDING_FOLLOWUP_SENTENCES,
@@ -190,6 +193,7 @@ from .command_memory import (
     ACTION_HELP,
     ACTION_HOME_ASSISTANT,
     ACTION_IMAGE_GENERATION,
+    ACTION_LUNAR_DATE_CONVERT,
     ACTION_LABELS,
     ACTION_NOTE_CREATE,
     ACTION_NOTE_DELETE,
@@ -234,6 +238,16 @@ from .device_control import (
     parse_scheduled_for,
     rank_power_targets,
     requested_device_domains,
+)
+from .lunar_calendar import (
+    LunarDateConversionRequest,
+    LunarDateParseError,
+    conversion_usage_error,
+    format_lunar_date_conversion_response,
+    is_lunar_date_conversion_request,
+    parse_lunar_date_conversion_request,
+    request_from_ai_payload,
+    unwrap_action_response,
 )
 from .models import Reminder
 from .note_flow import (
@@ -2128,7 +2142,7 @@ class ConversationalAssistantManager(NoteManagerMixin):
             candidates = self._ai_camera_agent_candidates(
                 self.ai_camera_task_entity_id
             )
-        elif action == ACTION_CALENDAR:
+        elif action in {ACTION_CALENDAR, ACTION_LUNAR_DATE_CONVERT}:
             candidates = self._conversation_agent_candidates(
                 self.zalo_conversation_agent_id
             )
@@ -2296,6 +2310,10 @@ class ConversationalAssistantManager(NoteManagerMixin):
                 ),
                 agent_manager.register_trigger(
                     SEARCH_SENTENCES, self._async_search_from_voice
+                ),
+                agent_manager.register_trigger(
+                    LUNAR_DATE_CONVERSION_SENTENCES,
+                    self._async_lunar_date_conversion_from_voice,
                 ),
                 agent_manager.register_trigger(
                     ZALO_SEND_SENTENCES, self._async_send_to_zalo_from_voice
@@ -2523,6 +2541,8 @@ class ConversationalAssistantManager(NoteManagerMixin):
 
         if _speaker_announcement_request(text) is not None:
             return ACTION_SPEAKER_ANNOUNCE
+        if is_lunar_date_conversion_request(text):
+            return ACTION_LUNAR_DATE_CONVERT
         if _zalo_send_request(text) is not None:
             return ACTION_ZALO_SEND
         note_kind = note_zalo_command_kind(text)
@@ -2538,6 +2558,7 @@ class ConversationalAssistantManager(NoteManagerMixin):
             ACTION_SEARCH,
             ACTION_WEATHER,
             ACTION_IMAGE_GENERATION,
+            ACTION_LUNAR_DATE_CONVERT,
         }:
             return builtin
 
@@ -3118,6 +3139,8 @@ class ConversationalAssistantManager(NoteManagerMixin):
 
         if _is_integration_help_request(text):
             return "help"
+        if is_lunar_date_conversion_request(text):
+            return ACTION_LUNAR_DATE_CONVERT
         if _speaker_announcement_request(text) is not None:
             return ACTION_SPEAKER_ANNOUNCE
         if _zalo_send_request(text) is not None:
@@ -3370,6 +3393,11 @@ class ConversationalAssistantManager(NoteManagerMixin):
             "• Nội dung được chuyển tiếp nguyên văn. Nếu nhận ra ngày giờ, integration tạo thêm nhắc Zalo trước thời điểm đó 15 phút.\n"
             "• Ví dụ: `Gửi Zalo yêu cầu ngày mai 8h00 tất cả nhân viên sale họp bàn chiến lược kinh doanh`.\n"
             "• Có thể đổi cách bot gọi người dùng tại General settings > Xưng hô; mặc định là `Sếp Khải`.\n\n"
+            "1️⃣7️⃣ **🌙☀️ CHUYỂN ĐỔI NGÀY ÂM LỊCH VÀ DƯƠNG LỊCH**\n"
+            "• Có trên cả Zalo và Voice Assist. Hỗ trợ cách nói tự nhiên với các từ như `đổi`, `chuyển`, `chuyển đổi`, `quy đổi`, `tra`, `tra cứu`, `xem`, `lấy`, `tìm`, `ngày âm của` hoặc `ngày dương của`.\n"
+            "• Có thể nhập ngày theo dạng `30/11/1984`, `30-11-1984`, `30.11.1984` hoặc `ngày 30 tháng 11 năm 1984`. Khi chiều chuyển đổi chưa rõ, AI được dùng để phân tích; nếu vẫn thiếu thông tin, bot hướng dẫn nhập lại.\n"
+            "• Kết quả gồm ngày âm/dương, Can Chi, tiết khí, giờ hoàng đạo và hắc đạo, hướng xuất hành, Thập nhị trực, Nhị thập bát tú, luận giải ngày và thông tin tháng nhuận. Nếu tháng âm có cả tháng thường và tháng nhuận, bot hiển thị rõ hai ngày dương tương ứng.\n"
+            "• Ví dụ: `Đổi ngày 30/11/1984 dương lịch sang âm lịch`; `Đổi 29/11/1984 âm sang dương`; `Lấy ngày âm của 30-11-1984 dương lịch`; `Ngày 29/11/1984 âm lịch là ngày dương nào`.\n\n"
             "💡 Gửi `Hướng dẫn sử dụng tích hợp` để xem lại nội dung này."
         )
 
@@ -10772,6 +10800,11 @@ class ConversationalAssistantManager(NoteManagerMixin):
             )
         if command == ACTION_ZALO_SEND:
             return await self._async_send_to_zalo_from_zalo(context)
+        if command == ACTION_LUNAR_DATE_CONVERT:
+            self._clear_zalo_pending_for_owner(context.owner_key)
+            return await self._async_lunar_date_conversion(
+                context.text, service_context, zalo=True
+            )
         if command == ACTION_SPEAKER_ANNOUNCE:
             return await self._async_announce_to_speaker_from_zalo(context)
         if command == ACTION_SEARCH:
@@ -10884,6 +10917,18 @@ class ConversationalAssistantManager(NoteManagerMixin):
                 if instructions and instructions.strip()
                 else None
             )
+        if command == ACTION_LUNAR_DATE_CONVERT:
+            try:
+                parsed_conversion = parse_lunar_date_conversion_request(
+                    effective_text
+                )
+            except LunarDateParseError:
+                parsed_conversion = False
+            return (
+                ACTION_LUNAR_DATE_CONVERT
+                if parsed_conversion is None
+                else None
+            )
 
         first_chat_turn = chat_start_request(effective_text)
         if first_chat_turn is not None:
@@ -10945,6 +10990,8 @@ class ConversationalAssistantManager(NoteManagerMixin):
                 if action == ACTION_CAMERA_ANALYSIS
                 else "calendar analysis"
                 if action == ACTION_CALENDAR
+                else "lunar/solar date parsing"
+                if action == ACTION_LUNAR_DATE_CONVERT
                 else "weather lookup"
                 if action == ACTION_WEATHER
                 else "chat response"
@@ -10962,6 +11009,8 @@ class ConversationalAssistantManager(NoteManagerMixin):
             if action == ACTION_CAMERA_ANALYSIS
             else "phân tích lịch"
             if action == ACTION_CALENDAR
+            else "phân tích yêu cầu đổi ngày âm dương"
+            if action == ACTION_LUNAR_DATE_CONVERT
             else "tra cứu thời tiết"
             if action == ACTION_WEATHER
             else "trò chuyện"
@@ -13130,6 +13179,162 @@ class ConversationalAssistantManager(NoteManagerMixin):
         response = f"{parsed.confirmation} Sẽ thông báo đến {target_names}."
         return await self._async_voice_response(user_input, response)
 
+    async def _async_ai_lunar_date_conversion_request(
+        self,
+        text: str,
+        service_context: Context | None,
+    ) -> tuple[LunarDateConversionRequest | None, list[str]]:
+        """Use configured AI agents only when deterministic direction is unclear."""
+        prompt = (
+            "You are a strict Vietnamese lunar/solar date conversion parser. "
+            "Return exactly one JSON object and no prose. Determine the user's "
+            "intended source and target calendars. Allowed conversion_type values "
+            "are lunar_to_solar and solar_to_lunar. Required fields: "
+            "conversion_type, day, month, year. Do not calculate the converted "
+            "date. If the date or direction is missing or ambiguous, return "
+            "{\"error\":\"missing_information\"}. User request: "
+            f"{text!r}"
+        )
+        candidate_groups = (
+            self._conversation_agent_candidates(
+                self.zalo_conversation_agent_id
+            ),
+            self._conversation_agent_candidates(self.ai_search_agent_id),
+        )
+        candidates: list[tuple[str, str]] = []
+        seen: set[str] = set()
+        for group in candidate_groups:
+            for agent_id, agent_name in group:
+                if agent_id == HOME_ASSISTANT_AGENT or agent_id in seen:
+                    continue
+                seen.add(agent_id)
+                candidates.append((agent_id, agent_name))
+
+        attempted: list[str] = []
+        for agent_id, agent_name in candidates:
+            attempted.append(agent_name)
+            try:
+                async with asyncio.timeout(30):
+                    result = await async_converse(
+                        hass=self.hass,
+                        text=prompt,
+                        conversation_id=None,
+                        context=service_context or Context(),
+                        language=_request_language(text),
+                        agent_id=agent_id,
+                    )
+            except Exception:  # noqa: BLE001 - safe parser failover
+                _LOGGER.exception(
+                    "Lunar date parser agent %s failed", agent_id
+                )
+                continue
+            if self._conversation_result_error_code(result):
+                continue
+            payload = self._calendar_json_object(
+                self._conversation_reply_text(result)
+            )
+            request = request_from_ai_payload(payload)
+            if request is not None:
+                return request, attempted
+        return None, attempted
+
+    @staticmethod
+    def _invalid_lunar_date_request_text(error: str) -> str:
+        """Return a formatted validation error with concrete retry examples."""
+        return (
+            "⚠️ **NGÀY CHUYỂN ĐỔI KHÔNG HỢP LỆ**\n\n"
+            f"❌ {error}\n\n"
+            "💡 Ví dụ: `Đổi ngày 30/11/1984 dương lịch sang âm lịch` "
+            "hoặc `Đổi ngày 29/11/1984 âm lịch sang dương lịch`."
+        )
+
+    async def _async_lunar_date_conversion(
+        self,
+        text: str,
+        service_context: Context | None,
+        *,
+        zalo: bool,
+    ) -> str:
+        """Resolve, execute, and fully format one lunar/solar conversion."""
+        try:
+            request = parse_lunar_date_conversion_request(text)
+        except LunarDateParseError as err:
+            return self._invalid_lunar_date_request_text(str(err))
+
+        attempted: list[str] = []
+        if request is None:
+            request, attempted = (
+                await self._async_ai_lunar_date_conversion_request(
+                    text, service_context
+                )
+            )
+        if request is None:
+            response = conversion_usage_error()
+            if attempted:
+                response = self._append_ai_attempt_summary(
+                    response,
+                    attempted,
+                    language=_request_language(text),
+                    zalo=zalo,
+                )
+            return response
+
+        if not self.hass.services.has_service(
+            LUNAR_CALENDAR_DOMAIN,
+            LUNAR_CALENDAR_SERVICE_CONVERT_DATE,
+        ):
+            return (
+                "⚠️ **CHƯA CÓ ACTION CHUYỂN ĐỔI ÂM DƯƠNG**\n\n"
+                f"Không tìm thấy action **{LUNAR_CALENDAR_DOMAIN}."
+                f"{LUNAR_CALENDAR_SERVICE_CONVERT_DATE}**. Hãy cài đặt, "
+                "khởi động hoặc kiểm tra lại tích hợp Âm lịch Việt Nam."
+            )
+
+        try:
+            response = await self.hass.services.async_call(
+                LUNAR_CALENDAR_DOMAIN,
+                LUNAR_CALENDAR_SERVICE_CONVERT_DATE,
+                request.service_data(),
+                blocking=True,
+                context=service_context,
+                return_response=True,
+            )
+        except Exception:  # noqa: BLE001 - report exact integration failure
+            _LOGGER.exception(
+                "Failed calling %s.%s with %s",
+                LUNAR_CALENDAR_DOMAIN,
+                LUNAR_CALENDAR_SERVICE_CONVERT_DATE,
+                request.service_data(),
+            )
+            return (
+                "⚠️ **CHUYỂN ĐỔI NGÀY THẤT BẠI**\n\n"
+                "Action Âm lịch Việt Nam phát sinh lỗi. Hãy kiểm tra nhật ký "
+                "Home Assistant và thử lại."
+            )
+
+        payload = unwrap_action_response(response)
+        if payload is None:
+            return (
+                "⚠️ **ACTION KHÔNG TRẢ VỀ KẾT QUẢ**\n\n"
+                f"Action **{LUNAR_CALENDAR_DOMAIN}."
+                f"{LUNAR_CALENDAR_SERVICE_CONVERT_DATE}** không trả về dữ liệu "
+                "ngày âm/dương. Hãy kiểm tra action có hỗ trợ response data."
+            )
+        return format_lunar_date_conversion_response(payload, request)
+
+    async def _async_lunar_date_conversion_from_voice(
+        self,
+        user_input: ConversationInput,
+        _result: RecognizeResult,
+    ) -> str:
+        """Convert a lunar/solar date through Voice Assist."""
+        self._clear_pending_for_source(self._source_keys(user_input))
+        self._sync_pending_followup_trigger()
+        response = await self._async_lunar_date_conversion(
+            user_input.text, user_input.context, zalo=False
+        )
+        return await self._async_voice_response(user_input, response)
+
     async def _async_search_from_voice(
         self, user_input: ConversationInput, result: RecognizeResult
     ) -> str:
@@ -13316,6 +13521,10 @@ class ConversationalAssistantManager(NoteManagerMixin):
             )
             return await self._async_voice_response(
                 user_input, reply, ai_generated=True
+            )
+        if command.action == ACTION_LUNAR_DATE_CONVERT:
+            return await self._async_lunar_date_conversion_from_voice(
+                transformed_input, result
             )
         if command.action == ACTION_IMAGE_GENERATION:
             return await self._async_voice_response(

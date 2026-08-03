@@ -33,6 +33,7 @@ ACTION_WEATHER = "weather"
 ACTION_IMAGE_GENERATION = "image_generation"
 ACTION_ZALO_SEND = "zalo_send"
 ACTION_SPEAKER_ANNOUNCE = "speaker_announce"
+ACTION_LUNAR_DATE_CONVERT = "lunar_date_convert"
 
 SUPPORTED_ACTIONS = {
     ACTION_CAMERA,
@@ -53,6 +54,7 @@ SUPPORTED_ACTIONS = {
     ACTION_IMAGE_GENERATION,
     ACTION_ZALO_SEND,
     ACTION_SPEAKER_ANNOUNCE,
+    ACTION_LUNAR_DATE_CONVERT,
 }
 
 MAX_LEARNED_COMMANDS = 100
@@ -68,6 +70,7 @@ REQUEST_ACTIONS = {
     ACTION_IMAGE_GENERATION,
     ACTION_ZALO_SEND,
     ACTION_SPEAKER_ANNOUNCE,
+    ACTION_LUNAR_DATE_CONVERT,
 }
 
 ACTION_LABELS = {
@@ -89,6 +92,7 @@ ACTION_LABELS = {
     ACTION_IMAGE_GENERATION: "tạo ảnh bằng AI và gửi về Zalo",
     ACTION_ZALO_SEND: "gửi nội dung đến Zalo đã cấu hình",
     ACTION_SPEAKER_ANNOUNCE: "phát nội dung thông báo ra loa TTS",
+    ACTION_LUNAR_DATE_CONVERT: "chuyển đổi ngày âm lịch và dương lịch",
 }
 
 # Explicit labels also let users teach short targets such as "để camera" or
@@ -143,6 +147,9 @@ _TARGET_LABELS = {
     "notify zalo": ACTION_ZALO_SEND,
     "announce on speaker": ACTION_SPEAKER_ANNOUNCE,
     "speaker announcement": ACTION_SPEAKER_ANNOUNCE,
+    "convert lunar date": ACTION_LUNAR_DATE_CONVERT,
+    "convert solar date": ACTION_LUNAR_DATE_CONVERT,
+    "lunar solar conversion": ACTION_LUNAR_DATE_CONVERT,
     "generate image": ACTION_IMAGE_GENERATION,
     "generate an image": ACTION_IMAGE_GENERATION,
     "create image": ACTION_IMAGE_GENERATION,
@@ -207,6 +214,11 @@ _TARGET_LABELS = {
     "thong bao ra loa": ACTION_SPEAKER_ANNOUNCE,
     "gui loa": ACTION_SPEAKER_ANNOUNCE,
     "nhan loa": ACTION_SPEAKER_ANNOUNCE,
+    "doi ngay am duong": ACTION_LUNAR_DATE_CONVERT,
+    "chuyen doi ngay am duong": ACTION_LUNAR_DATE_CONVERT,
+    "quy doi ngay am duong": ACTION_LUNAR_DATE_CONVERT,
+    "doi ngay am sang duong": ACTION_LUNAR_DATE_CONVERT,
+    "doi ngay duong sang am": ACTION_LUNAR_DATE_CONVERT,
     "tao anh": ACTION_IMAGE_GENERATION,
     "tao mot anh": ACTION_IMAGE_GENERATION,
     "tao buc anh": ACTION_IMAGE_GENERATION,
@@ -636,6 +648,7 @@ def canonical_text(
         ACTION_ZALO_SEND: "gửi zalo",
         ACTION_SPEAKER_ANNOUNCE: "thông báo loa",
         ACTION_CAMERA_ANALYSIS: "phân tích camera",
+        ACTION_LUNAR_DATE_CONVERT: "đổi ngày âm dương",
     }
     prefix = prefixes.get(action, "")
     return f"{prefix} {request}".strip() if prefix else request

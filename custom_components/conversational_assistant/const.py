@@ -94,6 +94,10 @@ ZALO_TYPE_USER = "0"
 ZALO_TYPE_GROUP = "1"
 ZALO_REMINDER_ADVANCE_MINUTES = 15
 
+# Vietnamese lunar/solar date conversion action supplied by am_lich_viet_nam.
+LUNAR_CALENDAR_DOMAIN = "am_lich_viet_nam"
+LUNAR_CALENDAR_SERVICE_CONVERT_DATE = "convert_date"
+
 ZALO_WEBHOOK_SEEN_MESSAGE_LIMIT = 512
 
 # Keep text replies below the practical single-message size accepted by Zalo
@@ -193,6 +197,27 @@ DEVICE_CONTROL_SENTENCES = [
     "[please ](turn on|turn off|set|change) (swing|oscillation) {request}",
     "[please ](set|change) fan direction",
     "[please ](set|change) fan direction {request}",
+]
+
+LUNAR_DATE_CONVERSION_SENTENCES = [
+    "[hãy ](đổi|chuyển|chuyển đổi|quy đổi) ngày {request} (âm|âm lịch) sang (dương|dương lịch)",
+    "[hãy ](đổi|chuyển|chuyển đổi|quy đổi) {request} (âm|âm lịch) sang (dương|dương lịch)",
+    "[hãy ](đổi|chuyển|chuyển đổi|quy đổi) ngày {request} (dương|dương lịch) sang (âm|âm lịch)",
+    "[hãy ](đổi|chuyển|chuyển đổi|quy đổi) {request} (dương|dương lịch) sang (âm|âm lịch)",
+    "[hãy ](tra|tra cứu|xem|lấy|tìm) ngày âm của {request} (dương|dương lịch)",
+    "[hãy ](tra|tra cứu|xem|lấy|tìm) ngày dương của {request} (âm|âm lịch)",
+    "[hãy ](tra|tra cứu|xem|lấy|tìm) (lịch âm|lịch dương) {request}",
+    "[hãy ]ngày âm tương ứng với {request} (dương|dương lịch)",
+    "[hãy ]ngày dương tương ứng với {request} (âm|âm lịch)",
+    "[hãy ]ngày {request} (dương|dương lịch) là ngày âm nào",
+    "[hãy ]ngày {request} (âm|âm lịch) là ngày dương nào",
+    "[hãy ]{request} (dương|dương lịch) là bao nhiêu (âm|âm lịch)",
+    "[hãy ]{request} (âm|âm lịch) là bao nhiêu (dương|dương lịch)",
+    "[hãy ](đổi|chuyển|chuyển đổi|quy đổi|tra cứu) ngày âm dương {request}",
+    "[please ]convert {request} from lunar to solar",
+    "[please ]convert {request} from lunar to gregorian",
+    "[please ]convert {request} from solar to lunar",
+    "[please ]convert {request} from gregorian to lunar",
 ]
 
 # Direct Zalo forwarding from Voice Assist or an inbound Zalo command.
