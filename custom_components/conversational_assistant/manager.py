@@ -3754,7 +3754,7 @@ class ConversationalAssistantManager(NoteManagerMixin):
         ]
 
     def _zalo_webhook_account_selection(self) -> str:
-        """Return the zalo_bot account selector used for webhook replies."""
+        """Return the default zalo_bot selector used for webhook replies."""
         configured = str(
             self._option(CONF_ZALO_WEBHOOK_ACCOUNT_SELECTION, "") or ""
         ).strip()
@@ -3772,12 +3772,38 @@ class ConversationalAssistantManager(NoteManagerMixin):
             if len(accounts) > 1:
                 _LOGGER.warning(
                     "Several Zalo sending accounts are configured; using %s "
-                    "for webhook replies. Set %s to select one explicitly",
+                    "as the default webhook reply account. Configure an exact "
+                    "Zalo target for each chat to route replies correctly",
                     accounts[0],
-                    CONF_ZALO_WEBHOOK_ACCOUNT_SELECTION,
                 )
             return accounts[0]
         return ""
+
+    def _zalo_account_selection_for_context(
+        self, context: ZaloWebhookContext
+    ) -> str:
+        """Return the best zalo_bot account for one incoming conversation.
+
+        An exact configured destination wins so installations with several Zalo
+        accounts do not accidentally send typing or replies through the first
+        configured account. The dedicated webhook account remains the fallback
+        for conversations that are not listed as named Zalo destinations.
+        """
+        for target in self._configured_zalo_targets():
+            if (
+                str(target.get(CONF_ZALO_THREAD_ID, "") or "").strip()
+                != context.thread_id
+                or str(target.get(CONF_ZALO_TYPE, DEFAULT_ZALO_TYPE) or "").strip()
+                != context.thread_type
+            ):
+                continue
+            account_selection = str(
+                target.get(CONF_ZALO_ACCOUNT_SELECTION, "") or ""
+            ).strip()
+            if account_selection:
+                return account_selection
+
+        return self._zalo_webhook_account_selection()
 
     @staticmethod
     def _truthy(value: Any) -> bool:
@@ -4448,7 +4474,7 @@ class ConversationalAssistantManager(NoteManagerMixin):
             )
             return False
 
-        account_selection = self._zalo_webhook_account_selection()
+        account_selection = self._zalo_account_selection_for_context(context)
         if not account_selection:
             _LOGGER.error(
                 "Cannot reply to Zalo webhook: configure %s or at least one "
@@ -4561,7 +4587,7 @@ class ConversationalAssistantManager(NoteManagerMixin):
                 "tạo nhắc hẹn 18h30 ngày mai đi tập thể dục."
             )
 
-        account_selection = self._zalo_webhook_account_selection()
+        account_selection = self._zalo_account_selection_for_context(context)
         if not account_selection:
             return (
                 "Chưa cấu hình tài khoản gửi Zalo. Hãy đặt mục "
@@ -5540,33 +5566,50 @@ class ConversationalAssistantManager(NoteManagerMixin):
         account_selection: str,
         service_context: Context | None = None,
     ) -> bool:
-        """Show Zalo typing status without delaying or failing a feature."""
+        """Dispatch Zalo typing and confirm the service action completed."""
         if not thread_id or not account_selection:
+            _LOGGER.warning(
+                "Skipped Zalo typing event because thread_id or "
+                "account_selection is empty"
+            )
             return False
         if not self.hass.services.has_service(
             ZALO_DOMAIN, ZALO_SERVICE_SEND_TYPING_EVENT
         ):
-            return False
-
-        try:
-            await self.hass.services.async_call(
+            _LOGGER.warning(
+                "Cannot send Zalo typing event because %s.%s is unavailable",
                 ZALO_DOMAIN,
                 ZALO_SERVICE_SEND_TYPING_EVENT,
-                {
-                    "thread_id": thread_id,
-                    "account_selection": account_selection,
-                },
-                blocking=False,
-                context=service_context,
-            )
-        except Exception:  # noqa: BLE001 - typing is best effort only
-            _LOGGER.debug(
-                "Failed sending Zalo typing event to thread %s",
-                thread_id,
-                exc_info=True,
             )
             return False
-        return True
+
+        for attempt in range(1, 3):
+            try:
+                await self.hass.services.async_call(
+                    ZALO_DOMAIN,
+                    ZALO_SERVICE_SEND_TYPING_EVENT,
+                    {
+                        "thread_id": thread_id,
+                        "account_selection": account_selection,
+                    },
+                    blocking=True,
+                    context=service_context,
+                )
+            except Exception:  # noqa: BLE001 - typing must not fail a feature
+                if attempt == 1:
+                    await asyncio.sleep(0.2)
+                    continue
+                _LOGGER.warning(
+                    "Failed sending Zalo typing event to thread %s with "
+                    "account %s after %s attempts",
+                    thread_id,
+                    account_selection,
+                    attempt,
+                    exc_info=True,
+                )
+                return False
+            return True
+        return False
 
     async def _async_send_zalo_typing_event(
         self,
@@ -5576,7 +5619,7 @@ class ConversationalAssistantManager(NoteManagerMixin):
         """Show typing in the Zalo conversation that sent the request."""
         return await self._async_send_zalo_typing_to_target(
             context.thread_id,
-            self._zalo_webhook_account_selection(),
+            self._zalo_account_selection_for_context(context),
             service_context,
         )
 
@@ -5649,7 +5692,7 @@ class ConversationalAssistantManager(NoteManagerMixin):
         service_context: Context | None,
     ) -> tuple[bool, str | None]:
         """Send captured camera images to the originating Zalo conversation."""
-        account_selection = self._zalo_webhook_account_selection()
+        account_selection = self._zalo_account_selection_for_context(context)
         if not account_selection:
             return False, (
                 "Chưa có tài khoản Zalo gửi ảnh. Hãy cấu hình tài khoản "
@@ -5847,7 +5890,7 @@ class ConversationalAssistantManager(NoteManagerMixin):
         service_context: Context | None,
     ) -> tuple[int, list[str]]:
         """Send each analyzed image back to the originating Zalo chat."""
-        account_selection = self._zalo_webhook_account_selection()
+        account_selection = self._zalo_account_selection_for_context(context)
         if not account_selection:
             return 0, ["Chưa cấu hình tài khoản Zalo trả lời webhook"]
         if not self.hass.services.has_service(
@@ -8171,7 +8214,7 @@ class ConversationalAssistantManager(NoteManagerMixin):
                 "**ai_task.generate_image** và thử lại nhé."
             )
 
-        account_selection = self._zalo_webhook_account_selection()
+        account_selection = self._zalo_account_selection_for_context(context)
         if not account_selection:
             if language == "en":
                 return (
@@ -13334,6 +13377,9 @@ class ConversationalAssistantManager(NoteManagerMixin):
             return {"ok": True, "handled": False, "reason": "duplicate"}
 
         if reason == "invocation_keyword_only":
+            typing_event_sent = await self._async_send_zalo_typing_event(
+                context, service_context
+            )
             keyword = self.zalo_invocation_keyword.replace("`", "'")
             reply_sent = await self._async_send_zalo_webhook_reply(
                 context,
@@ -13344,6 +13390,7 @@ class ConversationalAssistantManager(NoteManagerMixin):
                 "ok": True,
                 "handled": True,
                 "reason": reason,
+                "typing_event_sent": typing_event_sent,
                 "reply_sent": reply_sent,
             }
 
@@ -13392,7 +13439,9 @@ class ConversationalAssistantManager(NoteManagerMixin):
         # Start typing immediately and keep refreshing it for normal Zalo
         # features until the final text/image response has actually been sent.
         self._pause_existing_zalo_chat_for_request(context)
-        await self._async_send_zalo_typing_event(context, service_context)
+        typing_event_sent = await self._async_send_zalo_typing_event(
+            context, service_context
+        )
         typing_stop = asyncio.Event()
         typing_task = self.hass.async_create_task(
             self._async_keep_zalo_typing_active(
@@ -13407,6 +13456,7 @@ class ConversationalAssistantManager(NoteManagerMixin):
                 return {
                     "ok": True,
                     "handled": True,
+                    "typing_event_sent": typing_event_sent,
                     "reply_sent": reply.sent,
                     "response_type": reply.response_type,
                 }
@@ -13415,6 +13465,7 @@ class ConversationalAssistantManager(NoteManagerMixin):
                     "ok": True,
                     "handled": False,
                     "reason": "not_a_command",
+                    "typing_event_sent": typing_event_sent,
                 }
 
             reply = await self._async_prepare_zalo_reply(
@@ -13429,6 +13480,7 @@ class ConversationalAssistantManager(NoteManagerMixin):
             return {
                 "ok": True,
                 "handled": True,
+                "typing_event_sent": typing_event_sent,
                 "reply_sent": reply_sent,
             }
         finally:
