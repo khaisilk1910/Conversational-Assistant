@@ -88,6 +88,7 @@ from .const import (
     CONF_AI_CAMERA_TASK_ENTITY_ID,
     CONF_AI_IMAGE_TASK_ENTITY_ID,
     CONF_AI_SEARCH_AGENT_ID,
+    CANCEL_PENDING_SENTENCES,
     CANCEL_SENTENCES,
     COMMAND_DELETE_SENTENCES,
     COMMAND_LEARN_SENTENCES,
@@ -108,7 +109,6 @@ from .const import (
     CONF_WEATHER_STORM_ENABLED,
     CONF_WEATHER_STORM_TIMES,
     CONF_WEATHER_STORM_ZALO_TARGETS,
-    CONF_CONFIRM_TARGETS,
     CONF_MOBILE_DEVICE_ID,
     CONF_MOBILE_TARGETS,
     CONF_NAMED_TARGET_ENABLED,
@@ -152,7 +152,6 @@ from .const import (
     DEFAULT_WEATHER_LOCATION,
     DEFAULT_WEATHER_STORM_ENABLED,
     DEFAULT_WEATHER_STORM_TIMES,
-    DEFAULT_CONFIRM_TARGETS,
     DEFAULT_DISMISS_ON_CLEAR,
     DEFAULT_SPEAKER_ENABLED,
     DEFAULT_TTS_LANGUAGE,
@@ -348,8 +347,28 @@ _INTEGRATION_COMMANDS_EXACT_PHRASES = frozenset(
         "cac lenh cua tich hop",
         "xem lenh tich hop",
         "xem cac lenh tich hop",
+        "xem lenh cua tich hop",
+        "xem cac lenh cua tich hop",
+        "cho xem lenh tich hop",
+        "cho xem cac lenh tich hop",
+        "cho toi xem lenh tich hop",
+        "cho toi xem cac lenh tich hop",
+        "cho xem lenh cua tich hop",
+        "cho xem cac lenh cua tich hop",
+        "cho toi xem lenh cua tich hop",
+        "cho toi xem cac lenh cua tich hop",
+        "liet ke lenh tich hop",
+        "liet ke cac lenh tich hop",
+        "liet ke lenh cua tich hop",
+        "liet ke cac lenh cua tich hop",
         "danh sach lenh tich hop",
         "danh sach cac lenh tich hop",
+        "danh sach lenh cua tich hop",
+        "danh sach cac lenh cua tich hop",
+        "xem danh sach lenh tich hop",
+        "xem danh sach cac lenh tich hop",
+        "xem danh sach lenh cua tich hop",
+        "xem danh sach cac lenh cua tich hop",
     }
 )
 
@@ -1242,7 +1261,16 @@ class ConversationalAssistantManager(NoteManagerMixin):
         self._zalo_chat_timeout_tasks: dict[str, asyncio.Task[Any]] = {}
         self._zalo_chat_locks: dict[str, asyncio.Lock] = {}
         self._zalo_background_tasks: set[asyncio.Task[Any]] = set()
+        self._zalo_background_tasks_by_owner: dict[
+            str, set[asyncio.Task[Any]]
+        ] = {}
         self._speaker_announcement_tasks: set[asyncio.Task[Any]] = set()
+        self._speaker_announcement_tasks_by_owner: dict[
+            str, set[asyncio.Task[Any]]
+        ] = {}
+        self._speaker_announcement_tasks_by_source: dict[
+            str, set[asyncio.Task[Any]]
+        ] = {}
         # Serialize output per media player while still allowing different
         # speakers to play concurrently. This prevents overlapping requests
         # from racing on the same speaker.
@@ -2690,6 +2718,20 @@ class ConversationalAssistantManager(NoteManagerMixin):
         """Return whether a Zalo chat may reply without the invocation keyword."""
         if self._zalo_owner_has_pending_confirmation(owner_key):
             return True
+        if any(
+            not task.done()
+            for task in self._zalo_background_tasks_by_owner.get(
+                owner_key, set()
+            )
+        ):
+            return True
+        if any(
+            not task.done()
+            for task in self._speaker_announcement_tasks_by_owner.get(
+                owner_key, set()
+            )
+        ):
+            return True
         session = self._zalo_chat_sessions.get(owner_key)
         return session is not None and session.expires_at > dt_util.now()
 
@@ -3119,6 +3161,10 @@ class ConversationalAssistantManager(NoteManagerMixin):
                     self._async_delete_learned_command_from_voice,
                 ),
                 agent_manager.register_trigger(
+                    CANCEL_PENDING_SENTENCES,
+                    self._async_cancel_pending_from_voice,
+                ),
+                agent_manager.register_trigger(
                     CREATE_SENTENCES, self._async_create_from_voice
                 ),
                 agent_manager.register_trigger(
@@ -3262,12 +3308,15 @@ class ConversationalAssistantManager(NoteManagerMixin):
         if background_tasks:
             await asyncio.gather(*background_tasks, return_exceptions=True)
         self._zalo_background_tasks.clear()
+        self._zalo_background_tasks_by_owner.clear()
         speaker_tasks = tuple(self._speaker_announcement_tasks)
         for task in speaker_tasks:
             task.cancel()
         if speaker_tasks:
             await asyncio.gather(*speaker_tasks, return_exceptions=True)
         self._speaker_announcement_tasks.clear()
+        self._speaker_announcement_tasks_by_owner.clear()
+        self._speaker_announcement_tasks_by_source.clear()
         self._speaker_locks.clear()
         if self._storage_loaded:
             await self._store.async_save(self._serialize())
@@ -4525,58 +4574,62 @@ class ConversationalAssistantManager(NoteManagerMixin):
         """Return the compact keyword catalog with one example per feature."""
         keyword = self._zalo_invocation_keyword_markdown()
         if self.zalo_invocation_keyword_enabled:
-            zalo_rule = (
-                f"🔑 Trên Zalo, thêm {keyword} trước mỗi yêu cầu mới."
-            )
+            zalo_rule = f"🔑 Yêu cầu Zalo mới: thêm {keyword} ở đầu."
         else:
             zalo_rule = "🔑 Zalo hiện không bắt buộc từ khóa gọi tích hợp."
 
         return (
             "⌨️ **CÁC LỆNH TÍCH HỢP**\n\n"
-            f"{zalo_rule}\n\n"
-            "• **Hướng dẫn:** trợ giúp, hướng dẫn, hướng dẫn sử dụng, hướng dẫn tích hợp. "
-            "VD: `Hướng dẫn tích hợp`\n\n"
-            "• **Danh sách lệnh:** lệnh tích hợp, các lệnh tích hợp. "
+            f"{zalo_rule}\n"
+            "🛑 Khi đang ở bất kỳ phiên nào, gửi **Hủy** để dừng ngay; "
+            "không cần nhập lại từ khóa gọi Zalo.\n\n"
+            "📘 **Hướng dẫn** — trợ giúp, hướng dẫn, hướng dẫn sử dụng, "
+            "hướng dẫn tích hợp.\nVD: `Hướng dẫn tích hợp`\n\n"
+            "⌨️ **Xem lệnh** — lệnh tích hợp, các lệnh tích hợp, "
+            "xem lệnh tích hợp, xem lệnh của tích hợp.\n"
             "VD: `Các lệnh tích hợp`\n\n"
-            "• **Thiết bị:** bật, tắt, mở, đóng, khóa, mở khóa, tăng, giảm, đặt, chỉnh, "
-            "chuyển, đổi, dừng, tạm dừng, tiếp tục, phát, quét, dọn dẹp, làm sạch, "
-            "kiểm tra, xem trạng thái, trạng thái, báo cáo, hẹn giờ, đặt hẹn giờ, "
-            "lên lịch, đặt lịch. "
+            "🏠 **Thiết bị** — bật, tắt, mở, đóng, khóa, mở khóa, tăng, "
+            "giảm, đặt, chỉnh, chuyển, đổi, dừng, tạm dừng, tiếp tục, phát, "
+            "quét, dọn dẹp, làm sạch, xem trạng thái, hẹn giờ, lên lịch.\n"
             "VD: `Tắt quạt phòng ngủ sau 30 phút`\n\n"
-            "• **Thời tiết và bão:** thời tiết, xem/kiểm tra/tra cứu/dự báo thời tiết, "
-            "kiểm tra/tin/tình hình bão, có bão không, áp thấp nhiệt đới, có mưa không, "
-            "khả năng mưa, xác suất mưa, lượng mưa, chỉ số UV, nhiệt độ, độ ẩm. "
+            "🌦️ **Thời tiết và bão** — thời tiết, dự báo thời tiết, có mưa "
+            "không, khả năng mưa, nhiệt độ, độ ẩm, UV, kiểm tra bão, áp thấp.\n"
             "VD: `Thời tiết Hà Nội 5 ngày tới`\n\n"
-            "• **Nhắc hẹn:** nhắc, hẹn, nhắc tôi, tạo/đặt/thêm nhắc hẹn, nhắc nhở, "
-            "lịch nhắc, hẹn giờ; liệt kê/đọc/xem danh sách; hủy/xóa. "
-            "VD: `Nhắc Zalo Khải 20 giờ uống thuốc`\n\n"
-            "• **Lịch và sự kiện:** lịch, xem/kiểm tra/tra/tra cứu lịch, sự kiện, "
-            "tạo/thêm/đặt/lên lịch, cuộc họp, cuộc hẹn. "
+            "⏰ **Nhắc hẹn** — nhắc, hẹn, nhắc tôi, tạo/đặt/thêm nhắc hẹn, "
+            "xem danh sách, hủy hoặc xóa nhắc hẹn. Gọi thẳng tên Mobile, "
+            "Zalo hoặc loa; nếu không nêu nơi nhận sẽ hiện danh sách chọn.\n"
+            "VD: `Nhắc Zalo Khải 1 phút nữa uống thuốc`\n\n"
+            "📅 **Lịch và sự kiện** — xem lịch, kiểm tra lịch, sự kiện, "
+            "tạo/thêm/đặt/lên lịch cuộc họp hoặc cuộc hẹn.\n"
             "VD: `Tạo sự kiện họp sale ngày mai lúc 8 giờ`\n\n"
-            "• **Thông báo loa:** thông báo loa, báo loa, báo ra loa, thông báo ra loa, "
-            "gửi loa, nhắn loa. VD: `Báo loa Phòng Ngủ xuống ăn cơm`\n\n"
-            "• **Gửi Zalo:** gửi Zalo, thông báo Zalo, báo Zalo. "
+            "🔊 **Thông báo loa** — thông báo loa, báo loa, báo ra loa, "
+            "thông báo ra loa, gửi loa, nhắn loa.\n"
+            "VD: `Báo loa Phòng Ngủ xuống ăn cơm`\n\n"
+            "📨 **Gửi Zalo** — gửi Zalo, thông báo Zalo, báo Zalo.\n"
             "VD: `Thông báo Zalo Khải xuống ăn cơm`\n\n"
-            "• **Chụp camera:** chụp/lấy ảnh hoặc hình từ camera, máy quay, cam; "
-            "chụp camera, chụp cam. VD: `Chụp Cam Cổng`\n\n"
-            "• **Phân tích camera:** phân tích cam/camera, kiểm tra cam/camera, "
-            "xem và phân tích cam/camera. VD: `Phân tích Cam Cổng`\n\n"
-            "• **Ghi chú:** thêm/tạo/lưu/viết ghi chú hoặc ghi nhớ; xem/liệt kê/đọc; "
-            "sửa/chỉnh sửa/cập nhật/đổi; xóa/hủy. VD: `Ghi chú mua sữa`\n\n"
-            "• **Trò chuyện AI:** trò chuyện đi, tám đi, buôn đi. "
-            "VD: `Trò chuyện đi`\n\n"
-            "• **Tìm kiếm:** tìm thông tin, tìm kiếm, tìm kiếm trên mạng, tìm trên mạng, "
-            "tra cứu. VD: `Tìm thông tin giá vàng hôm nay`\n\n"
-            "• **Tạo ảnh AI:** tạo một bức ảnh, tạo bức ảnh, tạo một ảnh, tạo ảnh. "
-            "VD: `Tạo ảnh ngôi nhà bên hồ`\n\n"
-            "• **Âm dương lịch:** âm lịch, lịch âm, dương lịch, lịch dương, thứ mấy, "
-            "đổi/chuyển/chuyển đổi/quy đổi, tra/tra cứu/xem ngày. "
+            "📸 **Chụp camera** — chụp/lấy ảnh hoặc hình từ camera, máy quay, "
+            "cam; chụp camera, chụp cam.\nVD: `Chụp Cam Cổng`\n\n"
+            "🔎 **Phân tích camera** — phân tích cam/camera, kiểm tra "
+            "cam/camera, xem và phân tích cam/camera.\n"
+            "VD: `Phân tích Cam Cổng`\n\n"
+            "📝 **Ghi chú** — thêm/tạo/lưu/viết, xem/liệt kê/đọc, "
+            "sửa/cập nhật/đổi, xóa/hủy ghi chú.\n"
+            "VD: `Ghi chú mua sữa`\n\n"
+            "💬 **Trò chuyện AI** — trò chuyện đi, tám đi, buôn đi; "
+            "kết thúc để đóng phiên.\nVD: `Trò chuyện đi`\n\n"
+            "🔍 **Tìm kiếm Internet** — tìm thông tin, tìm kiếm, tìm trên mạng, "
+            "tra cứu.\nVD: `Tìm thông tin giá vàng hôm nay`\n\n"
+            "🎨 **Tạo ảnh AI** — tạo một bức ảnh, tạo bức ảnh, tạo một ảnh, "
+            "tạo ảnh.\nVD: `Tạo ảnh ngôi nhà bên hồ`\n\n"
+            "🌙 **Âm dương lịch** — âm lịch, lịch âm, dương lịch, lịch dương, "
+            "thứ mấy, đổi/chuyển/quy đổi, tra/xem ngày.\n"
             "VD: `Đổi 30/11/1984 sang âm lịch`\n\n"
-            "• **Bộ nhớ câu lệnh:** học/dạy/thêm câu lệnh, thêm cách nói, "
-            "danh sách/liệt kê/xem câu lệnh đã học, xóa/quên câu lệnh. "
+            "🧠 **Bộ nhớ câu lệnh** — học/dạy/thêm câu lệnh, thêm cách nói, "
+            "xem câu lệnh đã học, xóa/quên câu lệnh.\n"
             "VD: `Học câu lệnh xem cổng để chụp Cam Cổng`\n\n"
-            "• **Điều khiển luồng:** hủy, chọn, xác nhận, gửi đến, thông báo đến, "
-            "tất cả. VD: `Hủy`\n\n"
+            "🛑 **Điều khiển phiên** — hủy, hủy yêu cầu, hủy phiên, "
+            "dừng yêu cầu, dừng phiên, kết thúc phiên, bỏ yêu cầu vừa rồi.\n"
+            "VD: `Hủy`\n\n"
             "💡 Tên Mobile, Zalo, loa và camera là tên đã đặt trong Settings."
         )
 
@@ -4585,45 +4638,59 @@ class ConversationalAssistantManager(NoteManagerMixin):
         keyword = self._zalo_invocation_keyword_markdown()
         if self.zalo_invocation_keyword_enabled:
             zalo_rule = (
-                f"• Zalo: bắt đầu yêu cầu mới bằng {keyword}. "
-                "Khi bot đang chờ chọn hoặc xác nhận, chỉ cần trả lời trực tiếp.\n"
+                f"• Yêu cầu Zalo mới phải bắt đầu bằng {keyword}. "
+                "Khi bot đang chờ chọn, xác nhận hoặc nhập tiếp nội dung, "
+                "chỉ cần trả lời trực tiếp.\n"
             )
         else:
-            zalo_rule = "• Zalo: hiện không bắt buộc từ khóa gọi tích hợp.\n"
+            zalo_rule = "• Zalo hiện không bắt buộc từ khóa gọi tích hợp.\n"
 
         return (
             "📘 **HƯỚNG DẪN CONVERSATIONAL ASSISTANT**\n\n"
+            "🔑 **Gọi tích hợp**\n"
             f"{zalo_rule}"
-            "• Gửi **Hủy** để dừng luồng đang chờ; thời gian chọn/xác nhận là 120 giây.\n\n"
+            "• Gửi `Hướng dẫn tích hợp` để xem hướng dẫn này.\n"
+            "• Nếu nội dung sau từ khóa gọi Zalo không khớp tính năng nào, "
+            "tích hợp sẽ tự phản hồi danh sách lệnh.\n"
+            "• Gửi `Lệnh tích hợp`, `Các lệnh tích hợp`, "
+            "`Xem lệnh tích hợp` hoặc `Xem lệnh của tích hợp` để xem toàn bộ "
+            "từ khóa; mỗi tính năng có một ví dụ.\n\n"
+            "🛑 **Hủy phiên ngay lập tức**\n"
+            "• Trong bất kỳ bước nào, gửi **Hủy**, **Hủy yêu cầu**, "
+            "**Hủy phiên**, **Dừng yêu cầu**, **Dừng phiên**, "
+            "**Kết thúc phiên** hoặc **Bỏ yêu cầu vừa rồi**.\n"
+            "• Lệnh hủy không cần từ khóa gọi Zalo và được ưu tiên trước mọi "
+            "lựa chọn, xác nhận, ghi chú, nhắc hẹn, thiết bị, lịch, camera, "
+            "gửi Zalo, thông báo loa, trò chuyện và tác vụ AI đang xử lý.\n"
+            "• Thời gian chờ chọn hoặc xác nhận là 120 giây.\n\n"
             "🏠 **Thiết bị**\n"
-            "• Bật/tắt, tăng/giảm, đổi chế độ điều hòa hoặc quạt; hỗ trợ hẹn giờ.\n"
-            "• Ví dụ: `Tăng điều hòa phòng ngủ 2 độ`; `Tắt quạt sau 30 phút`.\n\n"
+            "• Điều khiển, xem trạng thái, đổi chế độ điều hòa/quạt và hẹn giờ.\n"
+            "• Ví dụ: `Tắt quạt phòng ngủ sau 30 phút`.\n\n"
             "🌦️ **Thời tiết và bão**\n"
-            "• Hỏi hiện tại hoặc tối đa 7 ngày; dữ liệu trực tuyến lấy bằng AI Search.\n"
-            "• Ví dụ: `Thời tiết Hà Nội 5 ngày tới`; `Kiểm tra bão`.\n\n"
+            "• Hỏi hiện tại hoặc tối đa 7 ngày; thời tiết trực tuyến dùng AI Search.\n"
+            "• Ví dụ: `Thời tiết Hà Nội 5 ngày tới`.\n\n"
             "⏰ **Nhắc hẹn và lịch**\n"
-            "• Tạo, xem, sửa, xóa nhắc hẹn hoặc sự kiện; hỗ trợ lặp lại và nhiều nơi nhận.\n"
-            "• Có thể gọi thẳng tên Mobile, Zalo hoặc loa: `Nhắc Zalo Khải 20 giờ uống thuốc`.\n\n"
-            "🔊 **Thông báo loa**\n"
-            "• Gọi thẳng tên đã đặt: `Báo loa Phòng Ngủ xuống ăn cơm`.\n"
-            "• Không có tên thì chọn một, nhiều loa hoặc **Tất cả**. Loa bận được chờ và kiểm tra lại.\n\n"
-            "📨 **Gửi Zalo**\n"
-            "• Gọi thẳng tên đã đặt: `Thông báo Zalo Khải xuống ăn cơm`.\n"
-            "• Không có tên thì bot cho chọn; nội dung có ngày giờ tạo nhắc trước 15 phút.\n\n"
+            "• Tạo, xem, sửa, xóa nhắc hẹn hoặc sự kiện; hỗ trợ lặp lại và "
+            "nhiều nơi nhận. Gọi thẳng tên Mobile, Zalo hoặc loa đã đặt; nếu "
+            "không nêu nơi nhận, tích hợp sẽ hiện danh sách để chọn.\n"
+            "• Ví dụ: `Nhắc Zalo Khải 1 phút nữa uống thuốc`.\n\n"
+            "🔊 **Loa và Zalo**\n"
+            "• Gọi thẳng tên đã đặt hoặc chọn một, nhiều nơi nhận hay tất cả.\n"
+            "• Ví dụ: `Báo loa Phòng Ngủ xuống ăn cơm`.\n\n"
             "📸 **Camera**\n"
-            "• Gọi thẳng tên đã đặt: `Chụp Cam Cổng`; `Phân tích Cam Cổng`.\n"
-            "• Không có tên thì bot hiển thị danh sách camera để chọn.\n\n"
-            "📝 **Ghi chú và trò chuyện**\n"
-            "• Thêm, xem, sửa, xóa ghi chú; `Trò chuyện` để mở phiên AI và `Kết thúc` để đóng.\n\n"
-            "🤖 **AI và bộ nhớ câu lệnh**\n"
-            "• `Tìm thông tin...`, `Tạo ảnh...`, `Học câu lệnh...`, xem hoặc xóa câu lệnh đã học.\n\n"
+            "• Chụp hoặc phân tích trực tiếp bằng tên camera đã đặt.\n"
+            "• Ví dụ: `Chụp Cam Cổng`.\n\n"
+            "📝 **Ghi chú, trò chuyện và AI**\n"
+            "• Quản lý ghi chú, trò chuyện AI, tìm kiếm Internet, tạo ảnh và "
+            "học câu lệnh mới.\n"
+            "• Ví dụ: `Tìm thông tin giá vàng hôm nay`.\n\n"
             "🌙 **Âm dương lịch**\n"
-            "• Ví dụ: `Ngày mai âm lịch bao nhiêu`; `Đổi 30/11/1984 sang âm lịch`.\n\n"
+            "• Tra ngày, thứ và chuyển đổi giữa lịch âm với lịch dương.\n"
+            "• Ví dụ: `Đổi 30/11/1984 sang âm lịch`.\n\n"
             "⚙️ **Cấu hình**\n"
-            "• Vào **Settings > Devices & services > Conversational Assistant > Configure** "
-            "để đặt tên cho Mobile, Zalo, loa, camera và cấu hình AI, lịch, thời tiết, TTS.\n\n"
-            "💡 Gửi `Hướng dẫn sử dụng tích hợp` để xem lại; gửi "
-            "`Các lệnh tích hợp` để xem toàn bộ từ khóa."
+            "• Vào **Settings > Devices & services > Conversational Assistant "
+            "> Configure** để đặt tên Mobile, Zalo, loa, camera và cấu hình "
+            "AI, lịch, thời tiết, TTS cùng Zalo invocation keyword."
         )
 
     def _zalo_upcoming_reminders(
@@ -4829,16 +4896,23 @@ class ConversationalAssistantManager(NoteManagerMixin):
         zalo = self._zalo_target_for_context(context, account_selection)
         if context.thread_type == ZALO_TYPE_GROUP:
             display_name = "Zalo nhóm hiện tại"
+            alias_name = "nhóm hiện tại"
+            alias_prefixes = ("zalo", "zalo nhóm")
         else:
             display_name = (
                 f"Zalo người dùng {context.display_name} "
                 "(cuộc trò chuyện này)"
             )
+            alias_name = context.display_name
+            alias_prefixes = ("zalo", "zalo người dùng")
         return NotificationTarget(
             target_id=f"zalo:{zalo[CONF_ZALO_TARGET_ID]}",
             kind="zalo",
             display_name=display_name,
             zalo=zalo,
+            aliases=target_aliases(
+                alias_name, prefixes=alias_prefixes
+            ),
         )
 
     @staticmethod
@@ -4862,13 +4936,41 @@ class ConversationalAssistantManager(NoteManagerMixin):
     def _available_targets_for_zalo(
         self, context: ZaloWebhookContext, account_selection: str
     ) -> list[NotificationTarget]:
-        """Return voice-like choices plus the originating Zalo conversation."""
+        """Return named destinations plus the originating Zalo conversation."""
         current = self._zalo_notification_target_for_context(
             context, account_selection
         )
+        configured_zalo_all = self._configured_zalo_selection_targets()
+        configured_current = next(
+            (
+                target
+                for target in configured_zalo_all
+                if self._same_zalo_destination(target, current)
+            ),
+            None,
+        )
+        if configured_current is not None:
+            # Preserve the user's configured spoken name and aliases for the
+            # current chat. Previously the configured item was removed as a
+            # duplicate and replaced by an alias-less dynamic target, so
+            # ``Nhắc Zalo Khải ...`` failed exactly when Khải was this chat.
+            current = NotificationTarget(
+                target_id=configured_current.target_id,
+                kind="zalo",
+                display_name=(
+                    f"{configured_current.display_name} "
+                    "(cuộc trò chuyện này)"
+                ),
+                zalo=(
+                    dict(configured_current.zalo)
+                    if configured_current.zalo is not None
+                    else None
+                ),
+                aliases=configured_current.aliases,
+            )
         configured_zalo = [
             target
-            for target in self._configured_zalo_selection_targets()
+            for target in configured_zalo_all
             if not self._same_zalo_destination(target, current)
         ]
         return [
@@ -4977,6 +5079,33 @@ class ConversationalAssistantManager(NoteManagerMixin):
             sent=sent, response_type="integration_help"
         )
 
+    async def _async_send_unknown_command_catalog_to_zalo(
+        self, context: ZaloWebhookContext
+    ) -> ZaloDirectResponse:
+        """Explain an unknown keyword-prefixed request and show all commands."""
+        self._clear_zalo_pending_for_owner(context.owner_key)
+        message = (
+            "⚠️ **YÊU CẦU CHƯA ĐÚNG TỪ KHÓA TÍNH NĂNG**\n\n"
+            "Tôi chưa nhận ra tính năng cần thực hiện. Hãy dùng một trong "
+            "các từ khóa dưới đây:\n\n"
+            f"{self._integration_commands_text()}"
+        )
+        sent = await self._async_send_zalo_webhook_reply(
+            context,
+            message,
+            max_chars=ZALO_GUIDE_CHUNK_MAX_CHARS,
+        )
+        if not sent:
+            _LOGGER.error(
+                "Failed sending unknown-command catalog to Zalo thread %s "
+                "with account %s",
+                context.thread_id,
+                self._zalo_account_selection_for_context(context),
+            )
+        return ZaloDirectResponse(
+            sent=sent, response_type="unknown_command_catalog"
+        )
+
     @staticmethod
     def _split_zalo_text(
         message: str, max_chars: int = ZALO_TEXT_CHUNK_MAX_CHARS
@@ -5045,16 +5174,7 @@ class ConversationalAssistantManager(NoteManagerMixin):
     async def _async_create_from_zalo(
         self, context: ZaloWebhookContext
     ) -> str:
-        """Parse a Zalo reminder and optionally ask for destinations."""
-        try:
-            parsed = parse_reminder_request(context.text)
-        except ReminderParseError as err:
-            return (
-                f"Tôi chưa tạo được nhắc nhở. {err} "
-                "Ví dụ: nhắc tôi 30 phút nữa uống thuốc; hoặc "
-                "tạo nhắc hẹn 18h30 ngày mai đi tập thể dục."
-            )
-
+        """Create a reminder directly by named target or ask for a target."""
         account_selection = self._zalo_account_selection_for_context(context)
         if not account_selection:
             return (
@@ -5072,6 +5192,10 @@ class ConversationalAssistantManager(NoteManagerMixin):
                 "Hãy kiểm tra cấu hình Conversational Assistant."
             )
 
+        # Resolve configured destination names before parsing the reminder.
+        # Text such as ``Nhắc Zalo Khải 1 phút nữa uống thuốc`` is not a valid
+        # time expression until ``Zalo Khải`` has been removed. Parsing first
+        # therefore prevented direct reminders from reaching any destination.
         direct_selection = self._direct_reminder_target_selection(
             context.text, targets
         )
@@ -5080,12 +5204,15 @@ class ConversationalAssistantManager(NoteManagerMixin):
             if not direct_request:
                 return (
                     "Thiếu thời gian hoặc nội dung nhắc nhở sau tên nơi nhận. "
-                    "Ví dụ: nhắc Zalo Khải 18h xuống ăn cơm."
+                    "Ví dụ: nhắc Zalo Khải 1 phút nữa uống thuốc."
                 )
             try:
                 parsed = parse_reminder_request(direct_request)
             except ReminderParseError as err:
-                return f"Tôi chưa tạo được nhắc nhở. {err}"
+                return (
+                    f"Tôi chưa tạo được nhắc nhở. {err} "
+                    "Ví dụ: nhắc Zalo Khải 1 phút nữa uống thuốc."
+                )
             reminder = self._reminder_from_targets(
                 parsed, selected_targets, owner_key=context.owner_key
             )
@@ -5095,31 +5222,26 @@ class ConversationalAssistantManager(NoteManagerMixin):
             )
             return f"{parsed.confirmation} Sẽ thông báo đến {target_names}."
 
-        confirm_targets = bool(
-            self._option(CONF_CONFIRM_TARGETS, DEFAULT_CONFIRM_TARGETS)
-        )
-        if confirm_targets:
-            self._zalo_pending_creations[context.owner_key] = (
-                PendingZaloReminder(
-                    parsed=parsed,
-                    targets=targets,
-                    expires_at=dt_util.now()
-                    + timedelta(seconds=PENDING_CONFIRMATION_TIMEOUT_SECONDS),
-                )
+        try:
+            parsed = parse_reminder_request(context.text)
+        except ReminderParseError as err:
+            return (
+                f"Tôi chưa tạo được nhắc nhở. {err} "
+                "Ví dụ: nhắc 30 phút nữa uống thuốc; hoặc "
+                "nhắc Zalo Khải 1 phút nữa uống thuốc."
             )
-            return self._target_prompt_text(parsed, targets)
 
-        current_target = self._zalo_notification_target_for_context(
-            context, account_selection
+        # A reminder without a named destination must always ask the user to
+        # choose. Do not silently send only to the current chat or every target,
+        # even when the legacy confirmation option is disabled.
+        self._zalo_pending_creations[context.owner_key] = PendingZaloReminder(
+            parsed=parsed,
+            targets=targets,
+            expires_at=dt_util.now()
+            + timedelta(seconds=PENDING_CONFIRMATION_TIMEOUT_SECONDS),
         )
-        reminder = self._reminder_from_targets(
-            parsed, [current_target], owner_key=context.owner_key
-        )
-        await self.async_add_reminder(reminder)
-        return (
-            f"{parsed.confirmation} "
-            "Tôi sẽ gửi lại vào cuộc trò chuyện này."
-        )
+        self._schedule_pending_expiry()
+        return self._target_prompt_text(parsed, targets)
 
     async def _async_zalo_pending_creation_reply(
         self,
@@ -6783,6 +6905,223 @@ class ConversationalAssistantManager(NoteManagerMixin):
                 + ".",
             )
         return result
+
+    @staticmethod
+    def _cancelled_flow_text(labels: list[str], *, zalo: bool) -> str:
+        """Return one concise confirmation after cancelling active work."""
+        unique = list(dict.fromkeys(label for label in labels if label))
+        if not unique:
+            return "Không có phiên yêu cầu nào đang hoạt động để hủy."
+        joined = ", ".join(unique)
+        if zalo:
+            return (
+                "🛑 **Đã hủy phiên yêu cầu**\n\n"
+                f"Đã dừng ngay: **{joined}**."
+            )
+        return f"Đã hủy và dừng ngay phiên {joined}."
+
+    def _cancel_zalo_active_flow(self, owner_key: str) -> list[str]:
+        """Cancel every pending, chat, and cancellable background task for Zalo."""
+        self._purge_expired_pending()
+        labels: list[str] = []
+        pending_note = self._zalo_pending_notes.pop(owner_key, None)
+        if pending_note is not None:
+            labels.append(
+                {
+                    "create": "tạo ghi chú",
+                    "view": "xem ghi chú",
+                    "edit": "sửa ghi chú",
+                    "delete": "xóa ghi chú",
+                }.get(pending_note.action, "ghi chú")
+            )
+        if self._zalo_pending_sends.pop(owner_key, None) is not None:
+            labels.append("gửi Zalo")
+        if (
+            self._zalo_pending_speaker_announcements.pop(owner_key, None)
+            is not None
+        ):
+            labels.append("thông báo loa")
+        if self._zalo_pending_creations.pop(owner_key, None) is not None:
+            labels.append("tạo nhắc hẹn")
+        if self._zalo_pending_deletions.pop(owner_key, None) is not None:
+            labels.append("xóa nhắc hẹn")
+        pending_camera = self._zalo_pending_cameras.pop(owner_key, None)
+        if pending_camera is not None:
+            labels.append(
+                "phân tích camera"
+                if pending_camera.mode == "analysis"
+                else "chụp camera"
+            )
+        if self._zalo_pending_device_powers.pop(owner_key, None) is not None:
+            labels.append("điều khiển thiết bị")
+        if self._zalo_pending_calendar_events.pop(owner_key, None) is not None:
+            labels.append("tạo sự kiện lịch")
+        if (
+            self._zalo_pending_calendar_managements.pop(owner_key, None)
+            is not None
+        ):
+            labels.append("quản lý sự kiện lịch")
+
+        session = self._zalo_chat_sessions.pop(owner_key, None)
+        if session is not None:
+            labels.append("trò chuyện AI")
+            self._cancel_zalo_chat_timeout(owner_key)
+            self._zalo_chat_locks.pop(owner_key, None)
+
+        background_tasks = tuple(
+            task
+            for task in self._zalo_background_tasks_by_owner.pop(
+                owner_key, set()
+            )
+            if not task.done()
+        )
+        if background_tasks:
+            labels.append("yêu cầu đang xử lý")
+            for task in background_tasks:
+                if task is not asyncio.current_task():
+                    task.cancel()
+
+        speaker_tasks = tuple(
+            task
+            for task in self._speaker_announcement_tasks_by_owner.pop(
+                owner_key, set()
+            )
+            if not task.done()
+        )
+        if speaker_tasks:
+            labels.append("thông báo loa đang chờ phát")
+            for task in speaker_tasks:
+                if task is not asyncio.current_task():
+                    task.cancel()
+
+        # Start a future chat/search as a fresh provider conversation too.
+        self._zalo_ha_conversation_ids.pop(owner_key, None)
+        self._zalo_search_conversation_ids.pop(owner_key, None)
+        self._sync_pending_followup_trigger()
+        return labels
+
+    def _cancel_voice_active_flow(
+        self, user_input: ConversationInput
+    ) -> list[str]:
+        """Cancel every pending and cancellable background task for one voice source."""
+        self._purge_expired_pending()
+        source_keys = self._source_keys(user_input)
+        labels: list[str] = []
+
+        for pending_id, pending in list(self._pending_notes.items()):
+            if source_keys & pending.source_keys:
+                labels.append(
+                    {
+                        "create": "tạo ghi chú",
+                        "view": "xem ghi chú",
+                        "edit": "sửa ghi chú",
+                        "delete": "xóa ghi chú",
+                    }.get(pending.action, "ghi chú")
+                )
+                del self._pending_notes[pending_id]
+        stores: tuple[tuple[dict[str, Any], str], ...] = (
+            (self._pending, "tạo nhắc hẹn"),
+            (self._pending_deletions, "xóa nhắc hẹn"),
+            (self._pending_voice_device_controls, "điều khiển thiết bị"),
+            (self._pending_voice_zalo_sends, "gửi Zalo"),
+            (
+                self._pending_voice_speaker_announcements,
+                "thông báo loa",
+            ),
+        )
+        for store, label in stores:
+            for pending_id, pending in list(store.items()):
+                pending_sources = set(getattr(pending, "source_keys", set()))
+                if source_keys & pending_sources:
+                    labels.append(label)
+                    del store[pending_id]
+
+        for pending_id, pending in list(self._pending_voice_cameras.items()):
+            if not source_keys & pending.source_keys:
+                continue
+            labels.append(
+                "phân tích camera"
+                if pending.mode == "analysis"
+                else "chụp camera"
+            )
+            del self._pending_voice_cameras[pending_id]
+
+        speaker_tasks: set[asyncio.Task[Any]] = set()
+        for source_key in source_keys:
+            speaker_tasks.update(
+                self._speaker_announcement_tasks_by_source.pop(
+                    source_key, set()
+                )
+            )
+        active_speaker_tasks = {task for task in speaker_tasks if not task.done()}
+        if active_speaker_tasks:
+            labels.append("thông báo loa đang chờ phát")
+            for task in active_speaker_tasks:
+                if task is not asyncio.current_task():
+                    task.cancel()
+
+        # Voice pipeline identifiers may change between turns. Preserve the
+        # integration's existing safe fallback: when exactly one pending voice
+        # flow exists globally, a bare Hủy may cancel that single flow.
+        if not labels:
+            fallback_items: list[tuple[dict[str, Any], str, str]] = []
+            for pending_id, pending in self._pending_notes.items():
+                fallback_items.append(
+                    (
+                        self._pending_notes,
+                        pending_id,
+                        {
+                            "create": "tạo ghi chú",
+                            "view": "xem ghi chú",
+                            "edit": "sửa ghi chú",
+                            "delete": "xóa ghi chú",
+                        }.get(pending.action, "ghi chú"),
+                    )
+                )
+            fallback_stores: tuple[tuple[dict[str, Any], str], ...] = (
+                (self._pending, "tạo nhắc hẹn"),
+                (self._pending_deletions, "xóa nhắc hẹn"),
+                (self._pending_voice_cameras, "camera"),
+                (
+                    self._pending_voice_device_controls,
+                    "điều khiển thiết bị",
+                ),
+                (self._pending_voice_zalo_sends, "gửi Zalo"),
+                (
+                    self._pending_voice_speaker_announcements,
+                    "thông báo loa",
+                ),
+            )
+            for store, default_label in fallback_stores:
+                for pending_id, pending in store.items():
+                    label = default_label
+                    if isinstance(pending, PendingVoiceCamera):
+                        label = (
+                            "phân tích camera"
+                            if pending.mode == "analysis"
+                            else "chụp camera"
+                        )
+                    fallback_items.append((store, pending_id, label))
+            if len(fallback_items) == 1:
+                store, pending_id, label = fallback_items[0]
+                store.pop(pending_id, None)
+                labels.append(label)
+
+        if not labels:
+            active_voice_speaker_tasks = {
+                task
+                for tasks in self._speaker_announcement_tasks_by_source.values()
+                for task in tasks
+                if not task.done()
+            }
+            if len(active_voice_speaker_tasks) == 1:
+                task = next(iter(active_voice_speaker_tasks))
+                labels.append("thông báo loa đang chờ phát")
+                if task is not asyncio.current_task():
+                    task.cancel()
+
+        self._sync_pending_followup_trigger()
+        return labels
 
     def _clear_zalo_pending_for_owner(self, owner_key: str) -> None:
         """Cancel unfinished Zalo flows when a new explicit command arrives."""
@@ -13248,6 +13587,10 @@ class ConversationalAssistantManager(NoteManagerMixin):
         service_context: Context | None = None,
     ) -> str | ZaloDirectResponse | None:
         """Route one inbound Zalo text message to reminder actions."""
+        if self._is_global_cancel_text(context.text):
+            labels = self._cancel_zalo_active_flow(context.owner_key)
+            return self._cancelled_flow_text(labels, zalo=True)
+
         # The command catalog and integration guide are global commands and must
         # not be consumed by an older note, reminder, device, camera, calendar,
         # or chat flow.
@@ -13294,6 +13637,21 @@ class ConversationalAssistantManager(NoteManagerMixin):
             )
         ):
             explicit_ha_kind = None
+
+        # A new keyword-prefixed message that matches neither a built-in,
+        # learned, nor Home Assistant feature must never disappear into an old
+        # pending flow. Show the deterministic command catalog immediately.
+        if (
+            self.zalo_invocation_keyword_enabled
+            and not context.active_flow_reply
+            and context.owner_key not in self._zalo_chat_sessions
+            and command is None
+            and explicit_ha_kind is None
+        ):
+            return await self._async_send_unknown_command_catalog_to_zalo(
+                context
+            )
+
         pending_note = self._zalo_pending_note(context.owner_key)
         pending_send = self._zalo_pending_send(context.owner_key)
         pending_speaker = self._zalo_pending_speaker_announcement(
@@ -13515,6 +13873,14 @@ class ConversationalAssistantManager(NoteManagerMixin):
             and normalized in {"chao", "xin chao", "hi", "hello"}
         ):
             return self._integration_help_text()
+
+        if (
+            self.zalo_invocation_keyword_enabled
+            and not context.active_flow_reply
+        ):
+            return await self._async_send_unknown_command_catalog_to_zalo(
+                context
+            )
 
         if (
             self.zalo_home_assistant_enabled
@@ -13829,8 +14195,22 @@ class ConversationalAssistantManager(NoteManagerMixin):
                 initial_typing_sent=initial_typing_sent,
             )
         )
+        owner_key = context.owner_key
         self._zalo_background_tasks.add(task)
-        task.add_done_callback(self._zalo_background_tasks.discard)
+        self._zalo_background_tasks_by_owner.setdefault(
+            owner_key, set()
+        ).add(task)
+
+        def _discard_background_task(done_task: asyncio.Task[Any]) -> None:
+            self._zalo_background_tasks.discard(done_task)
+            owner_tasks = self._zalo_background_tasks_by_owner.get(owner_key)
+            if owner_tasks is None:
+                return
+            owner_tasks.discard(done_task)
+            if not owner_tasks:
+                self._zalo_background_tasks_by_owner.pop(owner_key, None)
+
+        task.add_done_callback(_discard_background_task)
 
     async def async_process_zalo_webhook_payload(
         self,
@@ -13868,6 +14248,24 @@ class ConversationalAssistantManager(NoteManagerMixin):
                 "ok": True,
                 "handled": True,
                 "reason": reason,
+                "typing_event_sent": typing_event_sent,
+                "reply_sent": reply_sent,
+            }
+
+        # Cancellation is a global interrupt. It must run before chat activity,
+        # slow-action detection, or any feature-specific follow-up parser.
+        if self._is_global_cancel_text(context.text):
+            typing_event_sent = await self._async_send_zalo_typing_event(
+                context, service_context
+            )
+            labels = self._cancel_zalo_active_flow(context.owner_key)
+            reply_sent = await self._async_send_zalo_webhook_reply(
+                context, self._cancelled_flow_text(labels, zalo=True)
+            )
+            return {
+                "ok": True,
+                "handled": True,
+                "reason": "cancel_active_flow",
                 "typing_event_sent": typing_event_sent,
                 "reply_sent": reply_sent,
             }
@@ -13989,7 +14387,14 @@ class ConversationalAssistantManager(NoteManagerMixin):
                         display_name=f"Điện thoại {name}",
                         mobile_device_id=device_id,
                         aliases=target_aliases(
-                            name, prefixes=("điện thoại", "mobile", "phone")
+                            name,
+                            prefixes=(
+                                "điện thoại",
+                                "thiết bị",
+                                "mobile",
+                                "phone",
+                                "device",
+                            ),
                         ),
                     )
                 )
@@ -14034,7 +14439,14 @@ class ConversationalAssistantManager(NoteManagerMixin):
                     display_name=f"Điện thoại {name}",
                     mobile_device_id=device.id,
                     aliases=target_aliases(
-                        name, prefixes=("điện thoại", "mobile", "phone")
+                        name,
+                        prefixes=(
+                            "điện thoại",
+                            "thiết bị",
+                            "mobile",
+                            "phone",
+                            "device",
+                        ),
                     ),
                 )
             )
@@ -14544,6 +14956,7 @@ class ConversationalAssistantManager(NoteManagerMixin):
                 selected,
                 zalo_context=None,
                 voice_origin=True,
+                source_keys=source_keys,
             )
             return await self._async_voice_response(
                 user_input, self._speaker_announcement_accepted_text(selected)
@@ -14592,6 +15005,7 @@ class ConversationalAssistantManager(NoteManagerMixin):
             selected,
             zalo_context=None,
             voice_origin=True,
+            source_keys=pending.source_keys,
         )
         return await self._async_voice_response(
             user_input, self._speaker_announcement_accepted_text(selected)
@@ -14850,6 +15264,7 @@ class ConversationalAssistantManager(NoteManagerMixin):
         *,
         zalo_context: ZaloWebhookContext | None,
         voice_origin: bool,
+        source_keys: set[str] | None = None,
     ) -> None:
         """Start and retain one direct speaker-announcement background task."""
         task = self.hass.async_create_task(
@@ -14860,8 +15275,43 @@ class ConversationalAssistantManager(NoteManagerMixin):
                 voice_origin=voice_origin,
             )
         )
+        owner_key = zalo_context.owner_key if zalo_context is not None else None
+        indexed_sources = set(source_keys or ())
         self._speaker_announcement_tasks.add(task)
-        task.add_done_callback(self._speaker_announcement_tasks.discard)
+        if owner_key is not None:
+            self._speaker_announcement_tasks_by_owner.setdefault(
+                owner_key, set()
+            ).add(task)
+        for source_key in indexed_sources:
+            self._speaker_announcement_tasks_by_source.setdefault(
+                source_key, set()
+            ).add(task)
+
+        def _discard_speaker_task(done_task: asyncio.Task[Any]) -> None:
+            self._speaker_announcement_tasks.discard(done_task)
+            if owner_key is not None:
+                owner_tasks = self._speaker_announcement_tasks_by_owner.get(
+                    owner_key
+                )
+                if owner_tasks is not None:
+                    owner_tasks.discard(done_task)
+                    if not owner_tasks:
+                        self._speaker_announcement_tasks_by_owner.pop(
+                            owner_key, None
+                        )
+            for source_key in indexed_sources:
+                source_tasks = self._speaker_announcement_tasks_by_source.get(
+                    source_key
+                )
+                if source_tasks is None:
+                    continue
+                source_tasks.discard(done_task)
+                if not source_tasks:
+                    self._speaker_announcement_tasks_by_source.pop(
+                        source_key, None
+                    )
+
+        task.add_done_callback(_discard_speaker_task)
 
     def _configured_tts_entity_id(self) -> str | None:
         """Return the configured TTS entity or auto-select an available one."""
@@ -15961,23 +16411,9 @@ class ConversationalAssistantManager(NoteManagerMixin):
     async def _async_create_from_voice(
         self, user_input: ConversationInput, result: RecognizeResult
     ) -> str:
-        """Parse a reminder and optionally ask which targets should receive it."""
+        """Create a reminder directly by named target or ask for a target."""
         # Parse the complete utterance instead of only the wildcard slot.
-        # English slots such as "take medicine at 8" may not contain an
-        # explicit language marker after Hassil removes "remind me". Keeping
-        # the original command lets the parser select the English branch,
-        # while the Vietnamese parser already knows how to strip its prefixes.
         request = user_input.text or self._request_slot(user_input, result)
-        try:
-            parsed = parse_reminder_request(request)
-        except ReminderParseError as err:
-            response = (
-                f"Tôi chưa tạo được nhắc nhở. {err} "
-                "Ví dụ: hẹn 18h30 đi tắm; nhắc 1830 ngày mai uống thuốc; "
-                "hoặc nhắc 18h30 t3 t5 hàng tuần uống thuốc bổ."
-            )
-            return await self._async_voice_response(user_input, response)
-
         targets = self._available_targets()
         if not targets:
             response = (
@@ -15987,6 +16423,8 @@ class ConversationalAssistantManager(NoteManagerMixin):
             )
             return await self._async_voice_response(user_input, response)
 
+        # Remove a configured Mobile, Zalo or speaker name before asking the
+        # reminder parser to resolve time and message content.
         direct_selection = self._direct_reminder_target_selection(
             request, targets
         )
@@ -15996,13 +16434,15 @@ class ConversationalAssistantManager(NoteManagerMixin):
                 return await self._async_voice_response(
                     user_input,
                     "Thiếu thời gian hoặc nội dung nhắc nhở sau tên nơi nhận. "
-                    "Ví dụ: nhắc loa Phòng Ngủ 18h xuống ăn cơm.",
+                    "Ví dụ: nhắc loa Phòng Ngủ 1 phút nữa xuống ăn cơm.",
                 )
             try:
                 parsed = parse_reminder_request(direct_request)
             except ReminderParseError as err:
                 return await self._async_voice_response(
-                    user_input, f"Tôi chưa tạo được nhắc nhở. {err}"
+                    user_input,
+                    f"Tôi chưa tạo được nhắc nhở. {err} "
+                    "Ví dụ: nhắc loa Phòng Ngủ 1 phút nữa xuống ăn cơm.",
                 )
             reminder = self._reminder_from_targets(parsed, selected_targets)
             await self.async_add_reminder(reminder)
@@ -16014,20 +16454,22 @@ class ConversationalAssistantManager(NoteManagerMixin):
             )
             return await self._async_voice_response(user_input, response)
 
-        confirm_targets = bool(
-            self._option(CONF_CONFIRM_TARGETS, DEFAULT_CONFIRM_TARGETS)
-        )
-        if confirm_targets:
-            pending = self._set_pending(user_input, parsed, targets)
-            return await self._async_voice_response(
-                user_input, self._target_prompt(pending)
+        try:
+            parsed = parse_reminder_request(request)
+        except ReminderParseError as err:
+            response = (
+                f"Tôi chưa tạo được nhắc nhở. {err} "
+                "Ví dụ: hẹn 18h30 đi tắm; nhắc 1 phút nữa uống thuốc; "
+                "hoặc nhắc Zalo Khải 1 phút nữa uống thuốc."
             )
+            return await self._async_voice_response(user_input, response)
 
-        reminder = self._reminder_from_targets(parsed, targets)
-        await self.async_add_reminder(reminder)
-        target_names = ", ".join(target.display_name for target in targets)
-        response = f"{parsed.confirmation} Sẽ thông báo đến {target_names}."
-        return await self._async_voice_response(user_input, response)
+        # A destination-free reminder always becomes a selection flow, matching
+        # the Zalo behavior and preventing accidental broadcast to every target.
+        pending = self._set_pending(user_input, parsed, targets)
+        return await self._async_voice_response(
+            user_input, self._target_prompt(pending)
+        )
 
     async def _async_ai_lunar_date_conversion_request(
         self,
@@ -16693,16 +17135,70 @@ class ConversationalAssistantManager(NoteManagerMixin):
         return normalized in exact or normalized.startswith(prefixes)
 
     @staticmethod
+    def _is_global_cancel_text(text: str) -> bool:
+        """Return True for an explicit request to stop the active flow."""
+        normalized = normalize_text(text)
+        return normalized in {
+            "cancel",
+            "cancel it",
+            "cancel request",
+            "cancel this request",
+            "cancel the last request",
+            "never mind",
+            "stop",
+            "stop now",
+            "stop this request",
+            "end session",
+            "end this session",
+            "huy",
+            "huy bo",
+            "huy yeu cau",
+            "huy yeu cau nay",
+            "huy phien",
+            "huy phien nay",
+            "bo yeu cau",
+            "bo yeu cau vua roi",
+            "bo qua",
+            "thoi",
+            "dung",
+            "dung lai",
+            "dung yeu cau",
+            "dung phien",
+            "ket thuc",
+            "ket thuc phien",
+        }
+
+    @staticmethod
     def _is_cancel_pending_text(text: str) -> bool:
         """Return True for natural cancellation of a pending action."""
         normalized = normalize_text(text)
         return normalized in {
             "cancel",
+            "cancel it",
+            "cancel request",
+            "cancel this request",
             "never mind",
             "huy",
+            "huy bo",
+            "huy yeu cau",
+            "huy yeu cau nay",
+            "huy phien",
+            "huy phien nay",
+            "bo yeu cau",
+            "bo qua",
+            "thoi",
+            "dung",
+            "dung lai",
+            "dung yeu cau",
+            "dung phien",
+            "ket thuc",
+            "ket thuc phien",
             "cancel the last request",
             "stop",
+            "stop now",
             "stop this request",
+            "end session",
+            "end this session",
             "do not save",
             "dont save",
             "don t save",
@@ -16741,6 +17237,12 @@ class ConversationalAssistantManager(NoteManagerMixin):
         self, user_input: ConversationInput, result: RecognizeResult
     ) -> str | None:
         """Handle active Voice Assist selections and confirmations."""
+        if self._is_global_cancel_text(user_input.text):
+            labels = self._cancel_voice_active_flow(user_input)
+            return await self._async_voice_response(
+                user_input, self._cancelled_flow_text(labels, zalo=False)
+            )
+
         device_pending = self._find_pending_voice_device_control(user_input)
         if device_pending is not None:
             # Values such as “đặt 25 độ” overlap reminder trigger prefixes but
@@ -17312,38 +17814,11 @@ class ConversationalAssistantManager(NoteManagerMixin):
     async def _async_cancel_pending_from_voice(
         self, user_input: ConversationInput, _result: RecognizeResult
     ) -> str:
-        """Cancel a pending creation, deletion, camera, or Zalo-send request."""
-        zalo_send = self._find_pending_voice_zalo_send(user_input)
-        camera = self._find_pending_voice_camera(user_input)
-        creation = self._find_pending(user_input)
-        deletion = self._find_pending_deletion(user_input)
-        if (
-            zalo_send is None
-            and camera is None
-            and creation is None
-            and deletion is None
-        ):
-            return await self._async_voice_response(
-                user_input, "Không có yêu cầu nào đang chờ xác nhận."
-            )
-        if zalo_send is not None:
-            self._pending_voice_zalo_sends.pop(zalo_send.pending_id, None)
-            response = "Đã hủy yêu cầu gửi Zalo."
-        elif camera is not None:
-            self._pending_voice_cameras.pop(camera.pending_id, None)
-            if camera.mode == "analysis":
-                response = "Đã hủy yêu cầu phân tích camera."
-            else:
-                response = "Đã hủy yêu cầu chụp ảnh camera."
-        elif creation is not None:
-            self._pending.pop(creation.pending_id, None)
-            response = "Đã hủy nhắc nhở đang tạo."
-        else:
-            assert deletion is not None
-            self._pending_deletions.pop(deletion.pending_id, None)
-            response = "Đã hủy yêu cầu xóa nhắc hẹn."
-        self._sync_pending_followup_trigger()
-        return await self._async_voice_response(user_input, response)
+        """Cancel every active request belonging to this Voice Assist source."""
+        labels = self._cancel_voice_active_flow(user_input)
+        return await self._async_voice_response(
+            user_input, self._cancelled_flow_text(labels, zalo=False)
+        )
 
     async def _async_list_from_voice(
         self, user_input: ConversationInput, _result: RecognizeResult
