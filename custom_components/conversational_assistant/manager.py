@@ -1289,17 +1289,58 @@ class ConversationalAssistantManager(NoteManagerMixin):
 
     @property
     def zalo_invocation_keyword(self) -> str:
-        """Return the configured leading keyword for Zalo commands."""
-        value = " ".join(
-            str(
-                self._option(
-                    CONF_ZALO_INVOCATION_KEYWORD,
-                    DEFAULT_ZALO_INVOCATION_KEYWORD,
-                )
-                or ""
-            ).split()
+        """Return the configured leading keyword for Zalo commands.
+
+        The options UI stores plain text, but copied values can occasionally
+        include Markdown wrappers or invisible Unicode characters. Removing
+        only wrappers around the complete value keeps the configured keyword
+        stable while preventing duplicated or malformed Markdown in
+        Zalo replies.
+        """
+        raw_value = self._option(
+            CONF_ZALO_INVOCATION_KEYWORD,
+            DEFAULT_ZALO_INVOCATION_KEYWORD,
         )
+        value = self._clean_zalo_command_text(str(raw_value or ""))
+        value = " ".join(value.split()).strip()
+
+        paired_wrappers = (
+            ("**", "**"),
+            ("__", "__"),
+            ("`", "`"),
+            ('"', '"'),
+            ("'", "'"),
+            ("“", "”"),
+            ("‘", "’"),
+        )
+        changed = True
+        while value and changed:
+            changed = False
+            for opening, closing in paired_wrappers:
+                if (
+                    len(value) > len(opening) + len(closing)
+                    and value.startswith(opening)
+                    and value.endswith(closing)
+                ):
+                    value = value[len(opening) : -len(closing)].strip()
+                    changed = True
+                    break
+
         return (value or DEFAULT_ZALO_INVOCATION_KEYWORD)[:80]
+
+    def _zalo_invocation_keyword_markdown(self) -> str:
+        """Return the configured keyword with safe Zalo emphasis."""
+        keyword = self.zalo_invocation_keyword
+        if any(marker in keyword for marker in ("*", "_", "`")):
+            return keyword
+        return f"**{keyword}**"
+
+    def _zalo_invocation_example_markdown(self, command: str) -> str:
+        """Return one safely emphasized invocation example."""
+        example = f"{self.zalo_invocation_keyword} {command}".strip()
+        if any(marker in example for marker in ("*", "_", "`")):
+            return example
+        return f"**{example}**"
 
     @property
     def zalo_webhook_bot_account_id(self) -> str:
@@ -2629,7 +2670,7 @@ class ConversationalAssistantManager(NoteManagerMixin):
             context.owner_key
         ):
             return response
-        keyword = self.zalo_invocation_keyword.replace("`", "'")
+        keyword = self._zalo_invocation_keyword_markdown()
         if _request_language(context.text) == "en":
             notice = (
                 "⏱️ Each confirmation step is valid for **120 seconds**. "
@@ -2638,7 +2679,7 @@ class ConversationalAssistantManager(NoteManagerMixin):
             if self.zalo_invocation_keyword_enabled:
                 notice += (
                     " 🔓 While this flow is waiting, reply directly without the "
-                    f"**`{keyword}`** keyword. A new request requires the keyword "
+                    f"{keyword} keyword. A new request requires the keyword "
                     "again after the flow finishes, is cancelled, or expires."
                 )
         else:
@@ -2649,7 +2690,7 @@ class ConversationalAssistantManager(NoteManagerMixin):
             if self.zalo_invocation_keyword_enabled:
                 notice += (
                     " 🔓 Trong lúc luồng này đang chờ, bạn trả lời trực tiếp, "
-                    f"không cần nhập **`{keyword}`**. Khi luồng hoàn tất, bị hủy "
+                    f"không cần nhập {keyword}. Khi luồng hoàn tất, bị hủy "
                     "hoặc hết hạn, yêu cầu mới lại phải bắt đầu bằng từ khóa."
                 )
         if notice in response:
@@ -3834,6 +3875,79 @@ class ConversationalAssistantManager(NoteManagerMixin):
             if unicodedata.category(character) != "Cf"
         )
 
+    @classmethod
+    def _zalo_webhook_text_content(cls, data: dict[str, Any]) -> str:
+        """Return text from common zca-js webhook content shapes.
+
+        Most Zalo Bot events expose ``data.content`` as a string. Some builds
+        wrap the same text in an object, especially for quoted or formatted
+        messages. Accepting those compatible shapes prevents valid commands
+        from being silently discarded before routing.
+        """
+        content: Any = data.get("content")
+        if isinstance(content, str):
+            return cls._clean_zalo_command_text(content).strip()
+
+        if isinstance(content, dict):
+            for key in ("text", "title", "msg", "message", "content"):
+                value = content.get(key)
+                if isinstance(value, str) and value.strip():
+                    return cls._clean_zalo_command_text(value).strip()
+
+        for key in ("text", "message", "msg"):
+            value = data.get(key)
+            if isinstance(value, str) and value.strip():
+                return cls._clean_zalo_command_text(value).strip()
+        return ""
+
+    @staticmethod
+    def _zalo_webhook_mentions(data: dict[str, Any]) -> list[dict[str, Any]]:
+        """Return mention metadata from common webhook field names."""
+        sources: list[dict[str, Any]] = [data]
+        content = data.get("content")
+        if isinstance(content, dict):
+            sources.append(content)
+
+        for source in sources:
+            for key in (
+                "mentions",
+                "mention",
+                "mentionInfo",
+                "mentionsInfo",
+                "mention_info",
+            ):
+                value = source.get(key)
+                if isinstance(value, list):
+                    return [item for item in value if isinstance(item, dict)]
+                if isinstance(value, dict):
+                    return [value]
+                if isinstance(value, str) and value.strip():
+                    try:
+                        decoded = json.loads(value)
+                    except (TypeError, ValueError, json.JSONDecodeError):
+                        continue
+                    if isinstance(decoded, list):
+                        return [
+                            item for item in decoded if isinstance(item, dict)
+                        ]
+                    if isinstance(decoded, dict):
+                        return [decoded]
+        return []
+
+    @staticmethod
+    def _zalo_mention_number(
+        mention: dict[str, Any], keys: tuple[str, ...], default: int
+    ) -> int:
+        """Return one integer mention field using compatible key names."""
+        for key in keys:
+            if key not in mention:
+                continue
+            try:
+                return int(mention.get(key))
+            except (TypeError, ValueError):
+                continue
+        return default
+
     def _zalo_invocation_keyword_forms(self) -> tuple[str, ...]:
         """Return accepted literal forms of the configured Zalo keyword."""
         keyword = self._clean_zalo_command_text(
@@ -3853,31 +3967,103 @@ class ConversationalAssistantManager(NoteManagerMixin):
     @staticmethod
     def _zalo_keyword_boundary(value: str) -> bool:
         """Return whether the text following a keyword is a valid separator."""
-        return not value or value[0].isspace() or value[0] in ",.:;|/-–—"
+        return (
+            not value
+            or value[0].isspace()
+            or value[0] in ",.:;|/-–—@`*_>\"'”’)]}>"
+        )
+
+    @staticmethod
+    def _zalo_trim_command_prefix_wrappers(value: str) -> str:
+        """Remove presentation wrappers that can surround a copied keyword."""
+        return value.lstrip(" \t\r\n`*_>\"'“”‘’([{<")
+
+    def _zalo_leading_keyword_length(self, candidate: str) -> int | None:
+        """Return the length of a configured keyword at the start of text."""
+        for keyword in self._zalo_invocation_keyword_forms():
+            if len(candidate) >= len(keyword) and (
+                candidate[: len(keyword)].casefold() == keyword.casefold()
+            ):
+                remainder = candidate[len(keyword) :]
+                if self._zalo_keyword_boundary(remainder):
+                    return len(keyword)
+
+        # Zalo clients can insert a space after @ or between words in a
+        # mention. Match the configured value tolerantly while still requiring
+        # a strict command boundary after it.
+        core = self.zalo_invocation_keyword.lstrip("@").strip()
+        if not core:
+            return None
+        words = core.split()
+        flexible = r"@?\s*" + r"\s+".join(
+            re.escape(word) for word in words
+        )
+        match = re.match(flexible, candidate, re.IGNORECASE)
+        if match is None:
+            return None
+        if not self._zalo_keyword_boundary(candidate[match.end() :]):
+            return None
+        return match.end()
+
+    def _strip_zalo_invocation_keyword(
+        self, text: str
+    ) -> tuple[str | None, str]:
+        """Validate and remove one or more configured leading keywords.
+
+        Repeated prefixes are accepted because some group mention/webhook
+        combinations expose both the visible mention and its plain-text value.
+        This specifically prevents ``@keyword@keyword hướng dẫn`` from being
+        misrouted into an active confirmation flow.
+        """
+        candidate = self._zalo_trim_command_prefix_wrappers(
+            self._clean_zalo_command_text(text)
+        )
+        removed = False
+        for _index in range(4):
+            match_length = self._zalo_leading_keyword_length(candidate)
+            if match_length is None:
+                break
+            removed = True
+            candidate = candidate[match_length:]
+            candidate = candidate.lstrip(" \t\r\n,.:;|/-–—")
+            candidate = self._zalo_trim_command_prefix_wrappers(candidate)
+
+        if not removed:
+            return None, "missing_invocation_keyword"
+        command = candidate.strip()
+        if not command:
+            return "", "invocation_keyword_only"
+        return command, "ok"
 
     def _strip_zalo_bot_mention(
         self, text: str, data: dict[str, Any], account_ids: set[str]
     ) -> str:
         """Remove a leading mention of the receiving bot account when present."""
         candidate = self._clean_zalo_command_text(text).strip()
-        mentions = data.get("mentions")
-        if not isinstance(mentions, list):
+        mentions = self._zalo_webhook_mentions(data)
+        if not mentions:
             return candidate
 
         keyword_forms = self._zalo_invocation_keyword_forms()
         for mention in mentions:
-            if not isinstance(mention, dict):
-                continue
-            try:
-                position = int(mention.get("pos", -1))
-                length = int(mention.get("len", 0))
-            except (TypeError, ValueError):
-                continue
-            if position != 0 or length <= 0:
+            position = self._zalo_mention_number(
+                mention, ("pos", "position", "offset", "start"), -1
+            )
+            length = self._zalo_mention_number(
+                mention, ("len", "length", "size"), 0
+            )
+            if position != 0:
                 continue
 
-            uid = str(mention.get("uid", "") or "").strip()
-            visible_mention = candidate[:length].strip()
+            uid = str(
+                mention.get("uid")
+                or mention.get("id")
+                or mention.get("userId")
+                or ""
+            ).strip()
+            visible_mention = (
+                candidate[:length].strip() if length > 0 else ""
+            )
             mention_is_bot = bool(uid and uid in account_ids)
             mention_matches_keyword = any(
                 visible_mention.casefold() == form.casefold()
@@ -3901,29 +4087,44 @@ class ConversationalAssistantManager(NoteManagerMixin):
     ) -> tuple[str | None, str]:
         """Accept a leading Zalo @mention as the configured invocation keyword."""
         candidate = self._clean_zalo_command_text(text).strip()
-        mentions = data.get("mentions")
-        if not isinstance(mentions, list):
+        mentions = self._zalo_webhook_mentions(data)
+        if not mentions:
             return None, "missing_invocation_keyword"
 
         keyword_forms = self._zalo_invocation_keyword_forms()
         for mention in mentions:
-            if not isinstance(mention, dict):
-                continue
-            try:
-                position = int(mention.get("pos", -1))
-                length = int(mention.get("len", 0))
-            except (TypeError, ValueError):
-                continue
-            if position != 0 or length <= 0:
+            position = self._zalo_mention_number(
+                mention, ("pos", "position", "offset", "start"), -1
+            )
+            length = self._zalo_mention_number(
+                mention, ("len", "length", "size"), 0
+            )
+            if position != 0:
                 continue
 
-            uid = str(mention.get("uid", "") or "").strip()
-            visible_mention = candidate[:length].strip()
+            uid = str(
+                mention.get("uid")
+                or mention.get("id")
+                or mention.get("userId")
+                or ""
+            ).strip()
+            visible_mention = (
+                candidate[:length].strip() if length > 0 else ""
+            )
             mention_is_bot = bool(uid and uid in account_ids)
             mention_matches_keyword = any(
                 visible_mention.casefold() == form.casefold()
                 for form in keyword_forms
             )
+
+            # A literal configured keyword may have been duplicated in the
+            # webhook text even when mention metadata uses a different length.
+            literal_command, literal_reason = (
+                self._strip_zalo_invocation_keyword(candidate)
+            )
+            if literal_command is not None:
+                return literal_command, literal_reason
+
             if not (mention_is_bot or mention_matches_keyword):
                 continue
 
@@ -3933,25 +4134,6 @@ class ConversationalAssistantManager(NoteManagerMixin):
                 # The mention exists only in metadata, so content is already the
                 # command body. This occurs with some Zalo group webhook builds.
                 command = candidate
-            if not command:
-                return "", "invocation_keyword_only"
-            return command, "ok"
-        return None, "missing_invocation_keyword"
-
-    def _strip_zalo_invocation_keyword(
-        self, text: str
-    ) -> tuple[str | None, str]:
-        """Validate and remove the configured leading Zalo keyword."""
-        candidate = self._clean_zalo_command_text(text).lstrip()
-        for keyword in self._zalo_invocation_keyword_forms():
-            if len(candidate) < len(keyword):
-                continue
-            if candidate[: len(keyword)].casefold() != keyword.casefold():
-                continue
-            remainder = candidate[len(keyword) :]
-            if not self._zalo_keyword_boundary(remainder):
-                continue
-            command = remainder.lstrip().lstrip(",.:;|/-–—").lstrip()
             if not command:
                 return "", "invocation_keyword_only"
             return command, "ok"
@@ -3984,8 +4166,8 @@ class ConversationalAssistantManager(NoteManagerMixin):
         if sender_id and sender_id in account_ids:
             return None, "self_message"
 
-        raw_content = data.get("content")
-        if not isinstance(raw_content, str) or not raw_content.strip():
+        raw_content = self._zalo_webhook_text_content(data)
+        if not raw_content:
             return None, "unsupported_content"
 
         raw_thread_type = str(
@@ -4076,15 +4258,19 @@ class ConversationalAssistantManager(NoteManagerMixin):
     @staticmethod
     def _builtin_zalo_command_kind(text: str) -> str | None:
         """Classify built-in reminder, note, and help commands from Zalo."""
-        note_kind = note_zalo_command_kind(text)
-        if note_kind is not None:
-            return note_kind
         normalized = normalize_text(text)
         if not normalized:
             return None
 
+        # Help must always win over a pending note/reminder interpretation.
+        # This lets the user interrupt any 120-second confirmation flow and
+        # immediately retrieve the integration guide.
         if _is_integration_help_request(text):
             return "help"
+
+        note_kind = note_zalo_command_kind(text)
+        if note_kind is not None:
+            return note_kind
         if (
             is_lunar_date_conversion_request(text)
             or is_lunar_date_lookup_request(text)
@@ -4257,10 +4443,10 @@ class ConversationalAssistantManager(NoteManagerMixin):
 
     def _integration_help_text(self) -> str:
         """Return a compact shared guide for Voice Assist and Zalo."""
-        keyword = self.zalo_invocation_keyword.replace("`", "'")
+        keyword = self._zalo_invocation_keyword_markdown()
         if self.zalo_invocation_keyword_enabled:
             zalo_rule = (
-                f"• Zalo: bắt đầu yêu cầu mới bằng **`{keyword}`**. "
+                f"• Zalo: bắt đầu yêu cầu mới bằng {keyword}. "
                 "Khi bot đang chờ chọn hoặc xác nhận, chỉ cần trả lời trực tiếp.\n"
             )
         else:
@@ -12874,6 +13060,12 @@ class ConversationalAssistantManager(NoteManagerMixin):
         service_context: Context | None = None,
     ) -> str | ZaloDirectResponse | None:
         """Route one inbound Zalo text message to reminder actions."""
+        # The integration guide is a global command and must not be consumed by
+        # an older note, reminder, device, camera, calendar, or chat flow.
+        if _is_integration_help_request(context.text):
+            self._clear_zalo_pending_for_owner(context.owner_key)
+            return self._integration_help_text()
+
         first_chat_turn = chat_start_request(context.text)
         if first_chat_turn is not None:
             self._clear_zalo_pending_for_owner(context.owner_key)
@@ -13474,11 +13666,12 @@ class ConversationalAssistantManager(NoteManagerMixin):
             typing_event_sent = await self._async_send_zalo_typing_event(
                 context, service_context
             )
-            keyword = self.zalo_invocation_keyword.replace("`", "'")
+            keyword = self._zalo_invocation_keyword_markdown()
+            example = self._zalo_invocation_example_markdown("chụp cam")
             reply_sent = await self._async_send_zalo_webhook_reply(
                 context,
                 "🔑 Hãy nhập nội dung yêu cầu sau từ khóa "
-                f"**`{keyword}`**. Ví dụ: **`{keyword} chụp cam`**.",
+                f"{keyword}. Ví dụ: {example}.",
             )
             return {
                 "ok": True,

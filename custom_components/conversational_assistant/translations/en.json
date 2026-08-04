@@ -44,7 +44,7 @@
           "tts_language": "Optional. Enter the exact language code supported by the selected TTS engine, for example vi. Leave blank to use the engine default.",
           "tts_voice": "Optional. Enter the exact voice name supported by the selected TTS engine. The value is sent as options.voice. Leave blank to use the engine default.",
           "zalo_invocation_keyword_enabled": "Enabled by default. When enabled, a new Zalo request must start with the configured keyword. Replies inside an active selection, confirmation, cancellation, or follow-up chat flow do not need the keyword. Messages outside an active flow without the keyword are silently ignored. Voice Assist is not affected.",
-          "zalo_invocation_keyword": "Default: @1080. Use it only to start a new Zalo request, for example: @1080 take a camera snapshot. While a selection, confirmation, cancellation, or follow-up chat flow is active, replies do not need the keyword. New requests require it again after the flow finishes or expires."
+          "zalo_invocation_keyword": "Use the configured value only to start a new Zalo request, for example: [configured keyword] take a camera snapshot. While a selection, confirmation, cancellation, or follow-up chat flow is active, replies do not need the keyword. New requests require it again after the flow finishes or expires."
         }
       }
     },
@@ -126,7 +126,7 @@
           "zalo_webhook_enabled": "Does not create a new endpoint. Your existing webhook or automation calls conversational_assistant.process_zalo_webhook and passes its JSON body in the payload field.",
           "zalo_home_assistant_enabled": "Routes state, room, area, floor, calendar, and Zalo-only device-control requests into Home Assistant. Device actions execute immediately except opening a rolling or garage door, which requires confirmation. Voice Assist keeps Home Assistant's native device control to avoid conflicts. Weather lookup uses the separate AI Search agent. Only entities exposed to Assist can be used.",
           "zalo_invocation_keyword_enabled": "Enabled by default. When enabled, a new Zalo request must start with the configured keyword. Replies inside an active selection, confirmation, cancellation, or follow-up chat flow do not need the keyword. Messages outside an active flow without the keyword are silently ignored. Voice Assist is not affected.",
-          "zalo_invocation_keyword": "Default: @1080. Use it only to start a new Zalo request, for example: @1080 take a camera snapshot. While a selection, confirmation, cancellation, or follow-up chat flow is active, replies do not need the keyword. New requests require it again after the flow finishes or expires.",
+          "zalo_invocation_keyword": "Use the configured value only to start a new Zalo request, for example: [configured keyword] take a camera snapshot. While a selection, confirmation, cancellation, or follow-up chat flow is active, replies do not need the keyword. New requests require it again after the flow finishes or expires.",
           "zalo_webhook_bot_account_id": "Required when webhook processing is enabled. Enter the bot account ID from your payload so messages sent by the bot itself can be ignored.",
           "zalo_webhook_account_selection": "The account_selection value expected by zalo_bot, usually the bot phone number. If empty, the first configured Zalo destination account is used."
         }

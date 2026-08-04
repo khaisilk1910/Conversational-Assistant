@@ -44,7 +44,7 @@
           "tts_language": "Không bắt buộc. Nhập đúng mã ngôn ngữ mà bộ máy TTS đã chọn hỗ trợ, ví dụ vi. Không sử dụng thì để trống để dùng mặc định của TTS.",
           "tts_voice": "Không bắt buộc. Nhập đúng tên voice mà bộ máy TTS đã chọn hỗ trợ. Giá trị được gửi vào options.voice. Không sử dụng thì để trống để dùng mặc định của TTS.",
           "zalo_invocation_keyword_enabled": "Mặc định bật. Khi bật, yêu cầu Zalo mới phải bắt đầu bằng từ khóa đã cấu hình. Các câu trả lời trong luồng đang chờ chọn mục, xác nhận, hủy hoặc trò chuyện tiếp nối không cần từ khóa. Tin nhắn không có từ khóa ngoài một luồng đang hoạt động được bỏ qua im lặng. Voice Assist không bị ảnh hưởng.",
-          "zalo_invocation_keyword": "Mặc định @1080. Chỉ dùng từ khóa để bắt đầu yêu cầu Zalo mới, ví dụ: @1080 chụp cam. Trong lúc đang chờ chọn mục, xác nhận, hủy hoặc trò chuyện tiếp nối, người dùng trả lời trực tiếp không cần từ khóa. Khi luồng hoàn tất hoặc hết hạn, yêu cầu mới lại phải có từ khóa."
+          "zalo_invocation_keyword": "Chỉ dùng giá trị đã cấu hình để bắt đầu yêu cầu Zalo mới, ví dụ: [từ khóa đã cấu hình] chụp cam. Trong lúc đang chờ chọn mục, xác nhận, hủy hoặc trò chuyện tiếp nối, người dùng trả lời trực tiếp không cần từ khóa. Khi luồng hoàn tất hoặc hết hạn, yêu cầu mới lại phải có từ khóa."
         }
       }
     },
@@ -126,7 +126,7 @@
           "zalo_webhook_enabled": "Không tạo endpoint mới. Webhook hoặc automation hiện có gọi action conversational_assistant.process_zalo_webhook và truyền payload JSON vào trường payload.",
           "zalo_home_assistant_enabled": "Chuyển các yêu cầu trạng thái, phòng, khu vực, sàn, lịch và điều khiển thiết bị chỉ từ Zalo vào Home Assistant. Lệnh thiết bị được thực hiện ngay, riêng mở cửa cuốn/cửa gara phải xác nhận. Voice Assist tiếp tục dùng điều khiển thiết bị gốc của Home Assistant để tránh xung đột. Tra cứu thời tiết dùng AI Agent Search riêng. Chỉ entity đã expose cho Assist mới có thể sử dụng.",
           "zalo_invocation_keyword_enabled": "Mặc định bật. Khi bật, yêu cầu Zalo mới phải bắt đầu bằng từ khóa đã cấu hình. Các câu trả lời trong luồng đang chờ chọn mục, xác nhận, hủy hoặc trò chuyện tiếp nối không cần từ khóa. Tin nhắn không có từ khóa ngoài một luồng đang hoạt động được bỏ qua im lặng. Voice Assist không bị ảnh hưởng.",
-          "zalo_invocation_keyword": "Mặc định @1080. Chỉ dùng từ khóa để bắt đầu yêu cầu Zalo mới, ví dụ: @1080 chụp cam. Trong lúc đang chờ chọn mục, xác nhận, hủy hoặc trò chuyện tiếp nối, người dùng trả lời trực tiếp không cần từ khóa. Khi luồng hoàn tất hoặc hết hạn, yêu cầu mới lại phải có từ khóa.",
+          "zalo_invocation_keyword": "Chỉ dùng giá trị đã cấu hình để bắt đầu yêu cầu Zalo mới, ví dụ: [từ khóa đã cấu hình] chụp cam. Trong lúc đang chờ chọn mục, xác nhận, hủy hoặc trò chuyện tiếp nối, người dùng trả lời trực tiếp không cần từ khóa. Khi luồng hoàn tất hoặc hết hạn, yêu cầu mới lại phải có từ khóa.",
           "zalo_webhook_bot_account_id": "Bắt buộc khi bật xử lý webhook Zalo. Nhập ID tài khoản bot từ payload webhook để bỏ qua tin nhắn do chính bot gửi.",
           "zalo_webhook_account_selection": "Giá trị account_selection của zalo_bot, thường là số điện thoại bot. Nếu để trống, integration dùng tài khoản của nơi nhận Zalo đầu tiên đã cấu hình."
         }

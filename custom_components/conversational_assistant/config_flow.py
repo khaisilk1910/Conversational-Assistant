@@ -6,6 +6,7 @@ from copy import deepcopy
 from datetime import datetime, time
 from typing import Any
 import re
+import unicodedata
 import uuid
 
 import voluptuous as vol
@@ -841,6 +842,41 @@ def _initial_schema(
     )
 
 
+def _clean_zalo_invocation_keyword(value: Any) -> str:
+    """Return a plain stored Zalo invocation keyword."""
+    keyword = unicodedata.normalize("NFKC", str(value or ""))
+    keyword = keyword.replace("\u00a0", " ")
+    keyword = "".join(
+        character
+        for character in keyword
+        if unicodedata.category(character) != "Cf"
+    )
+    keyword = " ".join(keyword.split()).strip()
+
+    wrappers = (
+        ("**", "**"),
+        ("__", "__"),
+        ("`", "`"),
+        ('"', '"'),
+        ("'", "'"),
+        ("“", "”"),
+        ("‘", "’"),
+    )
+    changed = True
+    while keyword and changed:
+        changed = False
+        for opening, closing in wrappers:
+            if (
+                len(keyword) > len(opening) + len(closing)
+                and keyword.startswith(opening)
+                and keyword.endswith(closing)
+            ):
+                keyword = keyword[len(opening) : -len(closing)].strip()
+                changed = True
+                break
+    return keyword[:80]
+
+
 def _validate_zalo_settings(user_input: dict[str, Any]) -> dict[str, str]:
     """Validate global Zalo configuration values."""
     errors: dict[str, str] = {}
@@ -860,13 +896,12 @@ def _validate_zalo_settings(user_input: dict[str, Any]) -> dict[str, str]:
             DEFAULT_ZALO_INVOCATION_KEYWORD_ENABLED,
         )
     )
-    keyword = str(
+    keyword = _clean_zalo_invocation_keyword(
         user_input.get(
             CONF_ZALO_INVOCATION_KEYWORD,
             DEFAULT_ZALO_INVOCATION_KEYWORD,
         )
-        or ""
-    ).strip()
+    )
     if keyword_enabled and not keyword:
         errors[CONF_ZALO_INVOCATION_KEYWORD] = "required"
     return errors
@@ -886,16 +921,13 @@ def _normalize_zalo_settings(user_input: dict[str, Any]) -> dict[str, Any]:
             DEFAULT_ZALO_INVOCATION_KEYWORD_ENABLED,
         )
     )
-    keyword = " ".join(
-        str(
-            normalized.get(
-                CONF_ZALO_INVOCATION_KEYWORD,
-                DEFAULT_ZALO_INVOCATION_KEYWORD,
-            )
-            or ""
-        ).split()
+    keyword = _clean_zalo_invocation_keyword(
+        normalized.get(
+            CONF_ZALO_INVOCATION_KEYWORD,
+            DEFAULT_ZALO_INVOCATION_KEYWORD,
+        )
     )
-    normalized[CONF_ZALO_INVOCATION_KEYWORD] = keyword[:80]
+    normalized[CONF_ZALO_INVOCATION_KEYWORD] = keyword
     return normalized
 
 
