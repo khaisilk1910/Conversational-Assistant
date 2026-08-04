@@ -2,6 +2,8 @@
 
 ## Gọi tích hợp trên Zalo
 
+<img width="561" height="263" alt="image" src="https://github.com/user-attachments/assets/4264af07-3388-4eff-81a9-9c6e29f34f61" />
+
 Khi tùy chọn **Bắt buộc từ khóa gọi tích hợp trên Zalo** đang bật, mọi yêu cầu mới phải bắt đầu bằng đúng **Zalo invocation keyword** đã lưu trong Settings. Trong lúc bot đang chờ chọn hoặc xác nhận, có thể trả lời trực tiếp mà không cần nhập lại từ khóa.
 
 Ví dụ, thay `[TỪ KHÓA]` bằng giá trị hiện được cấu hình:
