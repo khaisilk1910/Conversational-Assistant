@@ -3784,10 +3784,11 @@ class ConversationalAssistantManager(NoteManagerMixin):
     ) -> str:
         """Return the best zalo_bot account for one incoming conversation.
 
-        An exact configured destination wins so installations with several Zalo
-        accounts do not accidentally send typing or replies through the first
-        configured account. The dedicated webhook account remains the fallback
-        for conversations that are not listed as named Zalo destinations.
+        An exact configured destination wins. Otherwise use the account that
+        actually received the webhook event before falling back to the legacy
+        global webhook account. This keeps replies and typing events on the
+        correct Zalo account in multi-account installations, including chats
+        that have not yet been added as named destinations.
         """
         for target in self._configured_zalo_targets():
             if (
@@ -3803,6 +3804,9 @@ class ConversationalAssistantManager(NoteManagerMixin):
             if account_selection:
                 return account_selection
 
+        event_account = str(context.account_id or "").strip()
+        if event_account:
+            return event_account
         return self._zalo_webhook_account_selection()
 
     @staticmethod
@@ -3819,19 +3823,50 @@ class ConversationalAssistantManager(NoteManagerMixin):
             "on",
         }
 
+    @staticmethod
+    def _clean_zalo_command_text(text: str) -> str:
+        """Normalize invisible Zalo formatting without changing the command."""
+        value = unicodedata.normalize("NFKC", str(text or ""))
+        value = value.replace("\u00a0", " ")
+        return "".join(
+            character
+            for character in value
+            if unicodedata.category(character) != "Cf"
+        )
+
+    def _zalo_invocation_keyword_forms(self) -> tuple[str, ...]:
+        """Return accepted literal forms of the configured Zalo keyword."""
+        keyword = self._clean_zalo_command_text(
+            self.zalo_invocation_keyword
+        ).strip()
+        if not keyword:
+            return ()
+        forms = {keyword}
+        if keyword.startswith("@"):
+            without_at = keyword[1:].lstrip()
+            if without_at:
+                forms.add(without_at)
+        else:
+            forms.add(f"@{keyword}")
+        return tuple(sorted(forms, key=len, reverse=True))
+
+    @staticmethod
+    def _zalo_keyword_boundary(value: str) -> bool:
+        """Return whether the text following a keyword is a valid separator."""
+        return not value or value[0].isspace() or value[0] in ",.:;|/-–—"
+
     def _strip_zalo_bot_mention(
         self, text: str, data: dict[str, Any], account_ids: set[str]
     ) -> str:
-        """Remove a leading zca-js mention of the bot account, when present."""
+        """Remove a leading mention of the receiving bot account when present."""
+        candidate = self._clean_zalo_command_text(text).strip()
         mentions = data.get("mentions")
         if not isinstance(mentions, list):
-            return text.strip()
+            return candidate
 
+        keyword_forms = self._zalo_invocation_keyword_forms()
         for mention in mentions:
             if not isinstance(mention, dict):
-                continue
-            uid = str(mention.get("uid", "")).strip()
-            if not uid or uid not in account_ids:
                 continue
             try:
                 position = int(mention.get("pos", -1))
@@ -3840,31 +3875,87 @@ class ConversationalAssistantManager(NoteManagerMixin):
                 continue
             if position != 0 or length <= 0:
                 continue
-            return text[length:].lstrip(" ,:;-\t\n")
-        return text.strip()
+
+            uid = str(mention.get("uid", "") or "").strip()
+            visible_mention = candidate[:length].strip()
+            mention_is_bot = bool(uid and uid in account_ids)
+            mention_matches_keyword = any(
+                visible_mention.casefold() == form.casefold()
+                for form in keyword_forms
+            )
+            if not (mention_is_bot or mention_matches_keyword):
+                continue
+
+            # Some webhook versions include the visible @mention in content;
+            # others provide only the command and keep the mention in metadata.
+            if visible_mention.startswith("@") or mention_matches_keyword:
+                return candidate[length:].lstrip(" ,:;|/-–—\t\n")
+            return candidate
+        return candidate
+
+    def _strip_zalo_invocation_mention(
+        self,
+        text: str,
+        data: dict[str, Any],
+        account_ids: set[str],
+    ) -> tuple[str | None, str]:
+        """Accept a leading Zalo @mention as the configured invocation keyword."""
+        candidate = self._clean_zalo_command_text(text).strip()
+        mentions = data.get("mentions")
+        if not isinstance(mentions, list):
+            return None, "missing_invocation_keyword"
+
+        keyword_forms = self._zalo_invocation_keyword_forms()
+        for mention in mentions:
+            if not isinstance(mention, dict):
+                continue
+            try:
+                position = int(mention.get("pos", -1))
+                length = int(mention.get("len", 0))
+            except (TypeError, ValueError):
+                continue
+            if position != 0 or length <= 0:
+                continue
+
+            uid = str(mention.get("uid", "") or "").strip()
+            visible_mention = candidate[:length].strip()
+            mention_is_bot = bool(uid and uid in account_ids)
+            mention_matches_keyword = any(
+                visible_mention.casefold() == form.casefold()
+                for form in keyword_forms
+            )
+            if not (mention_is_bot or mention_matches_keyword):
+                continue
+
+            if visible_mention.startswith("@") or mention_matches_keyword:
+                command = candidate[length:].lstrip(" ,:;|/-–—\t\n")
+            else:
+                # The mention exists only in metadata, so content is already the
+                # command body. This occurs with some Zalo group webhook builds.
+                command = candidate
+            if not command:
+                return "", "invocation_keyword_only"
+            return command, "ok"
+        return None, "missing_invocation_keyword"
 
     def _strip_zalo_invocation_keyword(
         self, text: str
     ) -> tuple[str | None, str]:
         """Validate and remove the configured leading Zalo keyword."""
-        candidate = str(text or "").lstrip()
-        keyword = self.zalo_invocation_keyword
-        if len(candidate) < len(keyword) or (
-            candidate[: len(keyword)].casefold() != keyword.casefold()
-        ):
-            return None, "missing_invocation_keyword"
-
-        remainder = candidate[len(keyword) :]
-        if remainder and not (
-            remainder[0].isspace()
-            or remainder[0] in ",.:;|/-–—"
-        ):
-            return None, "missing_invocation_keyword"
-
-        command = remainder.lstrip().lstrip(",.:;|/-–—").lstrip()
-        if not command:
-            return "", "invocation_keyword_only"
-        return command, "ok"
+        candidate = self._clean_zalo_command_text(text).lstrip()
+        for keyword in self._zalo_invocation_keyword_forms():
+            if len(candidate) < len(keyword):
+                continue
+            if candidate[: len(keyword)].casefold() != keyword.casefold():
+                continue
+            remainder = candidate[len(keyword) :]
+            if not self._zalo_keyword_boundary(remainder):
+                continue
+            command = remainder.lstrip().lstrip(",.:;|/-–—").lstrip()
+            if not command:
+                return "", "invocation_keyword_only"
+            return command, "ok"
+        return None, "missing_invocation_keyword"
 
     def _normalize_zalo_webhook_context(
         self, payload: Any
@@ -3878,13 +3969,10 @@ class ConversationalAssistantManager(NoteManagerMixin):
 
         configured_account_id = self.zalo_webhook_bot_account_id
         event_account_id = str(payload.get("_accountId", "") or "").strip()
-        if (
-            configured_account_id
-            and event_account_id
-            and event_account_id != configured_account_id
-        ):
-            return None, "other_account"
 
+        # CONF_ZALO_WEBHOOK_BOT_ACCOUNT_ID is a self-message guard, not a
+        # single-account allow-list. Rejecting a different _accountId silently
+        # drops valid commands received by other logged-in Zalo accounts.
         sender_id = str(data.get("uidFrom", "") or "").strip()
         account_ids = {
             value
@@ -3921,6 +4009,12 @@ class ConversationalAssistantManager(NoteManagerMixin):
             content, normalization_reason = (
                 self._strip_zalo_invocation_keyword(raw_content)
             )
+            if content is None:
+                content, normalization_reason = (
+                    self._strip_zalo_invocation_mention(
+                        raw_content, data, account_ids
+                    )
+                )
             if content is None:
                 if not self._zalo_owner_has_active_flow(owner_key):
                     return None, normalization_reason
