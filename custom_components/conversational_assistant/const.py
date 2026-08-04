@@ -135,6 +135,10 @@ ZALO_WEBHOOK_SEEN_MESSAGE_LIMIT = 512
 # guide and large calendar/camera lists) are split at paragraph or line
 # boundaries before calling zalo_bot.send_message.
 ZALO_TEXT_CHUNK_MAX_CHARS = 1800
+# The built-in guide contains many Markdown spans. Send it in smaller chunks
+# so Zalo markdown/style conversion cannot silently reject one large payload.
+ZALO_GUIDE_CHUNK_MAX_CHARS = 850
+ZALO_TEXT_CHUNK_SEND_DELAY_SECONDS = 0.15
 
 # Refresh the native Zalo typing indicator while a command is still being
 # processed. The task is created only for an active webhook request and is
@@ -493,6 +497,9 @@ HELP_SENTENCES = [
     "how does (the integration|conversational assistant) work",
     "what can (the integration|conversational assistant) do",
     "what features does (the integration|conversational assistant) support",
+    "[hãy ](lệnh|các lệnh) tích hợp",
+    "[hãy ](lệnh|các lệnh) của tích hợp",
+    "[hãy ](xem|danh sách) [các ]lệnh tích hợp",
     "[hãy ](trợ giúp|hướng dẫn|hướng dẫn sử dụng|lệnh|các lệnh|các tính năng)",
     "[hãy ](hướng dẫn|chỉ) [tôi ]sử dụng (tích hợp|conversational assistant)",
     "[hãy ](hướng dẫn|chỉ) [tôi ]cách sử dụng (tích hợp|conversational assistant)",

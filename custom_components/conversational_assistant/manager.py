@@ -202,6 +202,8 @@ from .const import (
     ZALO_SERVICE_SEND_MESSAGE,
     ZALO_SERVICE_SEND_TYPING_EVENT,
     ZALO_TEXT_CHUNK_MAX_CHARS,
+    ZALO_GUIDE_CHUNK_MAX_CHARS,
+    ZALO_TEXT_CHUNK_SEND_DELAY_SECONDS,
     ZALO_CHAT_IDLE_TIMEOUT_SECONDS,
     ZALO_CHAT_REENGAGE_TIMEOUT_SECONDS,
     ZALO_IMAGE_TIMEOUT_SECONDS,
@@ -334,6 +336,34 @@ from .zalo_home_assistant import (
 _LOGGER = logging.getLogger(__name__)
 
 
+_INTEGRATION_COMMANDS_EXACT_PHRASES = frozenset(
+    {
+        "integration commands",
+        "commands of the integration",
+        "show integration commands",
+        "list integration commands",
+        "lenh tich hop",
+        "cac lenh tich hop",
+        "lenh cua tich hop",
+        "cac lenh cua tich hop",
+        "xem lenh tich hop",
+        "xem cac lenh tich hop",
+        "danh sach lenh tich hop",
+        "danh sach cac lenh tich hop",
+    }
+)
+
+
+def _is_integration_commands_request(text: str) -> bool:
+    """Return whether text asks for the compact integration command catalog."""
+    normalized = normalize_text(text)
+    if normalized.startswith("hay "):
+        normalized = normalized[4:].strip()
+    elif normalized.startswith("please "):
+        normalized = normalized[7:].strip()
+    return normalized in _INTEGRATION_COMMANDS_EXACT_PHRASES
+
+
 _HELP_EXACT_PHRASES = frozenset(
     {
         "help",
@@ -401,6 +431,8 @@ def _is_integration_help_request(text: str) -> bool:
     elif normalized.startswith("please "):
         normalized = normalized[7:].strip()
     if not normalized:
+        return False
+    if _is_integration_commands_request(text):
         return False
     if normalized in _HELP_EXACT_PHRASES:
         return True
@@ -2858,6 +2890,8 @@ class ConversationalAssistantManager(NoteManagerMixin):
         # protected from a second rewrite pass here.
         if (
             text == self._integration_help_text()
+            or text == self._integration_commands_text()
+            or _is_integration_commands_request(context.text)
             or _is_integration_help_request(context.text)
             or chat_start_request(context.text) is not None
             or self._zalo_owner_has_pending_confirmation(context.owner_key)
@@ -4150,18 +4184,34 @@ class ConversationalAssistantManager(NoteManagerMixin):
             return None, "missing_data"
 
         configured_account_id = self.zalo_webhook_bot_account_id
-        event_account_id = str(payload.get("_accountId", "") or "").strip()
+        event_account_id = str(
+            payload.get("_accountId")
+            or payload.get("accountId")
+            or data.get("_accountId")
+            or data.get("accountId")
+            or data.get("ownId")
+            or ""
+        ).strip()
 
         # CONF_ZALO_WEBHOOK_BOT_ACCOUNT_ID is a self-message guard, not a
         # single-account allow-list. Rejecting a different _accountId silently
         # drops valid commands received by other logged-in Zalo accounts.
-        sender_id = str(data.get("uidFrom", "") or "").strip()
+        sender_id = str(
+            data.get("uidFrom")
+            or data.get("uid_from")
+            or data.get("senderId")
+            or data.get("sender_id")
+            or data.get("fromId")
+            or ""
+        ).strip()
         account_ids = {
             value
             for value in (configured_account_id, event_account_id)
             if value
         }
-        if self._truthy(payload.get("isSelf")):
+        if self._truthy(payload.get("isSelf")) or self._truthy(
+            data.get("isSelf")
+        ):
             return None, "self_message"
         if sender_id and sender_id in account_ids:
             return None, "self_message"
@@ -4170,15 +4220,35 @@ class ConversationalAssistantManager(NoteManagerMixin):
         if not raw_content:
             return None, "unsupported_content"
 
-        raw_thread_type = str(
-            payload.get("type", ZALO_TYPE_USER)
-        ).strip().casefold()
+        thread_type_candidates = (
+            payload.get("threadType"),
+            data.get("threadType"),
+            data.get("thread_type"),
+            data.get("type"),
+            payload.get("type"),
+        )
+        raw_thread_type = next(
+            (
+                str(value).strip().casefold()
+                for value in thread_type_candidates
+                if str(value or "").strip().casefold()
+                in {ZALO_TYPE_USER, ZALO_TYPE_GROUP, "user", "group"}
+            ),
+            ZALO_TYPE_USER,
+        )
         thread_type = (
             ZALO_TYPE_GROUP
             if raw_thread_type in {ZALO_TYPE_GROUP, "group"}
             else ZALO_TYPE_USER
         )
-        thread_id = str(payload.get("threadId", "") or "").strip()
+        thread_id = str(
+            payload.get("threadId")
+            or payload.get("thread_id")
+            or data.get("threadId")
+            or data.get("thread_id")
+            or data.get("groupId")
+            or ""
+        ).strip()
         if not thread_id and thread_type == ZALO_TYPE_USER:
             thread_id = sender_id
         if not sender_id or not thread_id:
@@ -4216,11 +4286,19 @@ class ConversationalAssistantManager(NoteManagerMixin):
 
         message_id = str(
             data.get("msgId")
+            or data.get("msg_id")
             or data.get("cliMsgId")
             or data.get("actionId")
+            or payload.get("msgId")
+            or payload.get("messageId")
             or ""
         ).strip()
-        display_name = str(data.get("dName", "") or "").strip()
+        display_name = str(
+            data.get("dName")
+            or data.get("displayName")
+            or data.get("senderName")
+            or ""
+        ).strip()
         if not display_name:
             display_name = sender_id
         return (
@@ -4262,9 +4340,11 @@ class ConversationalAssistantManager(NoteManagerMixin):
         if not normalized:
             return None
 
-        # Help must always win over a pending note/reminder interpretation.
-        # This lets the user interrupt any 120-second confirmation flow and
-        # immediately retrieve the integration guide.
+        # Command catalog/help must always win over a pending note/reminder
+        # interpretation. This lets the user interrupt any 120-second flow and
+        # immediately retrieve deterministic built-in content.
+        if _is_integration_commands_request(text):
+            return "commands"
         if _is_integration_help_request(text):
             return "help"
 
@@ -4441,6 +4521,65 @@ class ConversationalAssistantManager(NoteManagerMixin):
                 return normalized[len(prefix) :].strip()
         return normalized
 
+    def _integration_commands_text(self) -> str:
+        """Return the compact keyword catalog with one example per feature."""
+        keyword = self._zalo_invocation_keyword_markdown()
+        if self.zalo_invocation_keyword_enabled:
+            zalo_rule = (
+                f"🔑 Trên Zalo, thêm {keyword} trước mỗi yêu cầu mới."
+            )
+        else:
+            zalo_rule = "🔑 Zalo hiện không bắt buộc từ khóa gọi tích hợp."
+
+        return (
+            "⌨️ **CÁC LỆNH TÍCH HỢP**\n\n"
+            f"{zalo_rule}\n\n"
+            "• **Hướng dẫn:** trợ giúp, hướng dẫn, hướng dẫn sử dụng, hướng dẫn tích hợp. "
+            "VD: `Hướng dẫn tích hợp`\n\n"
+            "• **Danh sách lệnh:** lệnh tích hợp, các lệnh tích hợp. "
+            "VD: `Các lệnh tích hợp`\n\n"
+            "• **Thiết bị:** bật, tắt, mở, đóng, khóa, mở khóa, tăng, giảm, đặt, chỉnh, "
+            "chuyển, đổi, dừng, tạm dừng, tiếp tục, phát, quét, dọn dẹp, làm sạch, "
+            "kiểm tra, xem trạng thái, trạng thái, báo cáo, hẹn giờ, đặt hẹn giờ, "
+            "lên lịch, đặt lịch. "
+            "VD: `Tắt quạt phòng ngủ sau 30 phút`\n\n"
+            "• **Thời tiết và bão:** thời tiết, xem/kiểm tra/tra cứu/dự báo thời tiết, "
+            "kiểm tra/tin/tình hình bão, có bão không, áp thấp nhiệt đới, có mưa không, "
+            "khả năng mưa, xác suất mưa, lượng mưa, chỉ số UV, nhiệt độ, độ ẩm. "
+            "VD: `Thời tiết Hà Nội 5 ngày tới`\n\n"
+            "• **Nhắc hẹn:** nhắc, hẹn, nhắc tôi, tạo/đặt/thêm nhắc hẹn, nhắc nhở, "
+            "lịch nhắc, hẹn giờ; liệt kê/đọc/xem danh sách; hủy/xóa. "
+            "VD: `Nhắc Zalo Khải 20 giờ uống thuốc`\n\n"
+            "• **Lịch và sự kiện:** lịch, xem/kiểm tra/tra/tra cứu lịch, sự kiện, "
+            "tạo/thêm/đặt/lên lịch, cuộc họp, cuộc hẹn. "
+            "VD: `Tạo sự kiện họp sale ngày mai lúc 8 giờ`\n\n"
+            "• **Thông báo loa:** thông báo loa, báo loa, báo ra loa, thông báo ra loa, "
+            "gửi loa, nhắn loa. VD: `Báo loa Phòng Ngủ xuống ăn cơm`\n\n"
+            "• **Gửi Zalo:** gửi Zalo, thông báo Zalo, báo Zalo. "
+            "VD: `Thông báo Zalo Khải xuống ăn cơm`\n\n"
+            "• **Chụp camera:** chụp/lấy ảnh hoặc hình từ camera, máy quay, cam; "
+            "chụp camera, chụp cam. VD: `Chụp Cam Cổng`\n\n"
+            "• **Phân tích camera:** phân tích cam/camera, kiểm tra cam/camera, "
+            "xem và phân tích cam/camera. VD: `Phân tích Cam Cổng`\n\n"
+            "• **Ghi chú:** thêm/tạo/lưu/viết ghi chú hoặc ghi nhớ; xem/liệt kê/đọc; "
+            "sửa/chỉnh sửa/cập nhật/đổi; xóa/hủy. VD: `Ghi chú mua sữa`\n\n"
+            "• **Trò chuyện AI:** trò chuyện đi, tám đi, buôn đi. "
+            "VD: `Trò chuyện đi`\n\n"
+            "• **Tìm kiếm:** tìm thông tin, tìm kiếm, tìm kiếm trên mạng, tìm trên mạng, "
+            "tra cứu. VD: `Tìm thông tin giá vàng hôm nay`\n\n"
+            "• **Tạo ảnh AI:** tạo một bức ảnh, tạo bức ảnh, tạo một ảnh, tạo ảnh. "
+            "VD: `Tạo ảnh ngôi nhà bên hồ`\n\n"
+            "• **Âm dương lịch:** âm lịch, lịch âm, dương lịch, lịch dương, thứ mấy, "
+            "đổi/chuyển/chuyển đổi/quy đổi, tra/tra cứu/xem ngày. "
+            "VD: `Đổi 30/11/1984 sang âm lịch`\n\n"
+            "• **Bộ nhớ câu lệnh:** học/dạy/thêm câu lệnh, thêm cách nói, "
+            "danh sách/liệt kê/xem câu lệnh đã học, xóa/quên câu lệnh. "
+            "VD: `Học câu lệnh xem cổng để chụp Cam Cổng`\n\n"
+            "• **Điều khiển luồng:** hủy, chọn, xác nhận, gửi đến, thông báo đến, "
+            "tất cả. VD: `Hủy`\n\n"
+            "💡 Tên Mobile, Zalo, loa và camera là tên đã đặt trong Settings."
+        )
+
     def _integration_help_text(self) -> str:
         """Return a compact shared guide for Voice Assist and Zalo."""
         keyword = self._zalo_invocation_keyword_markdown()
@@ -4483,7 +4622,8 @@ class ConversationalAssistantManager(NoteManagerMixin):
             "⚙️ **Cấu hình**\n"
             "• Vào **Settings > Devices & services > Conversational Assistant > Configure** "
             "để đặt tên cho Mobile, Zalo, loa, camera và cấu hình AI, lịch, thời tiết, TTS.\n\n"
-            "💡 Gửi `Hướng dẫn sử dụng tích hợp` để xem lại."
+            "💡 Gửi `Hướng dẫn sử dụng tích hợp` để xem lại; gửi "
+            "`Các lệnh tích hợp` để xem toàn bộ từ khóa."
         )
 
     def _zalo_upcoming_reminders(
@@ -4739,7 +4879,11 @@ class ConversationalAssistantManager(NoteManagerMixin):
         ]
 
     async def _async_send_zalo_webhook_reply(
-        self, context: ZaloWebhookContext, message: str
+        self,
+        context: ZaloWebhookContext,
+        message: str,
+        *,
+        max_chars: int = ZALO_TEXT_CHUNK_MAX_CHARS,
     ) -> bool:
         """Reply to the exact user/group that sent a webhook command."""
         message = self._address_response(message)
@@ -4763,7 +4907,7 @@ class ConversationalAssistantManager(NoteManagerMixin):
             )
             return False
 
-        chunks = self._split_zalo_text(message)
+        chunks = self._split_zalo_text(message, max_chars=max_chars)
         for index, chunk in enumerate(chunks, start=1):
             try:
                 await self.hass.services.async_call(
@@ -4787,7 +4931,51 @@ class ConversationalAssistantManager(NoteManagerMixin):
                     len(chunks),
                 )
                 return False
+            if index < len(chunks):
+                await asyncio.sleep(ZALO_TEXT_CHUNK_SEND_DELAY_SECONDS)
         return True
+
+    async def _async_send_integration_commands_to_zalo(
+        self, context: ZaloWebhookContext
+    ) -> ZaloDirectResponse:
+        """Send the compact command catalog in conservative Zalo-safe chunks."""
+        self._clear_zalo_pending_for_owner(context.owner_key)
+        sent = await self._async_send_zalo_webhook_reply(
+            context,
+            self._integration_commands_text(),
+            max_chars=ZALO_GUIDE_CHUNK_MAX_CHARS,
+        )
+        if not sent:
+            _LOGGER.error(
+                "Failed sending integration command catalog to Zalo thread %s "
+                "with account %s",
+                context.thread_id,
+                self._zalo_account_selection_for_context(context),
+            )
+        return ZaloDirectResponse(
+            sent=sent, response_type="integration_commands"
+        )
+
+    async def _async_send_integration_help_to_zalo(
+        self, context: ZaloWebhookContext
+    ) -> ZaloDirectResponse:
+        """Send the built-in guide in conservative Zalo-safe chunks."""
+        self._clear_zalo_pending_for_owner(context.owner_key)
+        sent = await self._async_send_zalo_webhook_reply(
+            context,
+            self._integration_help_text(),
+            max_chars=ZALO_GUIDE_CHUNK_MAX_CHARS,
+        )
+        if not sent:
+            _LOGGER.error(
+                "Failed sending integration guide to Zalo thread %s with "
+                "account %s",
+                context.thread_id,
+                self._zalo_account_selection_for_context(context),
+            )
+        return ZaloDirectResponse(
+            sent=sent, response_type="integration_help"
+        )
 
     @staticmethod
     def _split_zalo_text(
@@ -13060,11 +13248,13 @@ class ConversationalAssistantManager(NoteManagerMixin):
         service_context: Context | None = None,
     ) -> str | ZaloDirectResponse | None:
         """Route one inbound Zalo text message to reminder actions."""
-        # The integration guide is a global command and must not be consumed by
-        # an older note, reminder, device, camera, calendar, or chat flow.
+        # The command catalog and integration guide are global commands and must
+        # not be consumed by an older note, reminder, device, camera, calendar,
+        # or chat flow.
+        if _is_integration_commands_request(context.text):
+            return await self._async_send_integration_commands_to_zalo(context)
         if _is_integration_help_request(context.text):
-            self._clear_zalo_pending_for_owner(context.owner_key)
-            return self._integration_help_text()
+            return await self._async_send_integration_help_to_zalo(context)
 
         first_chat_turn = chat_start_request(context.text)
         if first_chat_turn is not None:
@@ -13298,9 +13488,10 @@ class ConversationalAssistantManager(NoteManagerMixin):
             self._zalo_pending_cameras.pop(context.owner_key, None)
             self._zalo_pending_calendar_events.pop(context.owner_key, None)
             return await self._async_delete_from_zalo(context)
+        if command == "commands":
+            return await self._async_send_integration_commands_to_zalo(context)
         if command == "help":
-            self._clear_zalo_pending_for_owner(context.owner_key)
-            return self._integration_help_text()
+            return await self._async_send_integration_help_to_zalo(context)
         if command == ACTION_CAMERA_ANALYSIS:
             self._clear_zalo_pending_for_owner(context.owner_key)
             return await self._async_camera_analysis_from_zalo(context)
@@ -16201,9 +16392,12 @@ class ConversationalAssistantManager(NoteManagerMixin):
         source_keys = self._source_keys(user_input)
         self._clear_pending_for_source(source_keys)
         self._sync_pending_followup_trigger()
-        return await self._async_voice_response(
-            user_input, self._integration_help_text()
+        response = (
+            self._integration_commands_text()
+            if _is_integration_commands_request(user_input.text)
+            else self._integration_help_text()
         )
+        return await self._async_voice_response(user_input, response)
 
     async def _async_learn_command_from_voice(
         self, user_input: ConversationInput, _result: RecognizeResult
@@ -16369,7 +16563,10 @@ class ConversationalAssistantManager(NoteManagerMixin):
 
     def _is_primary_voice_command(self, text: str) -> bool:
         """Return whether another Conversational Assistant trigger handles text."""
-        if _is_integration_help_request(text):
+        if (
+            _is_integration_commands_request(text)
+            or _is_integration_help_request(text)
+        ):
             return True
         if (
             is_lunar_date_conversion_request(text)
