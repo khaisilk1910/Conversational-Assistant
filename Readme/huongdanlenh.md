@@ -1,64 +1,132 @@
 # Hướng dẫn Conversational Assistant
 
-## Gọi tích hợp trên Zalo
+## 1. Gọi tích hợp trên Zalo
 
-<img width="561" height="263" alt="image" src="https://github.com/user-attachments/assets/4264af07-3388-4eff-81a9-9c6e29f34f61" />
+Khi **Bắt buộc từ khóa gọi tích hợp trên Zalo** đang bật, mọi yêu cầu mới phải bắt đầu bằng đúng **Zalo invocation keyword** trong Settings.
 
-Khi tùy chọn **Bắt buộc từ khóa gọi tích hợp trên Zalo** đang bật, mọi yêu cầu mới phải bắt đầu bằng đúng **Zalo invocation keyword** đã lưu trong Settings. Trong lúc bot đang chờ chọn hoặc xác nhận, có thể trả lời trực tiếp mà không cần nhập lại từ khóa.
-
-Ví dụ, thay `[TỪ KHÓA]` bằng giá trị hiện được cấu hình:
+Thay `[TỪ KHÓA]` bằng giá trị đang cấu hình:
 
 - `[TỪ KHÓA] hướng dẫn tích hợp`
 - `[TỪ KHÓA] các lệnh tích hợp`
+- `[TỪ KHÓA] nhắc Zalo Khải 1 phút nữa uống thuốc`
 - `[TỪ KHÓA] chụp Cam Cổng`
-- `[TỪ KHÓA] báo loa Phòng Ngủ xuống ăn cơm`
-- `[TỪ KHÓA] thông báo Zalo Khải xuống ăn cơm`
-- `[TỪ KHÓA] thời tiết Hà Nội 5 ngày tới`
 
-Gửi **Hủy** để dừng luồng đang chờ. Thời gian chọn hoặc xác nhận là 120 giây.
+Khi bot đang chờ chọn hoặc xác nhận, chỉ cần trả lời trực tiếp, không cần nhập lại từ khóa.
 
-## Xem nhanh toàn bộ từ khóa
+Nếu người dùng đã nhập đúng Zalo invocation keyword nhưng phần yêu cầu không khớp bất kỳ tính năng hoặc câu lệnh đã học nào, tích hợp sẽ phản hồi **Các lệnh tích hợp** để người dùng chọn lại từ khóa chính xác.
 
-Gửi **lệnh tích hợp** hoặc **các lệnh tích hợp** để nhận danh sách ngắn gọn toàn bộ nhóm từ khóa. Mỗi tính năng có đúng một ví dụ mẫu. Trên Zalo, thêm Zalo invocation keyword ở đầu khi tùy chọn bắt buộc từ khóa đang bật.
+## 2. Hủy phiên ngay lập tức
 
-## Các nhóm tính năng
+Trong bất kỳ phiên nào, gửi một trong các lệnh:
+
+- `Hủy`
+- `Hủy yêu cầu`
+- `Hủy phiên`
+- `Dừng yêu cầu`
+- `Dừng phiên`
+- `Kết thúc phiên`
+- `Bỏ yêu cầu vừa rồi`
+
+Lệnh hủy không cần Zalo invocation keyword. Tích hợp sẽ dừng ngay phiên ghi chú, nhắc hẹn, thiết bị, lịch, camera, gửi Zalo, thông báo loa, trò chuyện AI hoặc tác vụ nền đang xử lý. Thời gian chờ chọn hoặc xác nhận là 120 giây.
+
+## 3. Xem hướng dẫn và danh sách lệnh
+
+### Xem hướng dẫn
+
+Từ khóa: `trợ giúp`, `hướng dẫn`, `hướng dẫn sử dụng`, `hướng dẫn tích hợp`  
+Ví dụ: `Hướng dẫn tích hợp`
+
+### Xem tất cả lệnh
+
+Từ khóa: `lệnh tích hợp`, `các lệnh tích hợp`, `xem lệnh tích hợp`, `xem các lệnh tích hợp`, `xem lệnh của tích hợp`, `xem các lệnh của tích hợp`, `liệt kê các lệnh tích hợp`  
+Ví dụ: `Các lệnh tích hợp`
+
+Phản hồi được chia theo tính năng, ngắt dòng dễ đọc và mỗi tính năng chỉ có một ví dụ.
+
+## 4. Các lệnh tích hợp
 
 ### Thiết bị
 
-Bật, tắt, tăng, giảm, thay đổi chế độ điều hòa hoặc quạt và hẹn giờ thao tác thiết bị.
+Từ khóa: `bật`, `tắt`, `mở`, `đóng`, `khóa`, `mở khóa`, `tăng`, `giảm`, `đặt`, `chỉnh`, `chuyển`, `đổi`, `dừng`, `tạm dừng`, `tiếp tục`, `phát`, `quét`, `dọn dẹp`, `làm sạch`, `xem trạng thái`, `hẹn giờ`, `lên lịch`  
+Ví dụ: `Tắt quạt phòng ngủ sau 30 phút`
 
 ### Thời tiết và bão
 
-Hỏi thời tiết hiện tại hoặc dự báo tối đa 7 ngày; kiểm tra bão và áp thấp nhiệt đới bằng AI Search.
+Từ khóa: `thời tiết`, `dự báo thời tiết`, `có mưa không`, `khả năng mưa`, `nhiệt độ`, `độ ẩm`, `chỉ số UV`, `kiểm tra bão`, `áp thấp nhiệt đới`  
+Ví dụ: `Thời tiết Hà Nội 5 ngày tới`
 
-### Nhắc hẹn và lịch
+### Nhắc hẹn
 
-Tạo, xem, sửa, xóa nhắc hẹn hoặc sự kiện; hỗ trợ lặp lại và gửi đến Mobile, Zalo hoặc loa đã đặt tên.
+Từ khóa: `nhắc`, `hẹn`, `nhắc tôi`, `tạo nhắc hẹn`, `đặt nhắc hẹn`, `thêm nhắc hẹn`, `xem danh sách nhắc hẹn`, `hủy nhắc hẹn`, `xóa nhắc hẹn`  
+Ví dụ: `Nhắc Zalo Khải 1 phút nữa uống thuốc`
+
+Có thể nhắc trực tiếp đến tên **Mobile**, **Zalo** hoặc **loa** đã đặt trong Settings và có thể nêu nhiều tên liên tiếp. Nếu không nêu nơi nhận, tích hợp luôn hiển thị danh sách để chọn.
+
+### Lịch và sự kiện
+
+Từ khóa: `xem lịch`, `kiểm tra lịch`, `sự kiện`, `tạo sự kiện`, `thêm sự kiện`, `đặt lịch`, `lên lịch`, `cuộc họp`, `cuộc hẹn`  
+Ví dụ: `Tạo sự kiện họp sale ngày mai lúc 8 giờ`
 
 ### Thông báo loa
 
-Gọi trực tiếp tên loa đã đặt hoặc chọn một, nhiều loa hay tất cả loa. Loa đang bận sẽ được chờ và kiểm tra lại.
+Từ khóa: `thông báo loa`, `báo loa`, `báo ra loa`, `thông báo ra loa`, `gửi loa`, `nhắn loa`  
+Ví dụ: `Báo loa Phòng Ngủ xuống ăn cơm`
 
 ### Gửi Zalo
 
-Gọi trực tiếp tên Zalo đã đặt. Nội dung có ngày giờ có thể tạo nhắc hẹn trước thời điểm đó 15 phút.
+Từ khóa: `gửi Zalo`, `thông báo Zalo`, `báo Zalo`  
+Ví dụ: `Thông báo Zalo Khải xuống ăn cơm`
 
-### Camera
+### Chụp camera
 
-Chụp hoặc phân tích camera bằng tên đã đặt. Khi không có tên phù hợp, bot hiển thị danh sách camera để chọn.
+Từ khóa: `chụp camera`, `chụp cam`, `chụp ảnh từ camera`, `lấy ảnh camera`, `lấy hình camera`  
+Ví dụ: `Chụp Cam Cổng`
 
-### Ghi chú và trò chuyện
+### Phân tích camera
 
-Thêm, xem, sửa, xóa ghi chú; mở phiên trò chuyện AI bằng lệnh **Trò chuyện** và đóng bằng **Kết thúc**.
+Từ khóa: `phân tích camera`, `phân tích cam`, `kiểm tra camera`, `xem và phân tích camera`  
+Ví dụ: `Phân tích Cam Cổng`
 
-### AI và bộ nhớ câu lệnh
+### Ghi chú
 
-Tìm thông tin, tạo ảnh, học câu lệnh mới, xem hoặc xóa câu lệnh đã học.
+Từ khóa: `thêm ghi chú`, `tạo ghi chú`, `lưu ghi chú`, `viết ghi chú`, `xem ghi chú`, `liệt kê ghi chú`, `đọc ghi chú`, `sửa ghi chú`, `cập nhật ghi chú`, `xóa ghi chú`  
+Ví dụ: `Ghi chú mua sữa`
+
+### Trò chuyện AI
+
+Từ khóa: `trò chuyện đi`, `tám đi`, `buôn đi`, `kết thúc`  
+Ví dụ: `Trò chuyện đi`
+
+### Tìm kiếm Internet
+
+Từ khóa: `tìm thông tin`, `tìm kiếm`, `tìm kiếm trên mạng`, `tìm trên mạng`, `tra cứu`  
+Ví dụ: `Tìm thông tin giá vàng hôm nay`
+
+### Tạo ảnh AI
+
+Từ khóa: `tạo một bức ảnh`, `tạo bức ảnh`, `tạo một ảnh`, `tạo ảnh`  
+Ví dụ: `Tạo ảnh ngôi nhà bên hồ`
 
 ### Âm dương lịch
 
-Tra ngày âm lịch, thứ trong tuần và chuyển đổi ngày âm sang dương hoặc ngày dương sang âm.
+Từ khóa: `âm lịch`, `lịch âm`, `dương lịch`, `lịch dương`, `thứ mấy`, `đổi`, `chuyển`, `quy đổi`, `tra ngày`, `xem ngày`  
+Ví dụ: `Đổi 30/11/1984 sang âm lịch`
 
-## Cấu hình
+### Bộ nhớ câu lệnh
 
-Mở **Settings > Devices & services > Conversational Assistant > Configure** để đặt tên Mobile, Zalo, loa, camera và cấu hình AI, lịch, thời tiết, TTS cùng Zalo invocation keyword.
+Từ khóa: `học câu lệnh`, `dạy câu lệnh`, `thêm câu lệnh`, `thêm cách nói`, `xem câu lệnh đã học`, `xóa câu lệnh`, `quên câu lệnh`  
+Ví dụ: `Học câu lệnh xem cổng để chụp Cam Cổng`
+
+### Điều khiển phiên
+
+Từ khóa: `hủy`, `hủy yêu cầu`, `hủy phiên`, `dừng yêu cầu`, `dừng phiên`, `kết thúc phiên`, `bỏ yêu cầu vừa rồi`  
+Ví dụ: `Hủy`
+
+## 5. Cấu hình
+
+Mở **Settings > Devices & services > Conversational Assistant > Configure** để:
+
+- đặt tên Mobile, Zalo, loa và camera;
+- cấu hình AI Agent, AI Search, lịch, thời tiết và TTS;
+- bật hoặc tắt yêu cầu Zalo invocation keyword;
+- thay đổi Zalo invocation keyword dùng để gọi tích hợp.
