@@ -53,7 +53,24 @@ Ví dụ: `Tắt quạt phòng ngủ sau 30 phút`
 ### Thời tiết và bão
 
 Từ khóa: `thời tiết`, `dự báo thời tiết`, `có mưa không`, `khả năng mưa`, `nhiệt độ`, `độ ẩm`, `chỉ số UV`, `kiểm tra bão`, `áp thấp nhiệt đới`  
-Ví dụ: `Thời tiết Hà Nội 5 ngày tới`
+Ví dụ: `Thời tiết ngày mai`
+
+Có thể hỏi bằng ngôn ngữ tự nhiên như:
+
+- `Thời tiết hôm nay`
+- `Thời tiết ngày mai`
+- `Thời tiết 2 ngày tiếp theo`
+- `Thời tiết tuần này`
+- `Thời tiết ban ngày và ban đêm ngày mai`
+
+Tích hợp xử lý theo thứ tự:
+
+1. Dùng thực thể `weather.*` đã chọn trong **Weather settings**.
+2. Gọi action `weather.get_forecasts` với loại phù hợp: `daily`, `hourly` hoặc `twice_daily`.
+3. Chuyển ngày giờ UTC của nguồn dự báo sang múi giờ Home Assistant, lọc đúng khoảng ngày người dùng yêu cầu và chỉ phản hồi các trường thực sự có dữ liệu.
+4. Chỉ dùng **AI Search** khi không có thực thể weather, action lỗi, dữ liệu không đủ khoảng ngày hoặc người dùng hỏi một địa điểm khác với nguồn weather đã chọn.
+
+Mỗi yêu cầu dự báo hỗ trợ tối đa 7 ngày. Kiểm tra bão/áp thấp vẫn dùng AI Search và nguồn Internet mới nhất vì cần dữ liệu khu vực cùng cảnh báo chính thức.
 
 ### Nhắc hẹn
 
@@ -127,6 +144,7 @@ Ví dụ: `Hủy`
 Mở **Settings > Devices & services > Conversational Assistant > Configure** để:
 
 - đặt tên Mobile, Zalo, loa và camera;
-- cấu hình AI Agent, AI Search, lịch, thời tiết và TTS;
+- chọn thực thể `weather.*` trong **Weather settings** để ưu tiên dữ liệu Home Assistant;
+- cấu hình AI Agent, AI Search dự phòng, lịch, bản tin thời tiết và TTS;
 - bật hoặc tắt yêu cầu Zalo invocation keyword;
 - thay đổi Zalo invocation keyword dùng để gọi tích hợp.
