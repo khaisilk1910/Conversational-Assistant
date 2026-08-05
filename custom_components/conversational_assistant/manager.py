@@ -99,6 +99,8 @@ from .const import (
     COMMAND_LEARN_SENTENCES,
     COMMAND_LIST_SENTENCES,
     CONF_CALENDAR_ENTITIES,
+    CONF_CALENDAR_SOLAR_ENTITY_ID,
+    CONF_CALENDAR_LUNAR_ENTITY_ID,
     CONF_CALENDAR_LOOKAHEAD_DAYS,
     CONF_CALENDAR_NOTIFICATION_ENABLED,
     CONF_CALENDAR_NOTIFICATION_MOBILE_DEVICES,
@@ -282,6 +284,7 @@ from .device_control import (
     requested_device_domains,
 )
 from .lunar_calendar import (
+    CONVERSION_LUNAR_TO_SOLAR,
     LunarDateConversionRequest,
     LunarDateLookupRequest,
     LunarDateParseError,
@@ -879,6 +882,8 @@ class CalendarTarget:
 
     entity_id: str
     display_name: str
+    calendar_kind: str = "other"
+    configured: bool = False
 
 
 @dataclass(slots=True)
@@ -889,6 +894,11 @@ class PendingZaloCalendarEvent:
     calendars: list[CalendarTarget]
     expires_at: datetime
     ai_attempted_agents: list[str]
+    requested_kind: str | None = None
+    lunar_source_text: str = ""
+    lunar_solar_text: str = ""
+    lunar_fallback_to_solar: bool = False
+    recurrence_warning: bool = False
 
 
 @dataclass(slots=True)
@@ -1537,6 +1547,16 @@ class ConversationalAssistantManager(NoteManagerMixin):
         else:
             return None
         return self._normalized_option_list(value)
+
+    @property
+    def calendar_solar_entity_id(self) -> str:
+        """Return the configured default Solar calendar entity ID."""
+        return str(self._option(CONF_CALENDAR_SOLAR_ENTITY_ID, "") or "").strip()
+
+    @property
+    def calendar_lunar_entity_id(self) -> str:
+        """Return the configured default Lunar calendar entity ID."""
+        return str(self._option(CONF_CALENDAR_LUNAR_ENTITY_ID, "") or "").strip()
 
     @property
     def calendar_monitored_entity_ids(self) -> list[str]:
@@ -4634,8 +4654,9 @@ class ConversationalAssistantManager(NoteManagerMixin):
             "Zalo hoặc loa; nếu không nêu nơi nhận sẽ hiện danh sách chọn.\n"
             "VD: `Nhắc Zalo Khải 1 phút nữa uống thuốc`\n\n"
             "📅 **Lịch và sự kiện** — xem lịch, kiểm tra lịch, sự kiện, "
-            "tạo/thêm/đặt/lên lịch cuộc họp hoặc cuộc hẹn.\n"
-            "VD: `Tạo sự kiện họp sale ngày mai lúc 8 giờ`\n\n"
+            "tạo/thêm/đặt/lên lịch cuộc họp hoặc cuộc hẹn. Có thể nói rõ "
+            "Dương lịch hoặc Âm lịch; nếu chưa nói, bot sẽ hỏi và liệt kê lịch.\n"
+            "VD: `Tạo sự kiện giỗ ông ngày 12/8/2026 âm lịch`\n\n"
             "🔊 **Thông báo loa** — thông báo loa, báo loa, báo ra loa, "
             "thông báo ra loa, gửi loa, nhắn loa.\n"
             "VD: `Báo loa Phòng Ngủ xuống ăn cơm`\n\n"
@@ -4708,10 +4729,14 @@ class ConversationalAssistantManager(NoteManagerMixin):
             "Home Assistant không có, không đủ hoặc yêu cầu địa điểm khác.\n"
             "• Ví dụ: `Thời tiết ngày mai`.\n\n"
             "⏰ **Nhắc hẹn và lịch**\n"
-            "• Tạo, xem, sửa, xóa nhắc hẹn hoặc sự kiện; hỗ trợ lặp lại và "
-            "nhiều nơi nhận. Gọi thẳng tên Mobile, Zalo hoặc loa đã đặt; nếu "
-            "không nêu nơi nhận, tích hợp sẽ hiện danh sách để chọn.\n"
-            "• Ví dụ: `Nhắc Zalo Khải 1 phút nữa uống thuốc`.\n\n"
+            "• Tạo, xem, sửa, xóa nhắc hẹn hoặc sự kiện. Sự kiện có thể nói "
+            "rõ Dương lịch hoặc Âm lịch; nếu chưa nói, tích hợp sẽ hỏi và "
+            "liệt kê lịch theo Calendar settings.\n"
+            "• Ngày âm được đổi bằng action `am_lich_viet_nam.convert_date`; "
+            "mô tả sự kiện ghi đủ ngày âm và ngày dương tương ứng.\n"
+            "• Sự kiện âm lặp theo tháng/năm nên dùng lịch âm đã cấu hình vì "
+            "ngày dương tương ứng thay đổi.\n"
+            "• Ví dụ: `Tạo sự kiện giỗ ông ngày 12/8/2026 âm lịch`.\n\n"
             "🔊 **Loa và Zalo**\n"
             "• Gọi thẳng tên đã đặt hoặc chọn một, nhiều nơi nhận hay tất cả.\n"
             "• Ví dụ: `Báo loa Phòng Ngủ xuống ăn cơm`.\n\n"
@@ -12849,12 +12874,33 @@ class ConversationalAssistantManager(NoteManagerMixin):
         ]
         return matched or states
 
+    @staticmethod
+    def _calendar_kind_from_name(entity_id: str, display_name: str) -> str:
+        """Infer a calendar type only when configuration does not define it."""
+        normalized = normalize_text(f"{display_name} {entity_id}")
+        if any(value in normalized for value in ("am lich", "lich am", "lunar")):
+            return "lunar"
+        if any(value in normalized for value in ("duong lich", "lich duong", "solar", "gregorian")):
+            return "solar"
+        return "other"
+
+    def _calendar_target_kind(self, entity_id: str, display_name: str) -> tuple[str, bool]:
+        """Return configured or inferred kind for one calendar."""
+        if entity_id == self.calendar_solar_entity_id:
+            return "solar", True
+        if entity_id == self.calendar_lunar_entity_id:
+            return "lunar", True
+        return self._calendar_kind_from_name(entity_id, display_name), False
+
     def _zalo_writable_calendar_targets(self) -> list[CalendarTarget]:
-        """Return exposed calendars that advertise event creation support."""
+        """Return every currently available calendar that supports event creation."""
         if not self.hass.services.has_service("calendar", "create_event"):
             return []
+
         targets: list[CalendarTarget] = []
-        for state in self._zalo_exposed_calendar_states(""):
+        for state in self.hass.states.async_all("calendar"):
+            if state.state in (STATE_UNAVAILABLE, STATE_UNKNOWN):
+                continue
             raw_features = state.attributes.get(ATTR_SUPPORTED_FEATURES, 0)
             try:
                 supported = int(raw_features)
@@ -12862,15 +12908,26 @@ class ConversationalAssistantManager(NoteManagerMixin):
                 supported = 0
             if not supported & int(CalendarEntityFeature.CREATE_EVENT):
                 continue
+            display_name = str(state.name or state.entity_id)
+            calendar_kind, configured = self._calendar_target_kind(
+                state.entity_id, display_name
+            )
             targets.append(
                 CalendarTarget(
                     entity_id=state.entity_id,
-                    display_name=str(state.name or state.entity_id),
+                    display_name=display_name,
+                    calendar_kind=calendar_kind,
+                    configured=configured,
                 )
             )
         return sorted(
             targets,
-            key=lambda target: (target.display_name.casefold(), target.entity_id),
+            key=lambda target: (
+                0 if target.configured else 1,
+                {"solar": 0, "lunar": 1}.get(target.calendar_kind, 2),
+                target.display_name.casefold(),
+                target.entity_id,
+            ),
         )
 
     def _calendar_entity(self, entity_id: str) -> Any | None:
@@ -13383,27 +13440,360 @@ class ConversationalAssistantManager(NoteManagerMixin):
         )
 
     @staticmethod
+    def _calendar_requested_kind(text: str) -> str | None:
+        """Return an explicit Solar/Lunar destination, or None when ambiguous."""
+        normalized = normalize_text(text)
+        has_lunar = any(
+            value in normalized
+            for value in ("am lich", "lich am", "ngay am", "lunar")
+        )
+        has_solar = any(
+            value in normalized
+            for value in ("duong lich", "lich duong", "ngay duong", "solar", "gregorian")
+        )
+        if has_lunar == has_solar:
+            return None
+        return "lunar" if has_lunar else "solar"
+
+    @staticmethod
+    def _calendar_kind_label(kind: str) -> str:
+        return {
+            "solar": "☀️ Dương lịch",
+            "lunar": "🌙 Âm lịch",
+        }.get(kind, "🗓️ Lịch khác")
+
+    @staticmethod
+    def _calendar_lunar_recurrence_requested(text: str) -> bool:
+        normalized = normalize_text(text)
+        return any(
+            phrase in normalized
+            for phrase in (
+                "hang thang", "moi thang", "lap lai hang thang",
+                "hang nam", "moi nam", "lap lai hang nam",
+                "monthly", "yearly", "every month", "every year",
+            )
+        )
+
+    @staticmethod
+    def _calendar_lunar_date_parts(
+        text: str, now: datetime
+    ) -> tuple[int, int, int, tuple[int, int]] | None:
+        """Extract a lunar date and source span from common event wording."""
+        full_moon_pattern = re.compile(
+            r"\b(?:ngày|ngay)?\s*(?:rằm|ram)\s+"
+            r"(?:tháng|thang)\s+(?P<month>\d{1,2})"
+            r"(?:\s+(?:nhuận|nhuan|thường|thuong))?"
+            r"(?:\s+(?:năm|nam)\s+(?P<year>\d{4}))?\b",
+            re.IGNORECASE,
+        )
+        full_moon_match = full_moon_pattern.search(text)
+        if full_moon_match is not None:
+            year_text = full_moon_match.groupdict().get("year")
+            return (
+                15,
+                int(full_moon_match.group("month")),
+                int(year_text) if year_text else dt_util.as_local(now).year,
+                full_moon_match.span(),
+            )
+
+        patterns = (
+            re.compile(
+                r"(?<!\d)(?P<day>\d{1,2})\s*[/.-]\s*(?P<month>\d{1,2})"
+                r"\s*[/.-]\s*(?P<year>\d{4})(?!\d)",
+                re.IGNORECASE,
+            ),
+            re.compile(
+                r"\b(?:ngày|ngay|mùng|mung)?\s*(?P<day>\d{1,2})\s+"
+                r"(?:tháng|thang)\s+(?P<month>\d{1,2})"
+                r"(?:\s+(?:nhuận|nhuan|thường|thuong))?"
+                r"(?:\s+(?:năm|nam)\s+(?P<year>\d{4}))?\b",
+                re.IGNORECASE,
+            ),
+            re.compile(
+                r"(?<!\d)(?P<day>\d{1,2})\s*[/.-]\s*(?P<month>\d{1,2})"
+                r"(?!\s*[/.-]\s*\d)",
+                re.IGNORECASE,
+            ),
+        )
+        for pattern in patterns:
+            match = pattern.search(text)
+            if match is None:
+                continue
+            year_text = match.groupdict().get("year")
+            return (
+                int(match.group("day")),
+                int(match.group("month")),
+                int(year_text) if year_text else dt_util.as_local(now).year,
+                match.span(),
+            )
+        return None
+
+    @staticmethod
+    def _calendar_date_from_conversion_payload(
+        payload: dict[str, Any], *, prefer_leap: bool
+    ) -> date | None:
+        """Extract the Gregorian date returned by am_lich_viet_nam."""
+        if prefer_leap:
+            ordered_keys = [
+                "ngay_duong_thang_nhuan",
+                "ngay_duong_lich",
+                "ngay_duong_thang_thuong",
+            ]
+        else:
+            ordered_keys = [
+                "ngay_duong_thang_thuong",
+                "ngay_duong_lich",
+                "ngay_duong_thang_nhuan",
+            ]
+        ordered_keys.extend(["solar_date", "gregorian_date", "date"])
+        for key in ordered_keys:
+            raw = str(payload.get(key, "") or "").strip()
+            if not raw:
+                continue
+            parsed = dt_util.parse_date(raw)
+            if parsed is not None:
+                return parsed
+            match = re.search(
+                r"(?<!\d)(?P<day>\d{1,2})\s*[/.-]\s*(?P<month>\d{1,2})"
+                r"\s*[/.-]\s*(?P<year>\d{4})(?!\d)",
+                raw,
+            )
+            if match is not None:
+                try:
+                    return date(
+                        int(match.group("year")),
+                        int(match.group("month")),
+                        int(match.group("day")),
+                    )
+                except ValueError:
+                    continue
+        try:
+            return date(
+                int(payload.get("nam")),
+                int(payload.get("thang")),
+                int(payload.get("ngay")),
+            )
+        except (TypeError, ValueError):
+            return None
+
+    async def _async_prepare_lunar_calendar_event_text(
+        self,
+        text: str,
+        now: datetime,
+        service_context: Context | None,
+    ) -> tuple[str | None, str, str, str | None]:
+        """Convert one explicit lunar event date before normal event parsing."""
+        parts = self._calendar_lunar_date_parts(text, now)
+        if parts is None:
+            return (
+                None,
+                "",
+                "",
+                "Tôi thấy bạn chọn **Âm lịch** nhưng chưa đọc được ngày âm cụ thể. "
+                "Hãy nói rõ ngày, tháng, năm; ví dụ: **thêm sự kiện giỗ ông "
+                "ngày 12/8/2026 âm lịch**.",
+            )
+        day, month, year, span = parts
+        request = LunarDateConversionRequest(
+            conversion_type=CONVERSION_LUNAR_TO_SOLAR,
+            day=day,
+            month=month,
+            year=year,
+        )
+        if not (1 <= day <= 30 and 1 <= month <= 12):
+            return None, "", "", (
+                f"Ngày âm lịch {day}/{month}/{year} không hợp lệ. "
+                "Ngày âm phải từ 1 đến 30 và tháng từ 1 đến 12."
+            )
+        if not 1800 <= year <= 2199:
+            return None, "", "", (
+                f"Năm âm lịch {year} nằm ngoài phạm vi action hỗ trợ "
+                "(1800–2199). Hãy nhập lại năm phù hợp."
+            )
+        if not self.hass.services.has_service(
+            LUNAR_CALENDAR_DOMAIN, LUNAR_CALENDAR_SERVICE_CONVERT_DATE
+        ):
+            return None, "", "", (
+                "Chưa có action **am_lich_viet_nam.convert_date** để đổi ngày âm "
+                "sang ngày dương trước khi tạo sự kiện. Hãy cài hoặc khởi động "
+                "tích hợp Âm lịch Việt Nam rồi thử lại."
+            )
+        try:
+            response = await self.hass.services.async_call(
+                LUNAR_CALENDAR_DOMAIN,
+                LUNAR_CALENDAR_SERVICE_CONVERT_DATE,
+                request.service_data(),
+                blocking=True,
+                context=service_context,
+                return_response=True,
+            )
+        except Exception:  # noqa: BLE001 - report conversion failure clearly
+            _LOGGER.exception("Failed converting lunar event date %s", request)
+            return None, "", "", (
+                "Action Âm lịch Việt Nam đang bận tính ngày 😅. Hãy kiểm tra nhật "
+                "ký Home Assistant rồi thử lại."
+            )
+        payload = unwrap_action_response(response)
+        if payload is None:
+            return None, "", "", (
+                "Action Âm lịch Việt Nam không trả về ngày dương tương ứng. "
+                "Hãy kiểm tra action có bật response data."
+            )
+        normalized_text = normalize_text(text)
+        prefer_regular = any(
+            phrase in normalized_text
+            for phrase in ("thang thuong", "khong nhuan")
+        )
+        prefer_leap = "nhuan" in normalized_text and not prefer_regular
+        regular_result = str(
+            payload.get("ngay_duong_thang_thuong", "") or ""
+        ).strip()
+        leap_result = str(
+            payload.get("ngay_duong_thang_nhuan", "") or ""
+        ).strip()
+        if regular_result and leap_result and not (prefer_regular or prefer_leap):
+            return None, "", "", (
+                f"Tháng {month} âm lịch năm {year} có cả **tháng thường** và "
+                "**tháng nhuận**. Hãy nói rõ loại tháng, ví dụ: "
+                f"**ngày {day} tháng {month} thường năm {year} âm lịch** hoặc "
+                f"**ngày {day} tháng {month} nhuận năm {year} âm lịch**."
+            )
+        if prefer_leap and not leap_result:
+            leap_message = str(payload.get("thong_bao_nhuan", "") or "").strip()
+            suffix = f" {leap_message}" if leap_message else ""
+            return None, "", "", (
+                f"Tháng {month} âm lịch năm {year} không có kết quả tháng nhuận."
+                f"{suffix} Hãy kiểm tra lại ngày âm lịch."
+            )
+        solar_date = self._calendar_date_from_conversion_payload(
+            payload, prefer_leap=prefer_leap
+        )
+        if solar_date is None:
+            return None, "", "", (
+                "Tôi đã gọi action đổi ngày nhưng chưa đọc được ngày dương trong "
+                "kết quả trả về. Hãy kiểm tra dữ liệu response của action."
+            )
+        solar_text = solar_date.strftime("%d/%m/%Y")
+        parser_text = text[: span[0]] + solar_text + text[span[1] :]
+        lunar_text = f"{day:02d}/{month:02d}/{year}"
+        if prefer_leap:
+            lunar_text += " (tháng nhuận)"
+        elif prefer_regular:
+            lunar_text += " (tháng thường)"
+        return parser_text, lunar_text, solar_text, None
+
+    def _calendar_creation_targets(
+        self, text: str, calendars: list[CalendarTarget]
+    ) -> tuple[list[CalendarTarget], str | None, bool]:
+        """Resolve configured type targets before falling back to all calendars."""
+        requested_kind = self._calendar_requested_kind(text)
+        by_id = {target.entity_id: target for target in calendars}
+        solar = by_id.get(self.calendar_solar_entity_id)
+        lunar = by_id.get(self.calendar_lunar_entity_id)
+        if (
+            solar is not None
+            and lunar is not None
+            and solar.entity_id == lunar.entity_id
+        ):
+            # Older options may predate the validation that requires two
+            # different entities. Treat that stale configuration as unset.
+            solar = None
+            lunar = None
+
+        if requested_kind == "solar":
+            candidates = [solar] if solar is not None else [
+                target for target in calendars if target.calendar_kind == "solar"
+            ]
+            resolved = [target for target in candidates if target is not None]
+            return (resolved or calendars, "solar" if resolved else None, False)
+
+        if requested_kind == "lunar":
+            candidates = [lunar] if lunar is not None else [
+                target for target in calendars if target.calendar_kind == "lunar"
+            ]
+            if candidates:
+                return [target for target in candidates if target is not None], requested_kind, False
+            fallback = [solar] if solar is not None else [
+                target for target in calendars if target.calendar_kind == "solar"
+            ]
+            resolved_fallback = [target for target in fallback if target is not None] or calendars
+            fallback_kind = (
+                "solar"
+                if resolved_fallback
+                and all(target.calendar_kind == "solar" for target in resolved_fallback)
+                else None
+            )
+            return resolved_fallback, fallback_kind, True
+
+        if solar is not None and lunar is not None:
+            return [solar, lunar], None, False
+        return calendars, None, False
+
+    @classmethod
     def _calendar_selection_prompt(
+        cls,
         request: CalendarCreateRequest,
         calendars: list[CalendarTarget],
         *,
+        requested_kind: str | None = None,
+        lunar_source_text: str = "",
+        lunar_solar_text: str = "",
+        lunar_fallback_to_solar: bool = False,
+        recurrence_warning: bool = False,
         invalid: bool = False,
     ) -> str:
-        """Build a numbered writable-calendar selection prompt."""
+        """Build a typed, numbered writable-calendar confirmation prompt."""
         lines = [
             (
-                "⚠️ Lựa chọn chưa hợp lệ. Hãy trả lời đúng số lịch."
+                "⚠️ **Lựa chọn chưa hợp lệ.** Hãy trả lời loại lịch hoặc đúng số lịch."
                 if invalid
                 else "📝 **Đã phân tích yêu cầu tạo sự kiện**"
             ),
             f"\n{format_calendar_create_request(request)}",
-            "\n🗓️ **Chọn lịch sẽ thêm sự kiện:**",
         ]
+        if lunar_source_text and lunar_solar_text:
+            lines.append(
+                f"\n🌙 **Ngày âm:** {lunar_source_text}  →  "
+                f"☀️ **Ngày dương:** {lunar_solar_text}"
+            )
+        if lunar_fallback_to_solar:
+            lines.append(
+                "\nℹ️ Chưa có Âm lịch có quyền ghi trong Home Assistant. Tôi đã "
+                "đổi sang ngày dương tương ứng; hãy chọn lịch có quyền ghi để lưu."
+            )
+        configured_kinds = {
+            target.calendar_kind
+            for target in calendars
+            if target.configured and target.calendar_kind in {"solar", "lunar"}
+        }
+        if requested_kind is None and configured_kinds == {"solar", "lunar"}:
+            lines.append("\n🗓️ **Bạn muốn thêm vào Dương lịch hay Âm lịch?**")
+        elif requested_kind is None:
+            lines.append(
+                "\n🗓️ **Chưa cấu hình đủ Dương lịch và Âm lịch. "
+                "Hãy chọn lịch đích theo số:**"
+            )
+        else:
+            lines.append(
+                f"\n🗓️ **Xác nhận đích đến: {cls._calendar_kind_label(requested_kind)}**"
+            )
         for index, target in enumerate(calendars, start=1):
-            lines.append(f"{index}. {target.display_name}")
+            label = cls._calendar_kind_label(target.calendar_kind)
+            configured = " — đã chọn trong Calendar settings" if target.configured else ""
+            lines.append(f"{index}. {label}: **{target.display_name}**{configured}")
+        if recurrence_warning or requested_kind == "lunar" or lunar_source_text:
+            lines.append(
+                "\n💡 **Lưu ý:** Với sự kiện âm lịch lặp theo tháng hoặc năm, "
+                "nên thêm một lịch âm trong Home Assistant và chọn nó tại "
+                "Calendar settings, vì ngày dương tương ứng thay đổi theo từng kỳ."
+            )
+        if configured_kinds == {"solar", "lunar"}:
+            reply_hint = "**Dương lịch**, **Âm lịch** hoặc số lịch"
+        else:
+            reply_hint = "số lịch"
         lines.append(
-            "\nTrả lời số lịch, ví dụ **1**. Có thể chọn nhiều lịch như "
-            "**1 và 3**. Gửi **hủy** để dừng."
+            f"\nTrả lời {reply_hint} (ví dụ **1**), hoặc **xác nhận** khi "
+            "chỉ có một lựa chọn. Gửi **hủy** để dừng."
         )
         return "\n".join(lines)
 
@@ -13433,58 +13823,124 @@ class ConversationalAssistantManager(NoteManagerMixin):
         context: ZaloWebhookContext,
         service_context: Context | None,
     ) -> str:
-        """Parse an event, list writable calendars, and wait for selection."""
+        """Parse an event, resolve Solar/Lunar routing, and wait for confirmation."""
         calendars = self._zalo_writable_calendar_targets()
         if not calendars:
             return (
-                "Chưa có lịch nào vừa được expose cho Assist vừa hỗ trợ tạo "
-                "sự kiện. Hãy dùng Local Calendar, Google Calendar hoặc lịch "
-                "khác có quyền ghi, rồi bật expose cho entity đó."
+                "Chưa có lịch nào hỗ trợ tạo sự kiện. Hãy thêm Local Calendar, "
+                "Google Calendar hoặc lịch khác có quyền ghi; sau đó chọn Dương "
+                "lịch/Âm lịch trong Calendar settings."
             )
 
         now = dt_util.now()
+        requested_kind = self._calendar_requested_kind(context.text)
+        normalized_request = normalize_text(context.text)
+        mentions_lunar = any(
+            value in normalized_request
+            for value in ("am lich", "lich am", "ngay am", "lunar")
+        )
+        mentions_solar = any(
+            value in normalized_request
+            for value in ("duong lich", "lich duong", "ngay duong", "solar", "gregorian")
+        )
+        if mentions_lunar and mentions_solar:
+            return (
+                "Bạn đang nhắc cả **Âm lịch** lẫn **Dương lịch**, nên tôi chưa "
+                "dám tự chọn kẻo lịch giận 😄. Hãy nói rõ một đích đến, ví dụ: "
+                "**thêm sự kiện ... âm lịch** hoặc **thêm sự kiện ... dương lịch**."
+            )
+        parser_text = context.text
+        lunar_source_text = ""
+        lunar_solar_text = ""
+        if requested_kind == "lunar":
+            (
+                prepared_text,
+                lunar_source_text,
+                lunar_solar_text,
+                conversion_error,
+            ) = await self._async_prepare_lunar_calendar_event_text(
+                context.text, now, service_context
+            )
+            if conversion_error is not None:
+                return conversion_error
+            if prepared_text is not None:
+                parser_text = prepared_text
+
+        # Calendar type words choose the destination and should not leak into
+        # the event title parsed from the remaining sentence.
+        parser_text = re.sub(
+            r"\b(?:âm\s+lịch|lịch\s+âm|dương\s+lịch|lịch\s+dương|"
+            r"am\s+lich|lich\s+am|duong\s+lich|lich\s+duong|"
+            r"tháng\s+(?:nhuận|thường)|thang\s+(?:nhuan|thuong))\b",
+            " ",
+            parser_text,
+            flags=re.IGNORECASE,
+        )
+        parser_text = re.sub(r"\s+", " ", parser_text).strip()
+
         parsed: CalendarCreateRequest | None = None
         attempted_agents: list[str] = []
 
-        # Prefer the configured AI for nuanced language, but keep a complete
-        # deterministic fallback so calendar creation still works offline.
-        if self.zalo_conversation_agent_id != HOME_ASSISTANT_AGENT:
+        # Home Assistant-native parsing and the lunar conversion action run first.
+        # AI is only a fallback for wording the deterministic parser cannot resolve.
+        try:
+            parsed = self._deterministic_calendar_create_request(parser_text, now)
+        except ReminderParseError as err:
             parsed, attempted_agents = await self._async_ai_calendar_create_request(
-                context.text, now, context, service_context
+                parser_text, now, context, service_context
             )
-        if parsed is None:
-            try:
-                parsed = self._deterministic_calendar_create_request(
-                    context.text, now
+            if parsed is None:
+                message = (
+                    f"Tôi chưa tách được đầy đủ nội dung và thời gian sự kiện. {err} "
+                    "Ví dụ: **tạo sự kiện họp nhóm lúc 18h30 ngày mai dương lịch**; "
+                    "hoặc **thêm sự kiện giỗ ông ngày 12/8/2026 âm lịch**."
                 )
-            except ReminderParseError as err:
-                if not attempted_agents:
-                    parsed, attempted_agents = await self._async_ai_calendar_create_request(
-                        context.text, now, context, service_context
-                    )
-                if parsed is None:
-                    message = (
-                        f"Tôi chưa tách được đầy đủ nội dung và thời gian sự kiện. {err} "
-                        "Ví dụ: **tạo sự kiện họp nhóm lúc 18h30 ngày mai**; "
-                        "hoặc **thêm sự kiện sinh nhật cả ngày 15/08/2026**."
-                    )
-                    return self._append_ai_attempt_summary(
-                        message,
-                        attempted_agents,
-                        language=_request_language(context.text),
-                        zalo=True,
-                    )
+                return self._append_ai_attempt_summary(
+                    message,
+                    attempted_agents,
+                    language=_request_language(context.text),
+                    zalo=True,
+                )
 
+        if lunar_source_text and lunar_solar_text:
+            lunar_note = (
+                f"Sự kiện theo âm lịch: {lunar_source_text} âm lịch, tương ứng "
+                f"{lunar_solar_text} dương lịch."
+            )
+            parsed = replace(
+                parsed,
+                description=(
+                    f"{parsed.description.strip()}\n\n{lunar_note}".strip()
+                ),
+            )
+
+        candidates, resolved_kind, fallback_to_solar = self._calendar_creation_targets(
+            context.text, calendars
+        )
+        recurrence_warning = self._calendar_lunar_recurrence_requested(context.text)
         self._zalo_pending_calendar_events[context.owner_key] = (
             PendingZaloCalendarEvent(
                 request=parsed,
-                calendars=calendars,
+                calendars=candidates,
                 expires_at=dt_util.now()
                 + timedelta(seconds=PENDING_CONFIRMATION_TIMEOUT_SECONDS),
                 ai_attempted_agents=attempted_agents,
+                requested_kind=resolved_kind,
+                lunar_source_text=lunar_source_text,
+                lunar_solar_text=lunar_solar_text,
+                lunar_fallback_to_solar=fallback_to_solar,
+                recurrence_warning=recurrence_warning,
             )
         )
-        prompt = self._calendar_selection_prompt(parsed, calendars)
+        prompt = self._calendar_selection_prompt(
+            parsed,
+            candidates,
+            requested_kind=resolved_kind,
+            lunar_source_text=lunar_source_text,
+            lunar_solar_text=lunar_solar_text,
+            lunar_fallback_to_solar=fallback_to_solar,
+            recurrence_warning=recurrence_warning,
+        )
         return self._append_ai_attempt_summary(
             prompt,
             attempted_agents,
@@ -13498,21 +13954,48 @@ class ConversationalAssistantManager(NoteManagerMixin):
         pending: PendingZaloCalendarEvent,
         service_context: Context | None,
     ) -> str:
-        """Create a pending event after the user selects one or more calendars."""
+        """Create a pending event after a typed calendar confirmation."""
         if self._is_cancel_pending_text(context.text):
             self._zalo_pending_calendar_events.pop(context.owner_key, None)
-            return "Đã hủy yêu cầu tạo sự kiện."
+            return "Đã hủy yêu cầu tạo sự kiện. Lịch được tha, chưa phải làm việc 😄"
 
-        indexes = parse_target_selection(
-            context.text,
-            [calendar.display_name for calendar in pending.calendars],
-        )
+        normalized = normalize_text(context.text)
+        indexes: list[int] = []
+        kind_reply = self._calendar_requested_kind(context.text)
+        if kind_reply is not None:
+            indexes = [
+                index
+                for index, target in enumerate(pending.calendars)
+                if target.calendar_kind == kind_reply
+            ]
+            if len(indexes) > 1:
+                indexes = []
+        if not indexes and len(pending.calendars) == 1 and normalized in {
+            "xac nhan", "dong y", "ok", "yes", "them", "tao", "1"
+        }:
+            indexes = [0]
+        if not indexes:
+            indexes = parse_target_selection(
+                context.text,
+                [
+                    f"{self._calendar_kind_label(calendar.calendar_kind)} "
+                    f"{calendar.display_name}"
+                    for calendar in pending.calendars
+                ],
+            )
         if not indexes:
             pending.expires_at = dt_util.now() + timedelta(
                 seconds=PENDING_CONFIRMATION_TIMEOUT_SECONDS
             )
             return self._calendar_selection_prompt(
-                pending.request, pending.calendars, invalid=True
+                pending.request,
+                pending.calendars,
+                requested_kind=pending.requested_kind,
+                lunar_source_text=pending.lunar_source_text,
+                lunar_solar_text=pending.lunar_solar_text,
+                lunar_fallback_to_solar=pending.lunar_fallback_to_solar,
+                recurrence_warning=pending.recurrence_warning,
+                invalid=True,
             )
 
         selected = [pending.calendars[index] for index in indexes]
@@ -13535,7 +14018,10 @@ class ConversationalAssistantManager(NoteManagerMixin):
                     "Failed creating event in calendar %s", target.entity_id
                 )
             else:
-                created.append(target.display_name)
+                created.append(
+                    f"{self._calendar_kind_label(target.calendar_kind)} — "
+                    f"{target.display_name}"
+                )
 
         if not created:
             pending.expires_at = dt_util.now() + timedelta(
@@ -13546,16 +14032,36 @@ class ConversationalAssistantManager(NoteManagerMixin):
                 + ", ".join(failed)
                 + ". Hãy kiểm tra quyền ghi của lịch hoặc chọn lịch khác.\n\n"
                 + self._calendar_selection_prompt(
-                    pending.request, pending.calendars
+                    pending.request,
+                    pending.calendars,
+                    requested_kind=pending.requested_kind,
+                    lunar_source_text=pending.lunar_source_text,
+                    lunar_solar_text=pending.lunar_solar_text,
+                    lunar_fallback_to_solar=pending.lunar_fallback_to_solar,
+                    recurrence_warning=pending.recurrence_warning,
                 )
             )
 
         self._zalo_pending_calendar_events.pop(context.owner_key, None)
         lines = [
-            "✅ **Đã tạo sự kiện thành công**",
+            "✅ **Đã tạo sự kiện thành công — lịch đã nhận việc!**",
             f"\n{format_calendar_create_request(pending.request)}",
             f"\n**Đã thêm vào:** {', '.join(created)}",
         ]
+        if pending.lunar_source_text and pending.lunar_solar_text:
+            lines.append(
+                f"**Ngày quy đổi:** {pending.lunar_source_text} âm lịch = "
+                f"{pending.lunar_solar_text} dương lịch"
+            )
+        if (
+            pending.recurrence_warning
+            or pending.requested_kind == "lunar"
+            or bool(pending.lunar_source_text)
+        ):
+            lines.append(
+                "💡 Sự kiện âm lịch lặp theo tháng/năm nên dùng lịch âm đã cấu "
+                "hình, vì ngày dương tương ứng không cố định."
+            )
         if failed:
             lines.append(f"**Không thêm được vào:** {', '.join(failed)}")
         return self._append_ai_attempt_summary(

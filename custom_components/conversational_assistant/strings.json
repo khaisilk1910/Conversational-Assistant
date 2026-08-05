@@ -81,14 +81,16 @@
       },
       "calendar": {
         "title": "Calendar settings",
-        "description": "Choose the calendars to scan and notify. Found {calendar_count} calendars, {mobile_count} Mobile App devices, and {zalo_count} enabled Zalo destinations. Submit saves immediately and reloads the notification schedule.",
+        "description": "Choose default Solar/Lunar calendars, calendars to scan, and notification recipients. Found {calendar_count} calendars, {mobile_count} Mobile App devices, and {zalo_count} enabled Zalo destinations. Submit saves immediately.",
         "data": {
           "calendar_lookahead_days": "Number of upcoming days to scan",
           "calendar_entities": "Calendars to monitor and include in notifications",
           "calendar_notification_enabled": "Send a daily calendar notification when events exist",
           "calendar_notification_time": "Daily notification time",
           "calendar_notification_mobile_devices": "Fixed Mobile App recipients",
-          "calendar_notification_zalo_targets": "Fixed Zalo recipients"
+          "calendar_notification_zalo_targets": "Fixed Zalo recipients",
+          "calendar_solar_entity_id": "Default Solar calendar for new events",
+          "calendar_lunar_entity_id": "Default Lunar calendar for new events"
         },
         "data_description": {
           "calendar_lookahead_days": "Default: 30 days. The sensor only counts selected calendars and hides ordinary lunar dates without event content while keeping lunar day 1, day 15, and meaningful events.",
@@ -96,7 +98,9 @@
           "calendar_notification_enabled": "When enabled, the integration refreshes at the selected time and sends when events exist. A failure in one calendar no longer blocks valid events from other calendars.",
           "calendar_notification_time": "Local Home Assistant time. Default: 07:00 every day.",
           "calendar_notification_mobile_devices": "Select one or more Mobile App devices that always receive the calendar summary.",
-          "calendar_notification_zalo_targets": "Select one or more enabled Zalo destinations already configured in Zalo settings."
+          "calendar_notification_zalo_targets": "Select one or more enabled Zalo destinations already configured in Zalo settings.",
+          "calendar_solar_entity_id": "Choose a writable calendar entity for explicitly solar events and converted lunar events when no lunar calendar is available.",
+          "calendar_lunar_entity_id": "Choose a writable lunar calendar entity. Lunar dates are converted to their Gregorian service date before calendar.create_event is called."
         }
       },
       "zalo": {
@@ -412,7 +416,8 @@
       "required": "This field is required.",
       "invalid_time_list": "One or more times are invalid. Use HH:MM or HH:MM:SS, one per line or comma-separated.",
       "duplicate_name": "This spoken name duplicates or conflicts with an existing name.",
-      "duplicate_target": "This device or destination has already been added."
+      "duplicate_target": "This device or destination has already been added.",
+      "calendar_types_must_differ": "Solar and Lunar calendars must use different entities."
     }
   },
   "services": {

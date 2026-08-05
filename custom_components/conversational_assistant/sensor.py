@@ -247,6 +247,8 @@ class ConversationalAssistantCalendarEventCountSensor(
                 else "tat_ca_lich"
             ),
             "lich_dang_quan_sat": self.manager.calendar_monitored_entity_ids,
+            "duong_lich_mac_dinh": self.manager.calendar_solar_entity_id or None,
+            "am_lich_mac_dinh": self.manager.calendar_lunar_entity_id or None,
             "thong_bao_bat": self.manager.calendar_notification_enabled,
             "gio_thong_bao": (
                 self.manager.calendar_notification_time.strftime("%H:%M:%S")

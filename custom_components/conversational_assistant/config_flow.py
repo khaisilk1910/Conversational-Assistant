@@ -27,6 +27,8 @@ from .const import (
     CONF_AI_IMAGE_TASK_ENTITY_ID,
     CONF_AI_SEARCH_AGENT_ID,
     CONF_CALENDAR_ENTITIES,
+    CONF_CALENDAR_SOLAR_ENTITY_ID,
+    CONF_CALENDAR_LUNAR_ENTITY_ID,
     CONF_CALENDAR_LOOKAHEAD_DAYS,
     CONF_CALENDAR_NOTIFICATION_ENABLED,
     CONF_CALENDAR_NOTIFICATION_MOBILE_DEVICES,
@@ -425,6 +427,8 @@ def _zalo_target_choices(
 def _calendar_settings_schema(
     lookahead_days: int,
     selected_calendar_entities: list[str],
+    solar_calendar_entity_id: str,
+    lunar_calendar_entity_id: str,
     notification_enabled: bool,
     notification_time: str,
     selected_mobile_devices: list[str],
@@ -445,8 +449,23 @@ def _calendar_settings_schema(
     valid_zalo = [
         value for value in selected_zalo_targets if value in zalo_choices
     ]
-    return vol.Schema(
-        {
+    fields: dict[Any, Any] = {}
+    calendar_selector = _select_single_schema(calendar_choices)
+    if solar_calendar_entity_id in calendar_choices:
+        fields[vol.Optional(
+            CONF_CALENDAR_SOLAR_ENTITY_ID,
+            default=solar_calendar_entity_id,
+        )] = calendar_selector
+    else:
+        fields[vol.Optional(CONF_CALENDAR_SOLAR_ENTITY_ID)] = calendar_selector
+    if lunar_calendar_entity_id in calendar_choices:
+        fields[vol.Optional(
+            CONF_CALENDAR_LUNAR_ENTITY_ID,
+            default=lunar_calendar_entity_id,
+        )] = calendar_selector
+    else:
+        fields[vol.Optional(CONF_CALENDAR_LUNAR_ENTITY_ID)] = calendar_selector
+    fields.update({
             vol.Optional(
                 CONF_CALENDAR_LOOKAHEAD_DAYS,
                 default=max(
@@ -481,8 +500,8 @@ def _calendar_settings_schema(
                 CONF_CALENDAR_NOTIFICATION_ZALO_TARGETS,
                 default=valid_zalo,
             ): _select_multiple_schema(zalo_choices),
-        }
-    )
+        })
+    return vol.Schema(fields)
 
 
 def _normalize_calendar_settings(
@@ -523,6 +542,8 @@ def _normalize_calendar_settings(
         normalized[CONF_CALENDAR_NOTIFICATION_TIME] = value or (
             DEFAULT_CALENDAR_NOTIFICATION_TIME
         )
+    for key in (CONF_CALENDAR_SOLAR_ENTITY_ID, CONF_CALENDAR_LUNAR_ENTITY_ID):
+        normalized[key] = str(normalized.get(key, "") or "").strip()
     for key in (
         CONF_CALENDAR_ENTITIES,
         CONF_CALENDAR_NOTIFICATION_MOBILE_DEVICES,
@@ -1464,6 +1485,14 @@ class ConversationalAssistantOptionsFlow(config_entries.OptionsFlow):
             ),
         )
         options.setdefault(
+            CONF_CALENDAR_SOLAR_ENTITY_ID,
+            self.config_entry.data.get(CONF_CALENDAR_SOLAR_ENTITY_ID, ""),
+        )
+        options.setdefault(
+            CONF_CALENDAR_LUNAR_ENTITY_ID,
+            self.config_entry.data.get(CONF_CALENDAR_LUNAR_ENTITY_ID, ""),
+        )
+        options.setdefault(
             CONF_CALENDAR_NOTIFICATION_ENABLED,
             self.config_entry.data.get(
                 CONF_CALENDAR_NOTIFICATION_ENABLED,
@@ -1963,12 +1992,19 @@ class ConversationalAssistantOptionsFlow(config_entries.OptionsFlow):
     ) -> ConfigFlowResult:
         """Edit calendar sensor horizon and scheduled alert destinations."""
         options = self._ensure_options()
+        errors: dict[str, str] = {}
         if user_input is not None:
-            options.update(_normalize_calendar_settings(user_input))
-            # Calendar scheduling is time-sensitive. Persist immediately so the
-            # integration reloads and registers the new daily timer as soon as
-            # the user presses Submit; no separate Finish step is required.
-            return self.async_create_entry(title="", data=options)
+            normalized_input = _normalize_calendar_settings(user_input)
+            solar_id = normalized_input.get(CONF_CALENDAR_SOLAR_ENTITY_ID, "")
+            lunar_id = normalized_input.get(CONF_CALENDAR_LUNAR_ENTITY_ID, "")
+            if solar_id and solar_id == lunar_id:
+                errors["base"] = "calendar_types_must_differ"
+            else:
+                options.update(normalized_input)
+                # Calendar scheduling is time-sensitive. Persist immediately so the
+                # integration reloads and registers the new daily timer as soon as
+                # the user presses Submit; no separate Finish step is required.
+                return self.async_create_entry(title="", data=options)
 
         calendar_choices = _calendar_entity_choices(self.hass)
         if CONF_MOBILE_TARGETS in options:
@@ -1983,12 +2019,14 @@ class ConversationalAssistantOptionsFlow(config_entries.OptionsFlow):
         else:
             mobile_choices = _mobile_device_choices(self.hass)
         zalo_choices = _zalo_target_choices(self._zalo_targets())
-        values = _normalize_calendar_settings(options)
+        values = _normalize_calendar_settings(user_input or options)
         return self.async_show_form(
             step_id="calendar",
             data_schema=_calendar_settings_schema(
                 int(values[CONF_CALENDAR_LOOKAHEAD_DAYS]),
                 list(values[CONF_CALENDAR_ENTITIES]),
+                str(values.get(CONF_CALENDAR_SOLAR_ENTITY_ID, "")),
+                str(values.get(CONF_CALENDAR_LUNAR_ENTITY_ID, "")),
                 bool(values[CONF_CALENDAR_NOTIFICATION_ENABLED]),
                 str(values[CONF_CALENDAR_NOTIFICATION_TIME]),
                 list(values[CONF_CALENDAR_NOTIFICATION_MOBILE_DEVICES]),
@@ -1997,6 +2035,7 @@ class ConversationalAssistantOptionsFlow(config_entries.OptionsFlow):
                 mobile_choices,
                 zalo_choices,
             ),
+            errors=errors,
             description_placeholders={
                 "calendar_count": str(len(calendar_choices)),
                 "mobile_count": str(len(mobile_choices)),

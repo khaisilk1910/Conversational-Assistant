@@ -81,14 +81,16 @@
       },
       "calendar": {
         "title": "Cài đặt lịch",
-        "description": "Chọn lịch cần quét và thông báo. Đã tìm thấy {calendar_count} lịch, {mobile_count} thiết bị Mobile App và {zalo_count} nơi nhận Zalo đang bật. Nhấn Gửi để lưu ngay và tải lại lịch thông báo.",
+        "description": "Chọn lịch Dương/Âm mặc định, lịch cần quét và nơi nhận thông báo. Đã tìm thấy {calendar_count} lịch, {mobile_count} thiết bị Mobile App và {zalo_count} nơi nhận Zalo đang bật. Nhấn Gửi để lưu ngay.",
         "data": {
           "calendar_lookahead_days": "Số ngày sự kiện sắp tới cần quét",
           "calendar_entities": "Các lịch cần kiểm tra và gửi thông báo",
           "calendar_notification_enabled": "Gửi thông báo lịch hằng ngày khi có sự kiện",
           "calendar_notification_time": "Giờ gửi thông báo hằng ngày",
           "calendar_notification_mobile_devices": "Mobile App nhận thông báo cố định",
-          "calendar_notification_zalo_targets": "Zalo nhận thông báo cố định"
+          "calendar_notification_zalo_targets": "Zalo nhận thông báo cố định",
+          "calendar_solar_entity_id": "Dương lịch mặc định khi tạo sự kiện",
+          "calendar_lunar_entity_id": "Âm lịch mặc định khi tạo sự kiện"
         },
         "data_description": {
           "calendar_lookahead_days": "Mặc định 30 ngày. Sensor chỉ đếm sự kiện từ các lịch đã chọn và tự bỏ ngày âm lịch thông thường không có nội dung; vẫn giữ mùng 1, ngày rằm hoặc sự kiện có nội dung.",
@@ -96,7 +98,9 @@
           "calendar_notification_enabled": "Khi bật, tích hợp làm mới sensor vào giờ đã chọn và gửi khi số sự kiện lớn hơn 0. Lỗi của một lịch không ngăn thông báo các lịch còn lại.",
           "calendar_notification_time": "Theo múi giờ Home Assistant. Mặc định 07:00 mỗi ngày.",
           "calendar_notification_mobile_devices": "Chọn một hoặc nhiều thiết bị Mobile App luôn nhận bản tin lịch.",
-          "calendar_notification_zalo_targets": "Chọn một hoặc nhiều nơi nhận Zalo đang bật và đã được tạo trong Cài đặt Zalo."
+          "calendar_notification_zalo_targets": "Chọn một hoặc nhiều nơi nhận Zalo đang bật và đã được tạo trong Cài đặt Zalo.",
+          "calendar_solar_entity_id": "Chọn một entity calendar có quyền ghi để nhận sự kiện được nói rõ là dương lịch hoặc sự kiện âm lịch đã chuyển đổi khi không có lịch âm.",
+          "calendar_lunar_entity_id": "Chọn entity lịch âm có quyền ghi. Sự kiện âm lịch vẫn được quy đổi sang ngày dương tương ứng trước khi gọi action chuẩn calendar.create_event."
         }
       },
       "zalo": {
@@ -412,7 +416,8 @@
       "required": "Trường này là bắt buộc.",
       "invalid_time_list": "Có giờ không hợp lệ. Hãy dùng HH:MM hoặc HH:MM:SS, mỗi giờ một dòng hoặc ngăn cách bằng dấu phẩy.",
       "duplicate_name": "Tên gọi này trùng hoặc dễ nhầm với một tên đã cấu hình.",
-      "duplicate_target": "Thiết bị hoặc nơi nhận này đã được thêm."
+      "duplicate_target": "Thiết bị hoặc nơi nhận này đã được thêm.",
+      "calendar_types_must_differ": "Dương lịch và Âm lịch phải là hai entity khác nhau."
     }
   },
   "services": {
