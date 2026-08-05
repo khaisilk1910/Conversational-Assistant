@@ -478,8 +478,8 @@ class NoteManagerMixin:
         ]
         if matches:
             return max(matches, key=lambda item: item.created_at)
-        if len(self._pending_notes) == 1:
-            return next(iter(self._pending_notes.values()))
+        # Never attach a Voice follow-up to another source merely because it is
+        # the only pending note. Concurrent satellites/users must stay isolated.
         return None
 
     def _zalo_pending_note(self, owner_key: str) -> PendingNoteAction | None:

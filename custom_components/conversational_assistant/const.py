@@ -113,6 +113,16 @@ WEATHER_SERVICE_GET_FORECASTS = "get_forecasts"
 WEATHER_NATIVE_TIMEOUT_SECONDS = 20
 WEATHER_NATIVE_CACHE_SECONDS = 60
 
+# Every blocking Home Assistant action call has a caller-side timeout. Home
+# Assistant service calls do not impose one automatically, so this prevents a
+# stalled custom action/device from holding an integration task indefinitely.
+SERVICE_CALL_TIMEOUT_SECONDS = 60
+STORAGE_LOAD_TIMEOUT_SECONDS = 10
+TTS_SERVICE_TIMEOUT_SECONDS = 30
+CALENDAR_SERVICE_TIMEOUT_SECONDS = 30
+CAMERA_SERVICE_TIMEOUT_SECONDS = 30
+LUNAR_SERVICE_TIMEOUT_SECONDS = 30
+
 AI_TASK_DOMAIN = "ai_task"
 AI_TASK_SERVICE_GENERATE_IMAGE = "generate_image"
 AI_TASK_SERVICE_GENERATE_DATA = "generate_data"
@@ -309,10 +319,10 @@ SPEAKER_ANNOUNCE_SENTENCES = [
     "[hãy ]nhắn loa {request}",
 ]
 
-# Busy speakers are rechecked every 10 seconds. Twenty rechecks occur after
-# the initial check, giving a maximum wait of approximately 200 seconds.
-SPEAKER_BUSY_RETRY_DELAY_SECONDS = 10
-SPEAKER_BUSY_RETRY_COUNT = 20
+# A speaker may receive TTS while idle, off, or paused. After the initial
+# state check, retry 10 times at 15-second intervals (maximum 150s).
+SPEAKER_BUSY_RETRY_DELAY_SECONDS = 15
+SPEAKER_BUSY_RETRY_COUNT = 10
 
 # Users can teach persistent alternative phrases for existing workflows.
 # These management commands are static; learned phrases themselves are

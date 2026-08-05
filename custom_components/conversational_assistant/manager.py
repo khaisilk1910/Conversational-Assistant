@@ -87,6 +87,8 @@ from .const import (
     CAMERA_ANALYSIS_SENTENCES,
     CAMERA_ANALYSIS_TIMEOUT_SECONDS,
     CALENDAR_REFRESH_INTERVAL_MINUTES,
+    CALENDAR_SERVICE_TIMEOUT_SECONDS,
+    CAMERA_SERVICE_TIMEOUT_SECONDS,
     CAMERA_SENTENCES,
     CONF_AI_AGENT_FAILOVER_ENABLED,
     CONF_AI_CAMERA_INSTRUCTIONS,
@@ -186,6 +188,7 @@ from .const import (
     LUNAR_CALENDAR_DOMAIN,
     LUNAR_CALENDAR_SERVICE_CONVERT_DATE,
     LUNAR_DATE_CONVERSION_SENTENCES,
+    LUNAR_SERVICE_TIMEOUT_SECONDS,
     MAX_CALENDAR_LOOKAHEAD_DAYS,
     MAX_WEATHER_FORECAST_DAYS,
     WEATHER_DOMAIN,
@@ -201,10 +204,13 @@ from .const import (
     SPEAKER_ANNOUNCE_SENTENCES,
     SPEAKER_BUSY_RETRY_COUNT,
     SPEAKER_BUSY_RETRY_DELAY_SECONDS,
+    SERVICE_CALL_TIMEOUT_SECONDS,
     STORAGE_KEY_PREFIX,
     STORAGE_VERSION,
+    STORAGE_LOAD_TIMEOUT_SECONDS,
     TTS_DOMAIN,
     TTS_SERVICE_SPEAK,
+    TTS_SERVICE_TIMEOUT_SECONDS,
     ZALO_DOMAIN,
     ZALO_REMINDER_ADVANCE_MINUTES,
     ZALO_SEND_SENTENCES,
@@ -1286,6 +1292,10 @@ class ConversationalAssistantManager(NoteManagerMixin):
         self._zalo_chat_sessions: dict[str, ActiveZaloChat] = {}
         self._zalo_chat_timeout_tasks: dict[str, asyncio.Task[Any]] = {}
         self._zalo_chat_locks: dict[str, asyncio.Lock] = {}
+        # Serialize messages from the same Zalo account/thread/sender only.
+        # Unrelated users, groups, and accounts continue concurrently.
+        self._zalo_processing_locks: dict[str, asyncio.Lock] = {}
+        self._zalo_processing_lock_users: dict[str, int] = {}
         self._zalo_background_tasks: set[asyncio.Task[Any]] = set()
         self._zalo_background_tasks_by_owner: dict[
             str, set[asyncio.Task[Any]]
@@ -1947,6 +1957,33 @@ class ConversationalAssistantManager(NoteManagerMixin):
             (agent_id, self._conversation_agent_display_name(agent_id))
             for agent_id in agent_ids
         ]
+
+    def _home_assistant_control_agent_candidates(
+        self, configured_agent_id: str
+    ) -> list[tuple[str, str]]:
+        """Return native Home Assistant first, then optional agent fallbacks."""
+        candidates: list[tuple[str, str]] = []
+        seen: set[str] = set()
+
+        def add(agent_id: str, display_name: str | None = None) -> None:
+            normalized = str(agent_id or "").strip()
+            if not normalized or normalized in seen:
+                return
+            seen.add(normalized)
+            candidates.append(
+                (
+                    normalized,
+                    display_name
+                    or self._conversation_agent_display_name(normalized),
+                )
+            )
+
+        add(HOME_ASSISTANT_AGENT, "Home Assistant")
+        for agent_id, agent_name in self._conversation_agent_candidates(
+            configured_agent_id
+        ):
+            add(agent_id, agent_name)
+        return candidates
 
     def _ai_search_agent_candidates(
         self, primary_agent_id: str
@@ -2823,145 +2860,6 @@ class ConversationalAssistantManager(NoteManagerMixin):
             return response
         return f"{response}\n\n{notice}"
 
-    @staticmethod
-    def _response_integrity_tokens(text: str) -> set[str]:
-        """Return factual tokens that an AI rewrite must preserve verbatim."""
-        value = str(text or "")
-        patterns = (
-            r"\b\d{1,2}[/-]\d{1,2}(?:[/-]\d{2,4})?\b",
-            r"\b(?:[01]?\d|2[0-3]):[0-5]\d\b",
-            r"\b[a-z_]+\.[a-z0-9_]+\b",
-            r"(?m)^\s*\d+[.)]",
-        )
-        tokens: set[str] = set()
-        for pattern in patterns:
-            tokens.update(
-                match.group(0).strip() for match in re.finditer(pattern, value)
-            )
-
-        # Confirmation commands must remain exactly typeable after an AI
-        # rewrite. If an editor replaces "Sửa" with a synonym, the user could
-        # follow the displayed instruction but the deterministic state machine
-        # would no longer recognize it.
-        confirmation_commands = (
-            "Xác nhận xóa",
-            "Xác nhận xoá",
-            "Xác nhận sửa",
-            "Xác nhận lưu",
-            "Bỏ qua",
-            "Bỏ yêu cầu",
-            "Không xóa",
-            "Không xoá",
-            "Không chụp",
-            "Giữ nguyên",
-            "Đồng ý",
-            "Tiếp tục",
-            "Tất cả",
-            "Sửa",
-            "Xóa",
-            "Xoá",
-            "Hủy",
-            "Huỷ",
-            "Có",
-            "Không",
-            "Confirm delete",
-            "Confirm edit",
-            "Cancel",
-            "Skip",
-            "Yes",
-            "No",
-        )
-        for command in confirmation_commands:
-            match = re.search(
-                rf"(?<!\w){re.escape(command)}(?!\w)", value, re.IGNORECASE
-            )
-            if match is not None:
-                tokens.add(match.group(0))
-        return tokens
-
-    async def _async_ai_polish_response(
-        self,
-        request_text: str,
-        draft: str,
-        *,
-        language: str,
-        zalo: bool,
-        service_context: Context | None,
-    ) -> tuple[str, list[str]]:
-        """Use configured external AI to improve wording without changing facts."""
-        original = str(draft or "").strip()
-        primary = self.zalo_conversation_agent_id
-        if not original or primary == HOME_ASSISTANT_AGENT:
-            return original, []
-
-        candidates = [
-            candidate
-            for candidate in self._conversation_agent_candidates(primary)
-            if candidate[0] != HOME_ASSISTANT_AGENT
-        ]
-        if not candidates:
-            return original, []
-
-        channel_rules = (
-            "Use Zalo-friendly Markdown. Put ** before and after important "
-            "headings, warnings, dates, times, choices, and results. "
-            "Do not remove existing numbering or selection instructions."
-            if zalo
-            else
-            "Return plain natural speech suitable for Home Assistant TTS. "
-            "Do not use Markdown symbols, tables, or emoji-only wording."
-        )
-        prompt = (
-            "You are a response editor, not an action agent. Rewrite the draft "
-            "to be clear, natural, friendly, and professional. Preserve every "
-            "fact, date, time, number, entity name, calendar name, event name, "
-            "status, warning, and requested next step exactly. Never invent, "
-            "omit, reorder numbered choices, or claim an action not present in "
-            "the draft. Keep the same language as the draft. Return only the "
-            f"rewritten response. {channel_rules}\n\n"
-            f"User request: {request_text!r}\n\nDraft response:\n{original}"
-        )
-        required_tokens = self._response_integrity_tokens(original)
-        attempted: list[str] = []
-        for agent_id, agent_name in candidates:
-            attempted.append(agent_name)
-            try:
-                async with asyncio.timeout(15):
-                    result = await async_converse(
-                        hass=self.hass,
-                        text=prompt,
-                        conversation_id=None,
-                        context=service_context or Context(),
-                        language=language,
-                        agent_id=agent_id,
-                    )
-            except TimeoutError:
-                _LOGGER.warning("AI response editor %s timed out", agent_id)
-                continue
-            except Exception:  # noqa: BLE001 - retain the deterministic draft
-                _LOGGER.exception("AI response editor %s failed", agent_id)
-                continue
-
-            if self._conversation_result_error_code(result):
-                continue
-            candidate = self._conversation_reply_text(result).strip()
-            if not candidate or candidate.startswith("```"):
-                continue
-            if any(token not in candidate for token in required_tokens):
-                _LOGGER.warning(
-                    "Rejected AI response rewrite from %s because facts changed",
-                    agent_id,
-                )
-                continue
-            lower_bound = max(12, int(len(original) * 0.45))
-            upper_bound = max(500, int(len(original) * 2.5))
-            if not lower_bound <= len(candidate) <= upper_bound:
-                continue
-            if not zalo:
-                candidate = candidate.replace("**", "").replace("__", "")
-            return candidate, attempted
-        return original, attempted
-
     async def _async_prepare_zalo_reply(
         self,
         context: ZaloWebhookContext,
@@ -2970,42 +2868,11 @@ class ConversationalAssistantManager(NoteManagerMixin):
         *,
         ai_generated: bool = False,
     ) -> str:
-        """Optionally enrich a deterministic Zalo response with configured AI."""
-        text = str(reply or "").strip()
-        if ai_generated:
-            return text
-
-        # These responses are intentionally deterministic. The usage guide
-        # must be returned immediately from the built-in content, while
-        # calendar layouts and multi-turn confirmation prompts must preserve
-        # exact emoji, numbering, Markdown, and typeable command keywords.
-        # AI is still available inside the actual search/calendar/camera
-        # workflows where it is needed; only the final structured wording is
-        # protected from a second rewrite pass here.
-        if (
-            text == self._integration_help_text()
-            or text == self._integration_commands_text()
-            or _is_integration_commands_request(context.text)
-            or _is_integration_help_request(context.text)
-            or chat_start_request(context.text) is not None
-            or self._zalo_owner_has_pending_confirmation(context.owner_key)
-            or explicit_home_assistant_request_kind(context.text) == "calendar"
-        ):
-            return text
-
-        polished, attempted = await self._async_ai_polish_response(
-            context.text,
-            text,
-            language=_request_language(context.text),
-            zalo=True,
-            service_context=service_context,
-        )
-        return self._append_ai_attempt_summary(
-            polished,
-            attempted,
-            language=_request_language(context.text),
-            zalo=True,
-        )
+        """Return the workflow response without a second AI rewrite pass."""
+        del context, service_context, ai_generated
+        # Built-in parsers/actions already produced the authoritative result.
+        # AI remains available only inside explicit fallback workflows.
+        return str(reply or "").strip()
 
     async def _async_send_ai_failover_notice(
         self,
@@ -3170,8 +3037,26 @@ class ConversationalAssistantManager(NoteManagerMixin):
 
     async def async_setup(self) -> None:
         """Load data and register listeners."""
-        stored = await self._store.async_load() or {}
-        self._storage_loaded = True
+        try:
+            async with asyncio.timeout(STORAGE_LOAD_TIMEOUT_SECONDS):
+                stored = await self._store.async_load() or {}
+            self._storage_loaded = True
+        except TimeoutError:
+            stored = {}
+            self._storage_loaded = False
+            _LOGGER.error(
+                "Timed out loading Conversational Assistant storage after %s "
+                "seconds; continuing without persisted data so Home Assistant "
+                "startup is not blocked",
+                STORAGE_LOAD_TIMEOUT_SECONDS,
+            )
+        except Exception:  # noqa: BLE001 - startup must remain available
+            stored = {}
+            self._storage_loaded = False
+            _LOGGER.exception(
+                "Failed loading Conversational Assistant storage; continuing "
+                "without persisted data"
+            )
         for item in stored.get("reminders", []):
             try:
                 reminder = Reminder.from_dict(item)
@@ -3300,7 +3185,12 @@ class ConversationalAssistantManager(NoteManagerMixin):
             self._unsub_calendar_notification_timer()
             self._unsub_calendar_notification_timer = None
         for unsub in self._weather_schedule_unsubs:
-            unsub()
+            try:
+                unsub()
+            except Exception:  # noqa: BLE001 - unload must continue
+                _LOGGER.debug(
+                    "Failed cancelling one weather schedule", exc_info=True
+                )
         self._weather_schedule_unsubs.clear()
         self._native_weather_cache.clear()
         self._native_weather_locks.clear()
@@ -3311,7 +3201,12 @@ class ConversationalAssistantManager(NoteManagerMixin):
             self._calendar_refresh_task = None
         self._clear_learned_command_triggers()
         for unsub in self._unsubs:
-            unsub()
+            try:
+                unsub()
+            except Exception:  # noqa: BLE001 - unload must continue
+                _LOGGER.debug(
+                    "Failed cancelling one integration listener", exc_info=True
+                )
         self._zalo_ha_conversation_ids.clear()
         self._zalo_search_conversation_ids.clear()
         chat_timeout_tasks = tuple(self._zalo_chat_timeout_tasks.values())
@@ -3322,6 +3217,8 @@ class ConversationalAssistantManager(NoteManagerMixin):
         self._zalo_chat_timeout_tasks.clear()
         self._zalo_chat_sessions.clear()
         self._zalo_chat_locks.clear()
+        self._zalo_processing_locks.clear()
+        self._zalo_processing_lock_users.clear()
         self._unsubs.clear()
         self._pending.clear()
         self._pending_deletions.clear()
@@ -3373,7 +3270,18 @@ class ConversationalAssistantManager(NoteManagerMixin):
         self._speaker_announcement_tasks_by_source.clear()
         self._speaker_locks.clear()
         if self._storage_loaded:
-            await self._store.async_save(self._serialize())
+            try:
+                async with asyncio.timeout(STORAGE_LOAD_TIMEOUT_SECONDS):
+                    await self._store.async_save(self._serialize())
+            except TimeoutError:
+                _LOGGER.error(
+                    "Timed out saving Conversational Assistant storage during "
+                    "unload; continuing unload"
+                )
+            except Exception:  # noqa: BLE001 - unload must always finish
+                _LOGGER.exception(
+                    "Failed saving Conversational Assistant storage during unload"
+                )
 
     @callback
     def _clear_discovery_caches(self) -> None:
@@ -3413,8 +3321,34 @@ class ConversationalAssistantManager(NoteManagerMixin):
 
     @callback
     def _save_later(self) -> None:
-        """Schedule a storage write."""
+        """Schedule a storage write when persistent storage loaded safely."""
+        if not self._storage_loaded:
+            return
         self._store.async_delay_save(self._serialize, 1)
+
+    async def _async_call_service(
+        self,
+        domain: str,
+        service: str,
+        service_data: dict[str, Any] | None = None,
+        *,
+        timeout_seconds: float = SERVICE_CALL_TIMEOUT_SECONDS,
+        **kwargs: Any,
+    ) -> Any:
+        """Call one Home Assistant action with a bounded caller timeout."""
+        try:
+            async with asyncio.timeout(timeout_seconds):
+                return await self.hass.services.async_call(
+                    domain, service, service_data, **kwargs
+                )
+        except TimeoutError:
+            _LOGGER.error(
+                "Timed out calling Home Assistant action %s.%s after %s seconds",
+                domain,
+                service,
+                timeout_seconds,
+            )
+            raise
 
     @property
     def learned_command_count(self) -> int:
@@ -4357,7 +4291,10 @@ class ConversationalAssistantManager(NoteManagerMixin):
         if not sender_id or not thread_id:
             return None, "missing_sender_or_thread"
 
-        owner_key = f"zalo:{thread_type}:{thread_id}"
+        owner_account_id = event_account_id or configured_account_id or "default"
+        owner_key = (
+            f"zalo:{owner_account_id}:{thread_type}:{thread_id}:{sender_id}"
+        )
         active_flow_reply = False
         normalization_reason = "ok"
         if self.zalo_invocation_keyword_enabled:
@@ -4658,7 +4595,9 @@ class ConversationalAssistantManager(NoteManagerMixin):
             "Dương lịch hoặc Âm lịch; nếu chưa nói, bot sẽ hỏi và liệt kê lịch.\n"
             "VD: `Tạo sự kiện giỗ ông ngày 12/8/2026 âm lịch`\n\n"
             "🔊 **Thông báo loa** — thông báo loa, báo loa, báo ra loa, "
-            "thông báo ra loa, gửi loa, nhắn loa.\n"
+            "thông báo ra loa, gửi loa, nhắn loa. Chỉ phát khi loa ở trạng "
+            "thái `idle`, `off` hoặc `paused`; kiểm tra lại 10 lần, mỗi lần "
+            "15 giây, rồi hủy.\n"
             "VD: `Báo loa Phòng Ngủ xuống ăn cơm`\n\n"
             "📨 **Gửi Zalo** — gửi Zalo, thông báo Zalo, báo Zalo.\n"
             "VD: `Thông báo Zalo Khải xuống ăn cơm`\n\n"
@@ -4685,6 +4624,9 @@ class ConversationalAssistantManager(NoteManagerMixin):
             "🛑 **Điều khiển phiên** — hủy, hủy yêu cầu, hủy phiên, "
             "dừng yêu cầu, dừng phiên, kết thúc phiên, bỏ yêu cầu vừa rồi.\n"
             "VD: `Hủy`\n\n"
+            "⚙️ **Nguyên tắc xử lý** — ưu tiên parser, entity và action có sẵn "
+            "của Home Assistant; AI/AI Search chỉ là dự phòng. Mỗi tài khoản "
+            "Zalo, nhóm, người gửi và nguồn Voice có phiên riêng.\n\n"
             "💡 Tên Mobile, Zalo, loa và camera là tên đã đặt trong Settings."
         )
 
@@ -4739,10 +4681,21 @@ class ConversationalAssistantManager(NoteManagerMixin):
             "• Ví dụ: `Tạo sự kiện giỗ ông ngày 12/8/2026 âm lịch`.\n\n"
             "🔊 **Loa và Zalo**\n"
             "• Gọi thẳng tên đã đặt hoặc chọn một, nhiều nơi nhận hay tất cả.\n"
+            "• TTS phát khi loa ở trạng thái `idle`, `off` hoặc `paused`. "
+            "Nếu chưa sẵn sàng, tích hợp kiểm tra lại tối đa 10 lần, cách nhau "
+            "15 giây; quá số lần "
+            "sẽ hủy và báo đúng luồng đã yêu cầu.\n"
             "• Ví dụ: `Báo loa Phòng Ngủ xuống ăn cơm`.\n\n"
             "📸 **Camera**\n"
             "• Chụp hoặc phân tích trực tiếp bằng tên camera đã đặt.\n"
             "• Ví dụ: `Chụp Cam Cổng`.\n\n"
+            "⚙️ **Thứ tự xử lý và đa luồng**\n"
+            "• Ưu tiên parser, entity và action có sẵn của Home Assistant; AI "
+            "chỉ dùng khi không phân tích được, AI Search chỉ dùng khi cần dữ "
+            "liệu Internet hoặc dữ liệu nội bộ không đủ.\n"
+            "• Kết quả action nội bộ được trả thẳng, không qua AI viết lại.\n"
+            "• Phiên được tách theo tài khoản Zalo, nhóm/cuộc trò chuyện, người "
+            "gửi và nguồn Voice để không lẫn lựa chọn hoặc xác nhận.\n\n"
             "📝 **Ghi chú, trò chuyện và AI**\n"
             "• Quản lý ghi chú, trò chuyện AI, tìm kiếm Internet, tạo ảnh và "
             "học câu lệnh mới.\n"
@@ -5075,7 +5028,7 @@ class ConversationalAssistantManager(NoteManagerMixin):
         chunks = self._split_zalo_text(message, max_chars=max_chars)
         for index, chunk in enumerate(chunks, start=1):
             try:
-                await self.hass.services.async_call(
+                await self._async_call_service(
                     ZALO_DOMAIN,
                     ZALO_SERVICE_SEND_MESSAGE,
                     {
@@ -6087,7 +6040,7 @@ class ConversationalAssistantManager(NoteManagerMixin):
             attempted.append(agent_name)
             try:
                 async with asyncio.timeout(CAMERA_ANALYSIS_TIMEOUT_SECONDS):
-                    response = await self.hass.services.async_call(
+                    response = await self._async_call_service(
                         AI_TASK_DOMAIN,
                         AI_TASK_SERVICE_GENERATE_DATA,
                         {
@@ -6099,6 +6052,7 @@ class ConversationalAssistantManager(NoteManagerMixin):
                         blocking=True,
                         context=service_context,
                         return_response=True,
+                        timeout_seconds=CAMERA_ANALYSIS_TIMEOUT_SECONDS,
                     )
                 text = self._camera_analysis_response_text(response)
                 if not text:
@@ -6238,7 +6192,7 @@ class ConversationalAssistantManager(NoteManagerMixin):
 
         for attempt in range(1, 3):
             try:
-                await self.hass.services.async_call(
+                await self._async_call_service(
                     ZALO_DOMAIN,
                     ZALO_SERVICE_SEND_TYPING_EVENT,
                     {
@@ -6315,7 +6269,7 @@ class ConversationalAssistantManager(NoteManagerMixin):
             await self.hass.async_add_executor_job(
                 _prepare_camera_snapshot_path, filename
             )
-            await self.hass.services.async_call(
+            await self._async_call_service(
                 "camera",
                 "snapshot",
                 {
@@ -6324,6 +6278,7 @@ class ConversationalAssistantManager(NoteManagerMixin):
                 },
                 blocking=True,
                 context=service_context,
+                timeout_seconds=CAMERA_SERVICE_TIMEOUT_SECONDS,
             )
             snapshot_exists = await self.hass.async_add_executor_job(
                 os.path.isfile, filename
@@ -6363,7 +6318,7 @@ class ConversationalAssistantManager(NoteManagerMixin):
             )
         ):
             try:
-                await self.hass.services.async_call(
+                await self._async_call_service(
                     ZALO_DOMAIN,
                     ZALO_SERVICE_SEND_IMAGES_TO_GROUP,
                     {
@@ -6397,7 +6352,7 @@ class ConversationalAssistantManager(NoteManagerMixin):
             image_paths, camera_names, strict=True
         ):
             try:
-                await self.hass.services.async_call(
+                await self._async_call_service(
                     ZALO_DOMAIN,
                     ZALO_SERVICE_SEND_IMAGE,
                     {
@@ -6464,7 +6419,7 @@ class ConversationalAssistantManager(NoteManagerMixin):
                 )
             ):
                 try:
-                    await self.hass.services.async_call(
+                    await self._async_call_service(
                         ZALO_DOMAIN,
                         ZALO_SERVICE_SEND_IMAGES_TO_GROUP,
                         {
@@ -6499,7 +6454,7 @@ class ConversationalAssistantManager(NoteManagerMixin):
                 image_paths, camera_names, strict=True
             ):
                 try:
-                    await self.hass.services.async_call(
+                    await self._async_call_service(
                         ZALO_DOMAIN,
                         ZALO_SERVICE_SEND_IMAGE,
                         {
@@ -6556,7 +6511,7 @@ class ConversationalAssistantManager(NoteManagerMixin):
         for item in items:
             try:
                 await self._async_send_zalo_typing_event(context, service_context)
-                await self.hass.services.async_call(
+                await self._async_call_service(
                     ZALO_DOMAIN,
                     ZALO_SERVICE_SEND_IMAGE,
                     {
@@ -6619,7 +6574,7 @@ class ConversationalAssistantManager(NoteManagerMixin):
                     await self._async_send_zalo_typing_to_target(
                         thread_id, account_selection, service_context
                     )
-                    await self.hass.services.async_call(
+                    await self._async_call_service(
                         ZALO_DOMAIN,
                         ZALO_SERVICE_SEND_IMAGE,
                         {
@@ -8326,7 +8281,7 @@ class ConversationalAssistantManager(NoteManagerMixin):
                     thread_id, account_selection
                 )
                 for chunk in chunks:
-                    await self.hass.services.async_call(
+                    await self._async_call_service(
                         ZALO_DOMAIN,
                         ZALO_SERVICE_SEND_MESSAGE,
                         {
@@ -8635,13 +8590,14 @@ class ConversationalAssistantManager(NoteManagerMixin):
                 return [dict(item) for item in cached[1]]
             try:
                 async with asyncio.timeout(WEATHER_NATIVE_TIMEOUT_SECONDS):
-                    response = await self.hass.services.async_call(
+                    response = await self._async_call_service(
                         WEATHER_DOMAIN,
                         WEATHER_SERVICE_GET_FORECASTS,
                         {"type": forecast_type},
                         blocking=True,
                         target={"entity_id": entity_id},
                         return_response=True,
+                        timeout_seconds=WEATHER_NATIVE_TIMEOUT_SECONDS,
                     )
             except TimeoutError:
                 _LOGGER.warning(
@@ -9310,9 +9266,10 @@ class ConversationalAssistantManager(NoteManagerMixin):
             "media-source://", "/media/", 1
         )
         try:
-            resolved = await media_source.async_resolve_media(
-                self.hass, media_source_id, None
-            )
+            async with asyncio.timeout(CAMERA_SERVICE_TIMEOUT_SECONDS):
+                resolved = await media_source.async_resolve_media(
+                    self.hass, media_source_id, None
+                )
         except Exception:  # noqa: BLE001 - keep the proven /media fallback
             _LOGGER.warning(
                 "Could not resolve AI generated media source %s; using %s",
@@ -9410,7 +9367,7 @@ class ConversationalAssistantManager(NoteManagerMixin):
             attempted_agents.append(agent_name)
             try:
                 async with asyncio.timeout(ZALO_IMAGE_TIMEOUT_SECONDS):
-                    response = await self.hass.services.async_call(
+                    response = await self._async_call_service(
                         AI_TASK_DOMAIN,
                         AI_TASK_SERVICE_GENERATE_IMAGE,
                         {
@@ -9421,6 +9378,7 @@ class ConversationalAssistantManager(NoteManagerMixin):
                         blocking=True,
                         context=service_context,
                         return_response=True,
+                        timeout_seconds=ZALO_IMAGE_TIMEOUT_SECONDS,
                     )
 
                     result = response if isinstance(response, dict) else {}
@@ -9506,7 +9464,7 @@ class ConversationalAssistantManager(NoteManagerMixin):
             zalo=True,
         )
         try:
-            await self.hass.services.async_call(
+            await self._async_call_service(
                 ZALO_DOMAIN,
                 ZALO_SERVICE_SEND_IMAGE,
                 {
@@ -11044,7 +11002,7 @@ class ConversationalAssistantManager(NoteManagerMixin):
                 continue
             service_domain, service_action, data, detail = built
             try:
-                await self.hass.services.async_call(
+                await self._async_call_service(
                     service_domain,
                     service_action,
                     data,
@@ -11394,6 +11352,8 @@ class ConversationalAssistantManager(NoteManagerMixin):
         """Find a Voice Assist device request belonging to this source."""
         self._purge_expired_pending()
         source_keys = self._source_keys(user_input)
+        if not source_keys:
+            return None
         matching = [
             pending
             for pending in self._pending_voice_device_controls.values()
@@ -11401,14 +11361,6 @@ class ConversationalAssistantManager(NoteManagerMixin):
         ]
         if matching:
             return max(matching, key=lambda item: item.created_at)
-        if (
-            len(self._pending_voice_device_controls) == 1
-            and not self._pending
-            and not self._pending_deletions
-            and not self._pending_voice_cameras
-            and not self._has_pending_notes()
-        ):
-            return next(iter(self._pending_voice_device_controls.values()))
         return None
 
     async def _async_execute_or_confirm_voice_device_control(
@@ -12229,7 +12181,9 @@ class ConversationalAssistantManager(NoteManagerMixin):
 
         language = _request_language(context.text)
         primary_agent_id = self.zalo_conversation_agent_id
-        candidates = self._conversation_agent_candidates(primary_agent_id)
+        candidates = self._home_assistant_control_agent_candidates(
+            primary_agent_id
+        )
         attempted_agents: list[str] = []
         total_attempts = len(candidates)
 
@@ -12286,7 +12240,7 @@ class ConversationalAssistantManager(NoteManagerMixin):
                     conversation_id = str(
                         getattr(result, "conversation_id", "") or ""
                     ).strip()
-                    if agent_id == primary_agent_id and conversation_id:
+                    if agent_id == HOME_ASSISTANT_AGENT and conversation_id:
                         self._zalo_ha_conversation_ids[
                             context.owner_key
                         ] = conversation_id
@@ -12345,7 +12299,9 @@ class ConversationalAssistantManager(NoteManagerMixin):
             else _request_language(text)
         )
         primary_agent_id = self.zalo_conversation_agent_id
-        candidates = self._conversation_agent_candidates(primary_agent_id)
+        candidates = self._home_assistant_control_agent_candidates(
+            primary_agent_id
+        )
         attempted_agents: list[str] = []
 
         for index, (agent_id, agent_name) in enumerate(candidates):
@@ -12486,19 +12442,24 @@ class ConversationalAssistantManager(NoteManagerMixin):
             )
             events: list[CalendarDisplayEvent] = []
             failed_calendars: list[str] = []
-            for state in self._all_calendar_states():
-                try:
-                    events.extend(
-                        await self._async_calendar_events_for_state(
-                            state, window, None
-                        )
-                    )
-                except Exception:  # noqa: BLE001 - keep other calendars working
+            states = self._all_calendar_states()
+            results = await asyncio.gather(
+                *(
+                    self._async_calendar_events_for_state(state, window, None)
+                    for state in states
+                ),
+                return_exceptions=True,
+            )
+            for state, result in zip(states, results, strict=True):
+                if isinstance(result, BaseException):
                     failed_calendars.append(str(state.name or state.entity_id))
-                    _LOGGER.exception(
-                        "Failed refreshing calendar sensor from %s",
+                    _LOGGER.error(
+                        "Failed refreshing calendar sensor from %s: %s",
                         state.entity_id,
+                        result,
                     )
+                    continue
+                events.extend(result)
 
             unique: dict[
                 tuple[str, datetime, datetime | None, str, str, str],
@@ -12713,7 +12674,7 @@ class ConversationalAssistantManager(NoteManagerMixin):
         sent_count = 0
         for service in services:
             try:
-                await self.hass.services.async_call(
+                await self._async_call_service(
                     "notify",
                     service,
                     {
@@ -12788,7 +12749,7 @@ class ConversationalAssistantManager(NoteManagerMixin):
                 await self._async_send_zalo_typing_to_target(
                     thread_id, account_selection
                 )
-                await self.hass.services.async_call(
+                await self._async_call_service(
                     ZALO_DOMAIN,
                     ZALO_SERVICE_SEND_MESSAGE,
                     {
@@ -12947,7 +12908,7 @@ class ConversationalAssistantManager(NoteManagerMixin):
         window: CalendarWindow,
         service_context: Context | None,
     ) -> list[CalendarDisplayEvent]:
-        """Fetch events, preserving UID data needed for safe mutations."""
+        """Fetch events through the official action, then safe fallbacks."""
         calendar_name = str(state.name or state.entity_id)
         try:
             supported_features = int(
@@ -12956,13 +12917,46 @@ class ConversationalAssistantManager(NoteManagerMixin):
         except (TypeError, ValueError):
             supported_features = 0
 
+        # Prefer the public Home Assistant action contract. An empty response is
+        # a valid calendar result and must not trigger AI or another data source.
+        if self.hass.services.has_service("calendar", "get_events"):
+            try:
+                response = await self._async_call_service(
+                    "calendar",
+                    "get_events",
+                    {
+                        "start_date_time": window.start.isoformat(),
+                        "end_date_time": window.end.isoformat(),
+                    },
+                    blocking=True,
+                    context=service_context,
+                    target={"entity_id": state.entity_id},
+                    return_response=True,
+                    timeout_seconds=CALENDAR_SERVICE_TIMEOUT_SECONDS,
+                )
+                return extract_calendar_events(
+                    response,
+                    state.entity_id,
+                    calendar_name,
+                    supported_features=supported_features,
+                )
+            except asyncio.CancelledError:
+                raise
+            except Exception:  # noqa: BLE001 - use entity fallback below
+                _LOGGER.exception(
+                    "calendar.get_events failed for %s", state.entity_id
+                )
+
+        # Compatibility fallback for calendar platforms that have not exposed
+        # the response action correctly. This path is bounded as well.
         entity = self._calendar_entity(state.entity_id)
         if entity is not None and hasattr(entity, "async_get_events"):
             try:
-                raw_events = await entity.async_get_events(
-                    self.hass, window.start, window.end
-                )
-                payload = []
+                async with asyncio.timeout(CALENDAR_SERVICE_TIMEOUT_SECONDS):
+                    raw_events = await entity.async_get_events(
+                        self.hass, window.start, window.end
+                    )
+                payload: list[dict[str, Any]] = []
                 for raw_event in raw_events:
                     if hasattr(raw_event, "as_dict"):
                         item = raw_event.as_dict()
@@ -12972,45 +12966,18 @@ class ConversationalAssistantManager(NoteManagerMixin):
                         continue
                     if isinstance(item, dict):
                         payload.append(item)
-                events = extract_calendar_events(
+                return extract_calendar_events(
                     payload,
                     state.entity_id,
                     calendar_name,
                     supported_features=supported_features,
                 )
-                if events:
-                    return events
-            except Exception:  # noqa: BLE001 - use service fallback below
+            except asyncio.CancelledError:
+                raise
+            except Exception:  # noqa: BLE001 - state fallback below
                 _LOGGER.exception(
                     "Direct calendar event fetch failed for %s",
                     state.entity_id,
-                )
-
-        if self.hass.services.has_service("calendar", "get_events"):
-            try:
-                response = await self.hass.services.async_call(
-                    "calendar",
-                    "get_events",
-                    {
-                        "entity_id": state.entity_id,
-                        "start_date_time": window.start.isoformat(),
-                        "end_date_time": window.end.isoformat(),
-                    },
-                    blocking=True,
-                    context=service_context,
-                    return_response=True,
-                )
-                events = extract_calendar_events(
-                    response,
-                    state.entity_id,
-                    calendar_name,
-                    supported_features=supported_features,
-                )
-                if events:
-                    return events
-            except Exception:  # noqa: BLE001 - state fallback below
-                _LOGGER.exception(
-                    "Failed reading events from %s", state.entity_id
                 )
 
         fallback = event_from_calendar_state(
@@ -13619,13 +13586,14 @@ class ConversationalAssistantManager(NoteManagerMixin):
                 "tích hợp Âm lịch Việt Nam rồi thử lại."
             )
         try:
-            response = await self.hass.services.async_call(
+            response = await self._async_call_service(
                 LUNAR_CALENDAR_DOMAIN,
                 LUNAR_CALENDAR_SERVICE_CONVERT_DATE,
                 request.service_data(),
                 blocking=True,
                 context=service_context,
                 return_response=True,
+                timeout_seconds=LUNAR_SERVICE_TIMEOUT_SECONDS,
             )
         except Exception:  # noqa: BLE001 - report conversion failure clearly
             _LOGGER.exception("Failed converting lunar event date %s", request)
@@ -14003,7 +13971,7 @@ class ConversationalAssistantManager(NoteManagerMixin):
         failed: list[str] = []
         for target in selected:
             try:
-                await self.hass.services.async_call(
+                await self._async_call_service(
                     "calendar",
                     "create_event",
                     self._calendar_create_service_data(
@@ -14011,6 +13979,7 @@ class ConversationalAssistantManager(NoteManagerMixin):
                     ),
                     blocking=True,
                     context=service_context,
+                    timeout_seconds=CALENDAR_SERVICE_TIMEOUT_SECONDS,
                 )
             except Exception:  # noqa: BLE001 - report each failed calendar
                 failed.append(target.display_name)
@@ -14112,11 +14081,31 @@ class ConversationalAssistantManager(NoteManagerMixin):
             )
 
         events: list[CalendarDisplayEvent] = []
-        for state in states:
-            events.extend(
-                await self._async_calendar_events_for_state(
+        results = await asyncio.gather(
+            *(
+                self._async_calendar_events_for_state(
                     state, window, service_context
                 )
+                for state in states
+            ),
+            return_exceptions=True,
+        )
+        failed_names: list[str] = []
+        for state, result in zip(states, results, strict=True):
+            if isinstance(result, BaseException):
+                failed_names.append(str(state.name or state.entity_id))
+                _LOGGER.error(
+                    "Failed reading calendar %s for Zalo request: %s",
+                    state.entity_id,
+                    result,
+                )
+                continue
+            events.extend(result)
+        if failed_names and not events:
+            return (
+                "Tôi chưa đọc được dữ liệu lịch vì các lịch đang bận hoặc lỗi: "
+                + ", ".join(failed_names)
+                + ". Hãy thử lại nhé 😅"
             )
 
         displayed, _skipped = calendar_events_for_display(events, window)
@@ -14321,13 +14310,14 @@ class ConversationalAssistantManager(NoteManagerMixin):
             if text not in {"xac nhan xoa", "dong y xoa", "yes delete", "confirm delete"}:
                 return "Hãy trả lời **Xác nhận xóa** hoặc **Hủy**."
             try:
-                await entity.async_delete_event(
-                    event.uid, event.recurrence_id or None, None
-                )
-                if hasattr(entity, "async_update_event_listeners"):
-                    listener_result = entity.async_update_event_listeners()
-                    if asyncio.iscoroutine(listener_result):
-                        await listener_result
+                async with asyncio.timeout(CALENDAR_SERVICE_TIMEOUT_SECONDS):
+                    await entity.async_delete_event(
+                        event.uid, event.recurrence_id or None, None
+                    )
+                    if hasattr(entity, "async_update_event_listeners"):
+                        listener_result = entity.async_update_event_listeners()
+                        if asyncio.iscoroutine(listener_result):
+                            await listener_result
             except Exception:  # noqa: BLE001 - never claim success on failure
                 _LOGGER.exception("Failed deleting calendar event %s", event.uid)
                 return "⚠️ **Xóa sự kiện thất bại.** Hãy kiểm tra quyền của lịch."
@@ -14339,32 +14329,34 @@ class ConversationalAssistantManager(NoteManagerMixin):
             )
 
         if pending.phase == "edit_details":
-            request, attempted = await self._async_ai_calendar_update_request(
-                context.text, event, context, service_context
-            )
-            if request is None:
-                try:
-                    request = self._deterministic_calendar_create_request(
-                        "tạo sự kiện " + context.text, dt_util.now()
-                    )
-                except ReminderParseError:
-                    return self._append_ai_attempt_summary(
-                        "Tôi chưa hiểu đủ thay đổi. Hãy nêu **nội dung mới** và "
-                        "**mốc thời gian mới** rõ hơn, hoặc trả lời **Hủy**.",
-                        attempted, language=_request_language(context.text),
-                        zalo=True,
-                    )
+            attempted: list[str] = []
             try:
-                await entity.async_update_event(
-                    event.uid,
-                    self._calendar_event_update_payload(request, event),
-                    event.recurrence_id or None,
-                    None,
+                request = self._deterministic_calendar_create_request(
+                    "tạo sự kiện " + context.text, dt_util.now()
                 )
-                if hasattr(entity, "async_update_event_listeners"):
-                    listener_result = entity.async_update_event_listeners()
-                    if asyncio.iscoroutine(listener_result):
-                        await listener_result
+            except ReminderParseError:
+                request, attempted = await self._async_ai_calendar_update_request(
+                    context.text, event, context, service_context
+                )
+            if request is None:
+                return self._append_ai_attempt_summary(
+                    "Tôi chưa hiểu đủ thay đổi. Hãy nêu **nội dung mới** và "
+                    "**mốc thời gian mới** rõ hơn, hoặc trả lời **Hủy**.",
+                    attempted, language=_request_language(context.text),
+                    zalo=True,
+                )
+            try:
+                async with asyncio.timeout(CALENDAR_SERVICE_TIMEOUT_SECONDS):
+                    await entity.async_update_event(
+                        event.uid,
+                        self._calendar_event_update_payload(request, event),
+                        event.recurrence_id or None,
+                        None,
+                    )
+                    if hasattr(entity, "async_update_event_listeners"):
+                        listener_result = entity.async_update_event_listeners()
+                        if asyncio.iscoroutine(listener_result):
+                            await listener_result
             except Exception:  # noqa: BLE001 - preserve exact failure state
                 _LOGGER.exception("Failed updating calendar event %s", event.uid)
                 return "⚠️ **Sửa sự kiện thất bại.** Hãy kiểm tra quyền của lịch."
@@ -15048,12 +15040,87 @@ class ConversationalAssistantManager(NoteManagerMixin):
 
         task.add_done_callback(_discard_background_task)
 
+    def _zalo_payload_lock_key(self, payload: Any) -> str:
+        """Build a stable serialization key without mutating the payload."""
+        if not isinstance(payload, dict):
+            return "zalo:invalid"
+        data = payload.get("data")
+        if not isinstance(data, dict):
+            data = {}
+        account_id = str(
+            payload.get("_accountId")
+            or payload.get("accountId")
+            or data.get("_accountId")
+            or data.get("accountId")
+            or data.get("ownId")
+            or self.zalo_webhook_bot_account_id
+            or "default"
+        ).strip()
+        sender_id = str(
+            data.get("uidFrom")
+            or data.get("uid_from")
+            or data.get("senderId")
+            or data.get("sender_id")
+            or data.get("fromId")
+            or "unknown"
+        ).strip()
+        thread_id = str(
+            payload.get("threadId")
+            or payload.get("thread_id")
+            or data.get("threadId")
+            or data.get("thread_id")
+            or data.get("groupId")
+            or sender_id
+            or "unknown"
+        ).strip()
+        raw_thread_type = str(
+            payload.get("threadType")
+            or data.get("threadType")
+            or data.get("thread_type")
+            or data.get("type")
+            or payload.get("type")
+            or ZALO_TYPE_USER
+        ).strip().casefold()
+        thread_type = (
+            ZALO_TYPE_GROUP
+            if raw_thread_type in {ZALO_TYPE_GROUP, "group"}
+            else ZALO_TYPE_USER
+        )
+        return f"zalo:{account_id}:{thread_type}:{thread_id}:{sender_id}"
+
     async def async_process_zalo_webhook_payload(
         self,
         payload: Any,
         service_context: Context | None = None,
     ) -> dict[str, Any]:
-        """Process one Zalo payload supplied by an existing webhook flow."""
+        """Process one Zalo payload, serializing only the same source."""
+        lock_key = self._zalo_payload_lock_key(payload)
+        lock = self._zalo_processing_locks.setdefault(
+            lock_key, asyncio.Lock()
+        )
+        self._zalo_processing_lock_users[lock_key] = (
+            self._zalo_processing_lock_users.get(lock_key, 0) + 1
+        )
+        try:
+            async with lock:
+                return await self._async_process_zalo_webhook_payload_locked(
+                    payload, service_context
+                )
+        finally:
+            remaining = self._zalo_processing_lock_users.get(lock_key, 1) - 1
+            if remaining <= 0:
+                self._zalo_processing_lock_users.pop(lock_key, None)
+                if not lock.locked():
+                    self._zalo_processing_locks.pop(lock_key, None)
+            else:
+                self._zalo_processing_lock_users[lock_key] = remaining
+
+    async def _async_process_zalo_webhook_payload_locked(
+        self,
+        payload: Any,
+        service_context: Context | None = None,
+    ) -> dict[str, Any]:
+        """Process one Zalo payload while its source lock is held."""
         if not self.zalo_webhook_enabled:
             return {"ok": True, "handled": False, "reason": "disabled"}
         if not isinstance(payload, dict):
@@ -15066,7 +15133,12 @@ class ConversationalAssistantManager(NoteManagerMixin):
         context, reason = self._normalize_zalo_webhook_context(payload)
         if context is None:
             return {"ok": True, "handled": False, "reason": reason}
-        if self._is_duplicate_zalo_message(context.message_id):
+        duplicate_key = (
+            f"{context.owner_key}:{context.message_id}"
+            if context.message_id
+            else ""
+        )
+        if self._is_duplicate_zalo_message(duplicate_key):
             return {"ok": True, "handled": False, "reason": "duplicate"}
 
         if reason == "invocation_keyword_only":
@@ -15415,7 +15487,7 @@ class ConversationalAssistantManager(NoteManagerMixin):
                 failures.append(f"{target.display_name}: cấu hình thiếu")
                 continue
             try:
-                await self.hass.services.async_call(
+                await self._async_call_service(
                     ZALO_DOMAIN,
                     ZALO_SERVICE_SEND_MESSAGE,
                     {
@@ -15444,7 +15516,7 @@ class ConversationalAssistantManager(NoteManagerMixin):
                 )
                 continue
             try:
-                await self.hass.services.async_call(
+                await self._async_call_service(
                     ZALO_DOMAIN,
                     ZALO_SERVICE_CREATE_REMINDER,
                     {
@@ -15658,7 +15730,8 @@ class ConversationalAssistantManager(NoteManagerMixin):
         names = ", ".join(target.display_name for target in targets)
         return (
             f"Đã nhận yêu cầu phát thông báo trên {names}. "
-            "Nếu loa đang phát hoặc buffering, integration sẽ kiểm tra lại "
+            "Nếu loa chưa ở trạng thái idle, off hoặc paused, integration "
+            "sẽ kiểm tra lại "
             f"mỗi {SPEAKER_BUSY_RETRY_DELAY_SECONDS} giây, tối đa "
             f"{SPEAKER_BUSY_RETRY_COUNT} lần kiểm tra lại."
         )
@@ -15853,7 +15926,7 @@ class ConversationalAssistantManager(NoteManagerMixin):
         message: str,
         tts_entity_id: str,
     ) -> tuple[str, str | None]:
-        """Wait for one speaker to become idle, then call tts.speak."""
+        """Wait for one speaker to become ready, then call tts.speak."""
         speaker_entity_id = str(target.speaker_entity_id or "").strip()
         if not speaker_entity_id:
             return target.display_name, "cấu hình loa thiếu entity_id"
@@ -15862,39 +15935,42 @@ class ConversationalAssistantManager(NoteManagerMixin):
             speaker_entity_id, asyncio.Lock()
         )
         async with lock:
-            retries = 0
-            while True:
+            last_state = "unknown"
+            for retry in range(SPEAKER_BUSY_RETRY_COUNT + 1):
                 state = self.hass.states.get(speaker_entity_id)
                 if state is None:
                     return (
                         target.display_name,
                         "loa lỗi hoặc mất kết nối, entity không còn tồn tại",
                     )
-                state_value = str(state.state or "").strip().casefold()
-                if state_value in {STATE_UNAVAILABLE, STATE_UNKNOWN}:
+                last_state = str(state.state or "").strip().casefold()
+                if last_state in {STATE_UNAVAILABLE, STATE_UNKNOWN}:
                     return (
                         target.display_name,
                         "loa mất kết nối hoặc không khả dụng",
                     )
-                if state_value not in {"playing", "buffering"}:
+                # Idle, off, and paused mean the speaker is not actively
+                # playing content and is ready to receive the TTS request.
+                if last_state in {"idle", "off", "paused"}:
                     break
-                if retries >= SPEAKER_BUSY_RETRY_COUNT:
+                if retry >= SPEAKER_BUSY_RETRY_COUNT:
                     return (
                         target.display_name,
-                        "loa vẫn đang bận chơi nhạc hoặc buffering sau "
-                        f"{SPEAKER_BUSY_RETRY_COUNT} lần kiểm tra lại, nên không phát "
-                        "TTS được",
+                        f"loa chưa về trạng thái sẵn sàng "
+                        f"(idle/off/paused) sau "
+                        f"{SPEAKER_BUSY_RETRY_COUNT} lần kiểm tra lại "
+                        f"(trạng thái cuối: {last_state}), nên đã hủy TTS",
                     )
-                retries += 1
                 await asyncio.sleep(SPEAKER_BUSY_RETRY_DELAY_SECONDS)
 
             try:
-                await self.hass.services.async_call(
+                await self._async_call_service(
                     TTS_DOMAIN,
                     TTS_SERVICE_SPEAK,
                     self._tts_speak_service_data(speaker_entity_id, message),
                     blocking=True,
                     target={"entity_id": tts_entity_id},
+                    timeout_seconds=TTS_SERVICE_TIMEOUT_SECONDS,
                 )
             except asyncio.CancelledError:
                 raise
@@ -16004,7 +16080,7 @@ class ConversationalAssistantManager(NoteManagerMixin):
         )
         for chunk in self._split_zalo_text(prepared):
             try:
-                await self.hass.services.async_call(
+                await self._async_call_service(
                     ZALO_DOMAIN,
                     ZALO_SERVICE_SEND_MESSAGE,
                     {
@@ -16410,7 +16486,7 @@ class ConversationalAssistantManager(NoteManagerMixin):
         sent = False
         for service in services:
             try:
-                await self.hass.services.async_call(
+                await self._async_call_service(
                     "notify",
                     service,
                     {
@@ -16463,7 +16539,7 @@ class ConversationalAssistantManager(NoteManagerMixin):
                 await self._async_send_zalo_typing_to_target(
                     thread_id, account_selection
                 )
-                await self.hass.services.async_call(
+                await self._async_call_service(
                     ZALO_DOMAIN,
                     ZALO_SERVICE_SEND_MESSAGE,
                     {
@@ -16573,7 +16649,7 @@ class ConversationalAssistantManager(NoteManagerMixin):
         )
         for service in services:
             try:
-                await self.hass.services.async_call(
+                await self._async_call_service(
                     "notify",
                     service,
                     {
@@ -16726,7 +16802,7 @@ class ConversationalAssistantManager(NoteManagerMixin):
 
     @staticmethod
     def _source_keys(user_input: ConversationInput) -> set[str]:
-        """Build identifiers used to match a follow-up voice turn."""
+        """Build identifiers used to match only this Voice source."""
         keys: set[str] = set()
         if user_input.conversation_id:
             keys.add(f"conversation:{user_input.conversation_id}")
@@ -16736,7 +16812,10 @@ class ConversationalAssistantManager(NoteManagerMixin):
             keys.add(f"satellite:{user_input.satellite_id}")
         if user_input.device_id:
             keys.add(f"device:{user_input.device_id}")
-        return keys or {"global"}
+        context_id = str(getattr(user_input.context, "id", "") or "").strip()
+        if not keys and context_id:
+            keys.add(f"context:{context_id}")
+        return keys
 
     @callback
     def _schedule_pending_expiry(self) -> None:
@@ -16974,6 +17053,8 @@ class ConversationalAssistantManager(NoteManagerMixin):
         """Find a pending direct Zalo-send request for this voice source."""
         self._purge_expired_pending()
         source_keys = self._source_keys(user_input)
+        if not source_keys:
+            return None
         matching = [
             pending
             for pending in self._pending_voice_zalo_sends.values()
@@ -16981,16 +17062,6 @@ class ConversationalAssistantManager(NoteManagerMixin):
         ]
         if matching:
             return max(matching, key=lambda item: item.created_at)
-        if (
-            len(self._pending_voice_zalo_sends) == 1
-            and not self._pending
-            and not self._pending_deletions
-            and not self._pending_voice_cameras
-            and not self._pending_voice_device_controls
-            and not self._pending_voice_speaker_announcements
-            and not self._has_pending_notes()
-        ):
-            return next(iter(self._pending_voice_zalo_sends.values()))
         return None
 
     def _find_pending_voice_speaker_announcement(
@@ -16999,6 +17070,8 @@ class ConversationalAssistantManager(NoteManagerMixin):
         """Find a pending direct speaker announcement for this voice source."""
         self._purge_expired_pending()
         source_keys = self._source_keys(user_input)
+        if not source_keys:
+            return None
         matching = [
             pending
             for pending in self._pending_voice_speaker_announcements.values()
@@ -17006,26 +17079,16 @@ class ConversationalAssistantManager(NoteManagerMixin):
         ]
         if matching:
             return max(matching, key=lambda item: item.created_at)
-        if (
-            len(self._pending_voice_speaker_announcements) == 1
-            and not self._pending
-            and not self._pending_deletions
-            and not self._pending_voice_cameras
-            and not self._pending_voice_device_controls
-            and not self._pending_voice_zalo_sends
-            and not self._has_pending_notes()
-        ):
-            return next(
-                iter(self._pending_voice_speaker_announcements.values())
-            )
         return None
 
     def _find_pending(
         self, user_input: ConversationInput
     ) -> PendingReminder | None:
-        """Find a pending creation belonging to this follow-up turn."""
+        """Find a pending reminder creation for this voice source."""
         self._purge_expired_pending()
         source_keys = self._source_keys(user_input)
+        if not source_keys:
+            return None
         matching = [
             pending
             for pending in self._pending.values()
@@ -17033,24 +17096,16 @@ class ConversationalAssistantManager(NoteManagerMixin):
         ]
         if matching:
             return max(matching, key=lambda item: item.created_at)
-        if (
-            len(self._pending) == 1
-            and not self._pending_deletions
-            and not self._pending_voice_cameras
-            and not self._pending_voice_device_controls
-            and not self._pending_voice_zalo_sends
-            and not self._pending_voice_speaker_announcements
-            and not self._has_pending_notes()
-        ):
-            return next(iter(self._pending.values()))
         return None
 
     def _find_pending_deletion(
         self, user_input: ConversationInput
     ) -> PendingDeletion | None:
-        """Find a pending deletion belonging to this follow-up turn."""
+        """Find a pending reminder deletion for this voice source."""
         self._purge_expired_pending()
         source_keys = self._source_keys(user_input)
+        if not source_keys:
+            return None
         matching = [
             pending
             for pending in self._pending_deletions.values()
@@ -17058,16 +17113,6 @@ class ConversationalAssistantManager(NoteManagerMixin):
         ]
         if matching:
             return max(matching, key=lambda item: item.created_at)
-        if (
-            len(self._pending_deletions) == 1
-            and not self._pending
-            and not self._pending_voice_cameras
-            and not self._pending_voice_device_controls
-            and not self._pending_voice_zalo_sends
-            and not self._pending_voice_speaker_announcements
-            and not self._has_pending_notes()
-        ):
-            return next(iter(self._pending_deletions.values()))
         return None
 
     def _find_pending_voice_camera(
@@ -17076,6 +17121,8 @@ class ConversationalAssistantManager(NoteManagerMixin):
         """Find a pending voice camera request for this source."""
         self._purge_expired_pending()
         source_keys = self._source_keys(user_input)
+        if not source_keys:
+            return None
         matching = [
             pending
             for pending in self._pending_voice_cameras.values()
@@ -17083,16 +17130,6 @@ class ConversationalAssistantManager(NoteManagerMixin):
         ]
         if matching:
             return max(matching, key=lambda item: item.created_at)
-        if (
-            len(self._pending_voice_cameras) == 1
-            and not self._pending
-            and not self._pending_deletions
-            and not self._pending_voice_device_controls
-            and not self._pending_voice_zalo_sends
-            and not self._pending_voice_speaker_announcements
-            and not self._has_pending_notes()
-        ):
-            return next(iter(self._pending_voice_cameras.values()))
         return None
 
     @staticmethod
@@ -17175,40 +17212,12 @@ class ConversationalAssistantManager(NoteManagerMixin):
         *,
         ai_generated: bool = False,
     ) -> str:
-        """Return complete speech to Assist and optionally enrich deterministic text.
-
-        Sentence-trigger callbacks become the ``speech`` field of the
-        conversation response, so returning the real text keeps both the Assist
-        chat transcript and pipeline TTS working for every feature.
-        """
+        """Return complete, TTS-safe speech without an extra AI rewrite."""
+        del user_input, ai_generated
         response = str(text or "").strip()
         if not response:
             return response
-        if ai_generated:
-            return _assist_speech_text(self._address_response(response))
-        language_code = str(getattr(user_input, "language", "vi") or "vi")
-        language = (
-            "en"
-            if language_code.casefold().startswith("en")
-            else _request_language(str(getattr(user_input, "text", "") or ""))
-        )
-        polished, attempted = await self._async_ai_polish_response(
-            str(getattr(user_input, "text", "") or ""),
-            response,
-            language=language,
-            zalo=False,
-            service_context=getattr(user_input, "context", None),
-        )
-        return _assist_speech_text(
-            self._address_response(
-                self._append_ai_attempt_summary(
-                    polished,
-                    attempted,
-                    language=language,
-                    zalo=False,
-                )
-            )
-        )
+        return _assist_speech_text(self._address_response(response))
 
     @staticmethod
     def _reminder_from_targets(
@@ -17547,13 +17556,14 @@ class ConversationalAssistantManager(NoteManagerMixin):
             )
 
         try:
-            response = await self.hass.services.async_call(
+            response = await self._async_call_service(
                 LUNAR_CALENDAR_DOMAIN,
                 LUNAR_CALENDAR_SERVICE_CONVERT_DATE,
                 service_data,
                 blocking=True,
                 context=service_context,
                 return_response=True,
+                timeout_seconds=LUNAR_SERVICE_TIMEOUT_SECONDS,
             )
         except Exception:  # noqa: BLE001 - report exact integration failure
             _LOGGER.exception(
