@@ -175,3 +175,12 @@ Mở **Settings > Devices & services > Conversational Assistant > Configure** đ
 - cấu hình AI Agent, AI Search dự phòng, lịch, bản tin thời tiết và TTS;
 - bật hoặc tắt yêu cầu Zalo invocation keyword;
 - thay đổi Zalo invocation keyword dùng để gọi tích hợp.
+
+
+## Phân tích nội dung và mốc thời gian
+
+- Tích hợp phân loại ý định trước: tạo sự kiện không bị nhầm thành tra cứu ngày Âm/Dương lịch.
+- Hiểu các cách nói như `thứ 4 tuần sau`, `t4 tuần tới`, `ngày mốt`, `ngày kìa`, giờ dạng `13h30`, `13:30` hoặc `13 giờ 30`.
+- Ví dụ: `Thêm sự kiện 13h30 thứ 4 tuần sau dương lịch Họp test sản phẩm`.
+- Parser và công cụ Home Assistant luôn chạy trước. Nếu chưa tách đủ thiết bị, nội dung hoặc thời gian, AI chỉ được dùng để chuẩn hóa yêu cầu; AI Search không dùng để đoán ý định mà chỉ tra dữ liệu Internet.
+- Quy tắc trên áp dụng cho lịch, nhắc hẹn, gửi Zalo có thời gian, TTS hẹn giờ, thời tiết và hẹn điều khiển thiết bị. Nếu vẫn mơ hồ, tích hợp hỏi lại và không thực hiện ngay.
