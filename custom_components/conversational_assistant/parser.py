@@ -7,6 +7,7 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta
 import re
 import unicodedata
+from typing import Any
 
 from homeassistant.util import dt as dt_util
 
@@ -72,8 +73,8 @@ WEEKDAY_LABELS = {
 WEEKDAY_TOKEN_RE = re.compile(
     r"(?<!\w)(?:"
     r"t\s*[2-7]|cn|"
-    r"thứ\s*(?:hai|2|ba|3|tư|4|năm|5|sáu|6|bảy|7)|"
-    r"chủ\s*nhật"
+    r"(?:thứ|thu)\s*(?:hai|2|ba|3|tư|tu|4|năm|nam|5|sáu|sau|6|bảy|bay|7)|"
+    r"(?:chủ|chu)\s*(?:nhật|nhat)"
     r")(?!\w)",
     re.IGNORECASE,
 )
@@ -550,9 +551,11 @@ def _extract_one_time_date(
     text = _clean(text)
 
     relative_dates = (
-        (r"\bngày\s+kia\b", 2),
-        (r"\bngày\s+mai\b", 1),
-        (r"\bhôm\s+nay\b", 0),
+        (r"\bngày\s+kìa\b", 3),
+        (r"\b(?:ngày|ngay)\s+kia\b", 2),
+        (r"\b(?:ngày|ngay)\s+(?:mốt|mot)\b", 2),
+        (r"\b(?:ngày|ngay)\s+mai\b", 1),
+        (r"\b(?:hôm|hom)\s+nay\b", 0),
     )
     for pattern, offset in relative_dates:
         match = re.search(pattern, text)
@@ -626,10 +629,35 @@ def _extract_one_time_date(
             raw_year is not None,
         )
 
-    # A weekday without a weekly marker means the nearest one-time occurrence.
+    # A weekday with an explicit week qualifier must be resolved against that
+    # calendar week, not merely to the nearest occurrence. This distinction is
+    # important early in the week: "thứ 4 tuần sau" must never become this
+    # week's Wednesday. Numeric forms (thứ 4, t4) use the same path.
     weekday_match = WEEKDAY_TOKEN_RE.search(text)
     if weekday_match:
         weekday = _weekday_from_token(weekday_match.group(0))
+        week_match = re.search(
+            r"\b(?:tuần|tuan)\s+(?:này|nay|sau|tới|toi|kế\s+tiếp|ke\s+tiep)\b",
+            text,
+            re.IGNORECASE,
+        )
+        if week_match:
+            folded_week = _fold(week_match.group(0))
+            monday = now.date() - timedelta(days=now.weekday())
+            if any(marker in folded_week for marker in ("tuan sau", "tuan toi", "ke tiep")):
+                monday += timedelta(days=7)
+            target = monday + timedelta(days=weekday)
+            rest = text
+            for start, end in sorted(
+                [weekday_match.span(), week_match.span()], reverse=True
+            ):
+                rest = _remove_span(rest, start, end)
+            return (
+                (target.year, target.month, target.day),
+                None,
+                rest,
+                True,
+            )
         return (
             None,
             weekday,
@@ -889,7 +917,10 @@ def _looks_like_english_reminder(text: str) -> bool:
         "weekends",
         "noon",
         "midnight",
-    } | set(_EN_WEEKDAYS) | (set(_EN_MONTHS) - {"may"})
+    } | (set(_EN_WEEKDAYS) - {"thu"}) | (set(_EN_MONTHS) - {"may"})
+    # English "Thu" conflicts with Vietnamese "thứ" after accent folding,
+    # just as English May conflicts with Vietnamese "máy". Neither token may
+    # switch the whole request to the English parser on its own.
     # "máy" (device/machine) folds to "may" and is extremely common in
     # Vietnamese reminder content. It must not switch the whole request to
     # the English parser merely because May is also an English month name.
@@ -1437,6 +1468,97 @@ def parse_reminder_request(
     return ParsedReminder(
         message=message,
         first_run=run,
+        recurrence=recurrence,
+        confirmation=confirmation,
+    )
+
+
+def reminder_from_ai_payload(
+    payload: Any, now: datetime | None = None
+) -> ParsedReminder | None:
+    """Validate a strict AI-produced reminder interpretation.
+
+    AI is allowed to resolve language only. The integration validates every
+    field, rejects past or unreasonable dates, and builds the same internal
+    model used by the deterministic parser before any action can run.
+    """
+    if not isinstance(payload, dict) or payload.get("error"):
+        return None
+    message = _clean(str(payload.get("message") or ""))
+    if not message or len(message) > 2000:
+        return None
+
+    local_now = dt_util.as_local(now or dt_util.now())
+    parsed = dt_util.parse_datetime(str(payload.get("first_run") or ""))
+    if parsed is None:
+        return None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=local_now.tzinfo)
+    first_run = dt_util.as_local(parsed).replace(second=0, microsecond=0)
+    if first_run <= local_now or first_run > local_now + timedelta(days=3650):
+        return None
+
+    recurrence_payload = payload.get("recurrence")
+    if recurrence_payload is None:
+        recurrence_payload = {"kind": "none"}
+    if not isinstance(recurrence_payload, dict):
+        return None
+    kind = str(recurrence_payload.get("kind") or "none").strip().casefold()
+    if kind not in {"none", "daily", "weekdays", "weekend", "weekly", "monthly", "yearly"}:
+        return None
+
+    day_of_month: int | None = None
+    month: int | None = None
+    weekdays: list[int] | None = None
+    weekday: int | None = None
+    try:
+        if recurrence_payload.get("day_of_month") is not None:
+            day_of_month = int(recurrence_payload["day_of_month"])
+        if recurrence_payload.get("month") is not None:
+            month = int(recurrence_payload["month"])
+    except (TypeError, ValueError):
+        return None
+    if day_of_month is not None and not 1 <= day_of_month <= 31:
+        return None
+    if month is not None and not 1 <= month <= 12:
+        return None
+
+    raw_weekdays = recurrence_payload.get("weekdays")
+    if raw_weekdays is not None:
+        if not isinstance(raw_weekdays, list) or len(raw_weekdays) > 7:
+            return None
+        try:
+            weekdays = sorted({int(value) for value in raw_weekdays})
+        except (TypeError, ValueError):
+            return None
+        if any(value < 0 or value > 6 for value in weekdays):
+            return None
+        if weekdays:
+            weekday = weekdays[0]
+    if kind == "weekly" and not weekdays:
+        return None
+    if kind == "monthly" and day_of_month is None:
+        return None
+    if kind == "yearly" and (day_of_month is None or month is None):
+        return None
+
+    recurrence = Recurrence(
+        kind=kind,
+        day_of_month=day_of_month,
+        month=month,
+        weekday=weekday,
+        weekdays=weekdays,
+    )
+    if kind == "none":
+        confirmation = f"Đã tạo nhắc nhở {message} vào {_format_time(first_run)}."
+    else:
+        confirmation = (
+            f"Đã tạo nhắc nhở lặp lại lúc {first_run.strftime('%H:%M')}: "
+            f"{message}."
+        )
+    return ParsedReminder(
+        message=message,
+        first_run=first_run,
         recurrence=recurrence,
         confirmation=confirmation,
     )

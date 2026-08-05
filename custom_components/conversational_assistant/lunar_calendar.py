@@ -238,6 +238,18 @@ def is_lunar_date_lookup_request(text: str) -> bool:
     normalized = normalize_text(text)
     if not normalized:
         return False
+
+    # "Âm lịch/Dương lịch" can identify the destination of a calendar event.
+    # Such action requests belong to the calendar/reminder/device router, not
+    # to the informational date-lookup feature.
+    action_request_patterns = (
+        r"\b(?:tao|them|dat|len)\s+(?:mot\s+)?(?:su kien|event|cuoc hop|cuoc hen|lich)\b",
+        r"\b(?:create|add|schedule|book)\s+(?:an?\s+)?(?:calendar\s+)?(?:event|meeting|appointment)\b",
+        r"\b(?:nhac|hen|thong bao|gui)\b.+\b(?:am lich|lich am|duong lich|lich duong)\b",
+    )
+    if any(re.search(pattern, normalized) for pattern in action_request_patterns):
+        return False
+
     has_lunar, has_solar = _calendar_mentions(normalized)
     asks_weekday = any(
         phrase in normalized

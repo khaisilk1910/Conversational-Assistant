@@ -529,12 +529,16 @@ def requested_device_domains(text: str) -> set[str]:
 
 
 def _contains_schedule_hint(normalized: str) -> bool:
+    """Return whether text contains an explicit future-time expression."""
     return bool(
         re.search(
-            r"\b(?:hen\s*(?:gio|giơ)|dat lich|schedule|timer|sau|trong|"
-            r"luc|vao|ngay mai|hom nay|nua)\b",
+            r"\b(?:hen\s*gio|dat lich|schedule|timer|sau|trong|luc|vao|nua|"
+            r"hom nay|ngay mai|ngay mot|ngay kia|tuan (?:nay|sau|toi|ke tiep)|"
+            r"thu\s*(?:[2-7]|hai|ba|tu|nam|sau|bay)|t\s*[2-7]|chu nhat|"
+            r"today|tomorrow|day after tomorrow|this week|next week)\b",
             normalized,
         )
+        or re.search(r"(?<!\d)\d{1,2}[/-]\d{1,2}(?:[/-]\d{2,4})?(?!\d)", normalized)
     )
 
 
@@ -1348,7 +1352,61 @@ def parse_scheduled_for(text: str, now: datetime) -> datetime | None:
                 return None
         return candidate if candidate > now else None
 
-    day_offset = 1 if "ngay mai" in normalized or "tomorrow" in normalized else 0
+    # Resolve Vietnamese/English named weekdays before falling back to the next
+    # clock occurrence. An explicit week qualifier is authoritative: "thứ 4
+    # tuần sau" always means Wednesday of the next calendar week, never the
+    # nearest Wednesday. This path is shared by Zalo and Voice device timers.
+    weekday_aliases = (
+        (("thu hai", "thu 2", "t2", "monday"), 0),
+        (("thu ba", "thu 3", "t3", "tuesday"), 1),
+        (("thu tu", "thu 4", "t4", "wednesday"), 2),
+        (("thu nam", "thu 5", "t5", "thursday"), 3),
+        (("thu sau", "thu 6", "t6", "friday"), 4),
+        (("thu bay", "thu 7", "t7", "saturday"), 5),
+        (("chu nhat", "cn", "sunday"), 6),
+    )
+    requested_weekday: int | None = None
+    for aliases, weekday_index in weekday_aliases:
+        if any(re.search(rf"(?<![a-z0-9]){re.escape(alias)}(?![a-z0-9])", normalized) for alias in aliases):
+            requested_weekday = weekday_index
+            break
+    if requested_weekday is not None:
+        current_monday = now.date() - timedelta(days=now.weekday())
+        explicit_this_week = bool(re.search(r"\b(?:tuan nay|this week)\b", normalized))
+        explicit_next_week = bool(
+            re.search(r"\b(?:tuan (?:sau|toi|ke tiep)|next week)\b", normalized)
+        )
+        if explicit_next_week:
+            target_date = current_monday + timedelta(days=7 + requested_weekday)
+        elif explicit_this_week:
+            target_date = current_monday + timedelta(days=requested_weekday)
+        else:
+            offset = (requested_weekday - now.weekday()) % 7
+            target_date = now.date() + timedelta(days=offset)
+        candidate = now.replace(
+            year=target_date.year,
+            month=target_date.month,
+            day=target_date.day,
+            hour=hour,
+            minute=minute,
+            second=0,
+            microsecond=0,
+        )
+        if candidate <= now and not (explicit_this_week or explicit_next_week):
+            candidate += timedelta(days=7)
+        return candidate if candidate > now else None
+
+    if re.search(r"\bday after tomorrow\b", normalized):
+        day_offset = 2
+    elif re.search(r"\bngay (?:mot|kia)\b", normalized):
+        # Accent folding makes "ngày kia" and "ngày kìa" identical here.
+        # Both safely mean a future day; the reminder/calendar parser retains
+        # the more specific +2/+3 distinction when the original accents exist.
+        day_offset = 2
+    elif "ngay mai" in normalized or "tomorrow" in normalized:
+        day_offset = 1
+    else:
+        day_offset = 0
     candidate = now.replace(
         hour=hour, minute=minute, second=0, microsecond=0
     ) + timedelta(days=day_offset)

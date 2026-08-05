@@ -79,8 +79,11 @@ from .const import (
     ACTION_CHAT,
     ACTION_DISMISS,
     ACTION_SNOOZE,
+    AI_FAILOVER_NOTICE_TIMEOUT_SECONDS,
+    AI_PARSER_AGENT_TIMEOUT_SECONDS,
     AI_SEARCH_AGENT_TIMEOUT_SECONDS,
     AI_SEARCH_MAX_CANDIDATES,
+    AI_SEARCH_TOTAL_TIMEOUT_SECONDS,
     AI_TASK_DOMAIN,
     AI_TASK_SERVICE_GENERATE_DATA,
     AI_TASK_SERVICE_GENERATE_IMAGE,
@@ -335,6 +338,7 @@ from .parser import (
     ParsedReminder,
     ReminderParseError,
     parse_reminder_request,
+    reminder_from_ai_payload,
 )
 from .targeting import normalize_text, parse_target_selection
 from .zalo_home_assistant import (
@@ -1297,6 +1301,9 @@ class ConversationalAssistantManager(NoteManagerMixin):
         self._zalo_processing_locks: dict[str, asyncio.Lock] = {}
         self._zalo_processing_lock_users: dict[str, int] = {}
         self._zalo_background_tasks: set[asyncio.Task[Any]] = set()
+        self._ai_converse_tasks: set[asyncio.Task[Any]] = set()
+        self._ai_converse_task_agents: dict[asyncio.Task[Any], str] = {}
+        self._ai_timed_out_tasks_by_agent: dict[str, asyncio.Task[Any]] = {}
         self._zalo_background_tasks_by_owner: dict[
             str, set[asyncio.Task[Any]]
         ] = {}
@@ -1883,6 +1890,65 @@ class ConversationalAssistantManager(NoteManagerMixin):
                     f"⏳ còn {row['con_lai_ngay']} ngày"
                 )
         return "\n".join(lines)
+
+    def _discard_ai_converse_task(self, task: asyncio.Task[Any]) -> None:
+        """Forget one provider task and consume any detached exception."""
+        self._ai_converse_tasks.discard(task)
+        agent_id = self._ai_converse_task_agents.pop(task, "")
+        if (
+            agent_id
+            and self._ai_timed_out_tasks_by_agent.get(agent_id) is task
+        ):
+            self._ai_timed_out_tasks_by_agent.pop(agent_id, None)
+        if task.cancelled():
+            return
+        try:
+            task.exception()
+        except asyncio.CancelledError:
+            return
+        except Exception:  # noqa: BLE001 - the awaiting workflow logs failures
+            return
+
+    async def _async_converse_with_hard_timeout(
+        self,
+        *,
+        timeout_seconds: float,
+        **kwargs: Any,
+    ) -> Any:
+        """Run Conversation without trusting a provider to honour cancellation.
+
+        ``asyncio.timeout`` waits for cancellation to propagate. Some custom AI
+        providers catch or delay cancellation, which can freeze failover on one
+        agent. Waiting on the task set gives the provider a strict wall-clock
+        window; after that the task is cancelled and failover continues without
+        awaiting the uncooperative coroutine.
+        """
+        agent_id = str(kwargs.get("agent_id") or "").strip()
+        existing = self._ai_timed_out_tasks_by_agent.get(agent_id)
+        if existing is not None and not existing.done():
+            raise RuntimeError(
+                f"Conversation agent {agent_id or '<unknown>'} is still "
+                "finishing a previous timed-out request"
+            )
+        task = self.hass.async_create_task(async_converse(**kwargs))
+        self._ai_converse_tasks.add(task)
+        self._ai_converse_task_agents[task] = agent_id
+        task.add_done_callback(self._discard_ai_converse_task)
+        try:
+            done, _pending = await asyncio.wait(
+                {task}, timeout=max(0.1, float(timeout_seconds))
+            )
+        except asyncio.CancelledError:
+            task.cancel()
+            raise
+        if task not in done:
+            if agent_id:
+                self._ai_timed_out_tasks_by_agent[agent_id] = task
+            task.cancel()
+            raise TimeoutError(
+                f"Conversation agent exceeded {timeout_seconds:.1f} seconds"
+            )
+        return task.result()
 
     def _conversation_agent_display_name(self, agent_id: str) -> str:
         """Return a stable, user-facing name for a Conversation agent."""
@@ -2889,6 +2955,15 @@ class ConversationalAssistantManager(NoteManagerMixin):
         """Tell Zalo that the next agent receives a fresh timeout window."""
         if context is None:
             return
+        attempt_timeout_seconds = (
+            ZALO_IMAGE_TIMEOUT_SECONDS
+            if feature == "image"
+            else CAMERA_ANALYSIS_TIMEOUT_SECONDS
+            if feature == "camera"
+            else AI_SEARCH_AGENT_TIMEOUT_SECONDS
+            if feature in {"search", "weather", "chat"}
+            else ZALO_SEARCH_TIMEOUT_SECONDS
+        )
         if language == "en":
             feature_name = {
                 "image": "image generation",
@@ -2902,7 +2977,8 @@ class ConversationalAssistantManager(NoteManagerMixin):
                 f"🔄 **Switching AI for {feature_name}**\n\n"
                 f"Agent **{failed_agent}** did not complete the request. "
                 f"Trying agent **{next_attempt}/{total_attempts}: {next_agent}**. "
-                "**The waiting timer has restarted for this agent.**"
+                f"Each agent has at most **{attempt_timeout_seconds} "
+                "seconds**; a final failure will be reported if none succeeds."
             )
         else:
             feature_name = {
@@ -2917,9 +2993,34 @@ class ConversationalAssistantManager(NoteManagerMixin):
                 f"🔄 **Đang chuyển AI dự phòng cho {feature_name}**\n\n"
                 f"Agent **{failed_agent}** chưa hoàn thành yêu cầu. "
                 f"Đang thử agent **{next_attempt}/{total_attempts}: {next_agent}**. "
-                "**Thời gian chờ đã được tính lại từ đầu cho agent này.**"
+                f"Mỗi agent được chờ tối đa **{attempt_timeout_seconds} "
+                "giây**; nếu tất cả đều lỗi, tích hợp sẽ báo không thành công."
             )
-        await self._async_send_zalo_webhook_reply(context, message)
+        notice_task = self.hass.async_create_task(
+            self._async_send_zalo_webhook_reply(context, message)
+        )
+        try:
+            done, _pending = await asyncio.wait(
+                {notice_task}, timeout=AI_FAILOVER_NOTICE_TIMEOUT_SECONDS
+            )
+        except asyncio.CancelledError:
+            notice_task.cancel()
+            raise
+        if notice_task not in done:
+            notice_task.cancel()
+            _LOGGER.warning(
+                "Timed out sending AI failover notice for Zalo thread %s",
+                context.thread_id,
+            )
+            return
+        try:
+            notice_task.result()
+        except Exception:  # noqa: BLE001 - notice failure must not stop failover
+            _LOGGER.warning(
+                "Failed sending AI failover notice for Zalo thread %s",
+                context.thread_id,
+                exc_info=True,
+            )
 
     def _ai_long_running_candidate_count(self, action: str) -> int:
         """Return the current number of candidates for the safety timeout."""
@@ -3253,6 +3354,16 @@ class ConversationalAssistantManager(NoteManagerMixin):
         self._zalo_pending_calendar_managements.clear()
         self._clear_discovery_caches()
         self._clear_all_note_pending()
+        ai_converse_tasks = tuple(self._ai_converse_tasks)
+        for task in ai_converse_tasks:
+            task.cancel()
+        if ai_converse_tasks:
+            # A broken provider may ignore cancellation. Never let that block a
+            # Home Assistant reload or shutdown.
+            await asyncio.wait(ai_converse_tasks, timeout=1)
+        self._ai_converse_tasks.clear()
+        self._ai_converse_task_agents.clear()
+        self._ai_timed_out_tasks_by_agent.clear()
         background_tasks = tuple(self._zalo_background_tasks)
         for task in background_tasks:
             task.cancel()
@@ -3421,6 +3532,9 @@ class ConversationalAssistantManager(NoteManagerMixin):
 
         if _speaker_announcement_request(text) is not None:
             return ACTION_SPEAKER_ANNOUNCE
+        ha_kind = explicit_home_assistant_request_kind(text)
+        if ha_kind == "calendar":
+            return ACTION_CALENDAR
         if (
             is_lunar_date_conversion_request(text)
             or is_lunar_date_lookup_request(text)
@@ -3445,7 +3559,6 @@ class ConversationalAssistantManager(NoteManagerMixin):
         }:
             return builtin
 
-        ha_kind = explicit_home_assistant_request_kind(text)
         if ha_kind == "camera_analysis":
             return ACTION_CAMERA_ANALYSIS
         if ha_kind == "camera":
@@ -4392,6 +4505,13 @@ class ConversationalAssistantManager(NoteManagerMixin):
         if note_kind is not None:
             return note_kind
         if (
+            explicit_home_assistant_request_kind(text) == "calendar"
+            and calendar_request_action(text) == "create"
+        ):
+            # Leave command unset so the explicit Home Assistant calendar route
+            # receives the complete sentence, including calendar destination.
+            return None
+        if (
             is_lunar_date_conversion_request(text)
             or is_lunar_date_lookup_request(text)
         ):
@@ -4593,7 +4713,7 @@ class ConversationalAssistantManager(NoteManagerMixin):
             "📅 **Lịch và sự kiện** — xem lịch, kiểm tra lịch, sự kiện, "
             "tạo/thêm/đặt/lên lịch cuộc họp hoặc cuộc hẹn. Có thể nói rõ "
             "Dương lịch hoặc Âm lịch; nếu chưa nói, bot sẽ hỏi và liệt kê lịch.\n"
-            "VD: `Tạo sự kiện giỗ ông ngày 12/8/2026 âm lịch`\n\n"
+            "VD: `Thêm sự kiện 13h30 thứ 4 tuần sau dương lịch Họp test sản phẩm`\n\n"
             "🔊 **Thông báo loa** — thông báo loa, báo loa, báo ra loa, "
             "thông báo ra loa, gửi loa, nhắn loa. Chỉ phát khi loa ở trạng "
             "thái `idle`, `off` hoặc `paused`; kiểm tra lại 10 lần, mỗi lần "
@@ -4678,7 +4798,7 @@ class ConversationalAssistantManager(NoteManagerMixin):
             "mô tả sự kiện ghi đủ ngày âm và ngày dương tương ứng.\n"
             "• Sự kiện âm lặp theo tháng/năm nên dùng lịch âm đã cấu hình vì "
             "ngày dương tương ứng thay đổi.\n"
-            "• Ví dụ: `Tạo sự kiện giỗ ông ngày 12/8/2026 âm lịch`.\n\n"
+            "• Ví dụ: `Thêm sự kiện 13h30 thứ 4 tuần sau dương lịch Họp test sản phẩm`.\n\n"
             "🔊 **Loa và Zalo**\n"
             "• Gọi thẳng tên đã đặt hoặc chọn một, nhiều nơi nhận hay tất cả.\n"
             "• TTS phát khi loa ở trạng thái `idle`, `off` hoặc `paused`. "
@@ -5187,8 +5307,103 @@ class ConversationalAssistantManager(NoteManagerMixin):
             chunks.append(current.rstrip())
         return chunks or [text]
 
+    @staticmethod
+    def _temporal_parse_error_is_authoritative(error: Exception) -> bool:
+        """Return whether AI must not reinterpret an explicitly invalid time."""
+        normalized = normalize_text(str(error))
+        return any(
+            marker in normalized
+            for marker in (
+                "da qua",
+                "in the past",
+                "khong hop le",
+                "invalid",
+                "phai tu",
+                "must be between",
+                "must be greater than zero",
+            )
+        )
+
+    async def _async_ai_reminder_request(
+        self,
+        text: str,
+        now: datetime,
+        service_context: Context | None,
+    ) -> tuple[ParsedReminder | None, list[str]]:
+        """Use AI only after the deterministic reminder parser cannot resolve input."""
+        language = _request_language(text)
+        candidates = [
+            candidate
+            for candidate in self._conversation_agent_candidates(
+                self.zalo_conversation_agent_id
+            )
+            if candidate[0] != HOME_ASSISTANT_AGENT
+        ][:2]
+        attempted_agents: list[str] = []
+        local_now = dt_util.as_local(now)
+        prompt = (
+            "You are a strict parser for reminder scheduling. Do not execute "
+            "actions or call tools. Return exactly one JSON object and no prose. "
+            f"Current local datetime: {local_now.isoformat()}. User request: {text!r}. "
+            "Extract the exact requested content without command words, destination "
+            "names, date words, or clock words. Resolve natural Vietnamese or English "
+            "time precisely. JSON fields: message (required string), first_run "
+            "(future ISO-8601 datetime with timezone), recurrence object with kind "
+            "none, daily, weekdays, weekend, weekly, monthly, or yearly; optional "
+            "weekdays as integers Monday=0 through Sunday=6, day_of_month, and month. "
+            "Never invent missing content or time. If either is missing or ambiguous, "
+            "return {\"error\":\"missing_information\"}."
+        )
+        for agent_id, agent_name in candidates:
+            attempted_agents.append(agent_name)
+            try:
+                result = await self._async_converse_with_hard_timeout(
+                    timeout_seconds=AI_PARSER_AGENT_TIMEOUT_SECONDS,
+                    hass=self.hass,
+                    text=prompt,
+                    conversation_id=None,
+                    context=service_context or Context(),
+                    language=language,
+                    agent_id=agent_id,
+                )
+            except TimeoutError:
+                _LOGGER.warning("Reminder parser AI %s timed out", agent_id)
+                continue
+            except Exception:  # noqa: BLE001 - try the next parser agent
+                _LOGGER.exception("Reminder parser AI %s failed", agent_id)
+                continue
+            if self._conversation_result_error_code(result):
+                continue
+            payload = self._calendar_json_object(
+                self._conversation_reply_text(result)
+            )
+            parsed = reminder_from_ai_payload(payload, local_now)
+            if parsed is not None:
+                return parsed, attempted_agents
+        return None, attempted_agents
+
+    async def _async_parse_reminder_with_fallback(
+        self,
+        text: str,
+        *,
+        service_context: Context | None = None,
+    ) -> tuple[ParsedReminder | None, ReminderParseError | None, list[str]]:
+        """Parse locally first, then use a bounded AI parser as the last resort."""
+        now = dt_util.now()
+        try:
+            return parse_reminder_request(text, now=now), None, []
+        except ReminderParseError as err:
+            if self._temporal_parse_error_is_authoritative(err):
+                return None, err, []
+            parsed, attempted = await self._async_ai_reminder_request(
+                text, now, service_context
+            )
+            return parsed, err, attempted
+
     async def _async_create_from_zalo(
-        self, context: ZaloWebhookContext
+        self,
+        context: ZaloWebhookContext,
+        service_context: Context | None = None,
     ) -> str:
         """Create a reminder directly by named target or ask for a target."""
         account_selection = self._zalo_account_selection_for_context(context)
@@ -5222,12 +5437,20 @@ class ConversationalAssistantManager(NoteManagerMixin):
                     "Thiếu thời gian hoặc nội dung nhắc nhở sau tên nơi nhận. "
                     "Ví dụ: nhắc Zalo Khải 1 phút nữa uống thuốc."
                 )
-            try:
-                parsed = parse_reminder_request(direct_request)
-            except ReminderParseError as err:
-                return (
-                    f"Tôi chưa tạo được nhắc nhở. {err} "
-                    "Ví dụ: nhắc Zalo Khải 1 phút nữa uống thuốc."
+            parsed, parse_error, attempted_agents = (
+                await self._async_parse_reminder_with_fallback(
+                    direct_request, service_context=service_context
+                )
+            )
+            if parsed is None:
+                message = (
+                    f"Tôi chưa tách được chính xác thời gian và nội dung nhắc. "
+                    f"{parse_error or ''} Hãy nói rõ hơn, ví dụ: "
+                    "**nhắc Zalo Khải lúc 13h30 thứ 4 tuần sau họp test sản phẩm**."
+                )
+                return self._append_ai_attempt_summary(
+                    message, attempted_agents,
+                    language=_request_language(context.text), zalo=True,
                 )
             reminder = self._reminder_from_targets(
                 parsed, selected_targets, owner_key=context.owner_key
@@ -5238,13 +5461,20 @@ class ConversationalAssistantManager(NoteManagerMixin):
             )
             return f"{parsed.confirmation} Sẽ thông báo đến {target_names}."
 
-        try:
-            parsed = parse_reminder_request(context.text)
-        except ReminderParseError as err:
-            return (
-                f"Tôi chưa tạo được nhắc nhở. {err} "
-                "Ví dụ: nhắc 30 phút nữa uống thuốc; hoặc "
-                "nhắc Zalo Khải 1 phút nữa uống thuốc."
+        parsed, parse_error, attempted_agents = (
+            await self._async_parse_reminder_with_fallback(
+                context.text, service_context=service_context
+            )
+        )
+        if parsed is None:
+            message = (
+                f"Tôi chưa tách được chính xác thời gian và nội dung nhắc. "
+                f"{parse_error or ''} Hãy nói rõ hơn, ví dụ: "
+                "**nhắc lúc 13h30 thứ 4 tuần sau họp test sản phẩm**."
+            )
+            return self._append_ai_attempt_summary(
+                message, attempted_agents,
+                language=_request_language(context.text), zalo=True,
             )
 
         # A reminder without a named destination must always ask the user to
@@ -7463,9 +7693,13 @@ class ConversationalAssistantManager(NoteManagerMixin):
         language: str,
     ) -> WeatherQueryPlan | None:
         """Use AI only for complex weather dates that local parsing cannot resolve."""
-        candidates = self._conversation_agent_candidates(
-            self.zalo_conversation_agent_id
-        )
+        candidates = [
+            candidate
+            for candidate in self._conversation_agent_candidates(
+                self.zalo_conversation_agent_id
+            )
+            if candidate[0] != HOME_ASSISTANT_AGENT
+        ][:3]
         if not candidates:
             return None
         prompt = (
@@ -7484,15 +7718,15 @@ class ConversationalAssistantManager(NoteManagerMixin):
         )
         for agent_id, _agent_name in candidates:
             try:
-                async with asyncio.timeout(min(30, ZALO_SEARCH_TIMEOUT_SECONDS)):
-                    result = await async_converse(
-                        hass=self.hass,
-                        text=prompt,
-                        conversation_id=None,
-                        context=service_context or Context(),
-                        language=language,
-                        agent_id=agent_id,
-                    )
+                result = await self._async_converse_with_hard_timeout(
+                    timeout_seconds=AI_PARSER_AGENT_TIMEOUT_SECONDS,
+                    hass=self.hass,
+                    text=prompt,
+                    conversation_id=None,
+                    context=service_context or Context(),
+                    language=language,
+                    agent_id=agent_id,
+                )
             except TimeoutError:
                 _LOGGER.warning("Weather date parser AI %s timed out", agent_id)
                 continue
@@ -7698,17 +7932,23 @@ class ConversationalAssistantManager(NoteManagerMixin):
             language=language,
             reference_time=dt_util.now(),
         )
+        search_deadline = monotonic() + AI_SEARCH_TOTAL_TIMEOUT_SECONDS
         for agent_id, _agent_name in candidates:
+            remaining_seconds = search_deadline - monotonic()
+            if remaining_seconds <= 0:
+                break
             try:
-                async with asyncio.timeout(AI_SEARCH_AGENT_TIMEOUT_SECONDS):
-                    result = await async_converse(
-                        hass=self.hass,
-                        text=prompt,
-                        conversation_id=None,
-                        context=service_context or Context(),
-                        language=language,
-                        agent_id=agent_id,
-                    )
+                result = await self._async_converse_with_hard_timeout(
+                    timeout_seconds=min(
+                        AI_SEARCH_AGENT_TIMEOUT_SECONDS, remaining_seconds
+                    ),
+                    hass=self.hass,
+                    text=prompt,
+                    conversation_id=None,
+                    context=service_context or Context(),
+                    language=language,
+                    agent_id=agent_id,
+                )
             except TimeoutError:
                 _LOGGER.warning("Storm AI Search agent %s timed out", agent_id)
                 continue
@@ -8862,13 +9102,15 @@ class ConversationalAssistantManager(NoteManagerMixin):
         """Return a concise no-data response for a weather lookup."""
         if language == "en":
             body = (
-                "No reliable weather data matched that exact location and time. "
-                "Check the place name or use a more specific date."
+                "The lookup was unsuccessful because AI Search did not return "
+                "reliable weather data for that exact location and time. Check "
+                "the place name or use a more specific date."
             )
             return f"🌫️ **No reliable weather data found**\n\n{body}" if zalo else body
         body = (
-            "Chưa tìm thấy dữ liệu thời tiết đáng tin cậy đúng với địa điểm và "
-            "mốc thời gian này. Hãy kiểm tra tên địa điểm hoặc ghi ngày cụ thể hơn."
+            "Lần tra cứu này không thành công vì AI Search chưa trả đủ dữ liệu "
+            "thời tiết đáng tin cậy đúng với địa điểm và mốc thời gian. Hãy kiểm "
+            "tra tên địa điểm hoặc ghi ngày cụ thể hơn."
         )
         return f"🌫️ **Chưa tìm thấy dữ liệu thời tiết phù hợp**\n\n{body}" if zalo else body
 
@@ -8932,6 +9174,8 @@ class ConversationalAssistantManager(NoteManagerMixin):
         had_empty_response = False
         primary_agent_id = self.ai_search_agent_id
         total_attempts = len(candidates)
+        search_deadline = monotonic() + AI_SEARCH_TOTAL_TIMEOUT_SECONDS
+        total_timeout_reached = False
         if is_weather:
             prompt_text = self._weather_search_prompt(
                 query,
@@ -8948,24 +9192,31 @@ class ConversationalAssistantManager(NoteManagerMixin):
             )
 
         for index, (agent_id, agent_name) in enumerate(candidates):
+            remaining_seconds = search_deadline - monotonic()
+            if remaining_seconds <= 0:
+                total_timeout_reached = True
+                break
+            attempt_timeout = min(
+                AI_SEARCH_AGENT_TIMEOUT_SECONDS, remaining_seconds
+            )
             attempted_agents.append(agent_name)
             try:
-                async with asyncio.timeout(AI_SEARCH_AGENT_TIMEOUT_SECONDS):
-                    result = await async_converse(
-                        hass=self.hass,
-                        text=prompt_text,
-                        conversation_id=(
-                            conversation_id if index == 0 else None
-                        ),
-                        context=service_context or Context(),
-                        language=language,
-                        agent_id=agent_id,
-                    )
+                result = await self._async_converse_with_hard_timeout(
+                    timeout_seconds=attempt_timeout,
+                    hass=self.hass,
+                    text=prompt_text,
+                    conversation_id=(
+                        conversation_id if index == 0 else None
+                    ),
+                    context=service_context or Context(),
+                    language=language,
+                    agent_id=agent_id,
+                )
             except TimeoutError:
                 _LOGGER.warning(
                     "AI Search agent %s timed out after %s seconds for %s query %s",
                     agent_id,
-                    AI_SEARCH_AGENT_TIMEOUT_SECONDS,
+                    round(attempt_timeout, 1),
                     feature,
                     query,
                 )
@@ -9050,7 +9301,10 @@ class ConversationalAssistantManager(NoteManagerMixin):
                     error_code or "empty_reply",
                 )
 
-            if index + 1 < total_attempts:
+            if (
+                index + 1 < total_attempts
+                and monotonic() < search_deadline
+            ):
                 await self._async_send_ai_failover_notice(
                     zalo_context,
                     service_context,
@@ -9061,6 +9315,9 @@ class ConversationalAssistantManager(NoteManagerMixin):
                     total_attempts=total_attempts,
                     language=language,
                 )
+
+        if monotonic() >= search_deadline:
+            total_timeout_reached = True
 
         if had_empty_response:
             if is_chat:
@@ -9084,7 +9341,13 @@ class ConversationalAssistantManager(NoteManagerMixin):
                 )
         else:
             message = (
-                "All available search agents failed or timed out. Check the AI "
+                "The total AI Search deadline was reached. Check the AI agents "
+                "configured in Home Assistant and try again."
+                if language == "en" and total_timeout_reached
+                else "Đã hết tổng thời gian chờ AI Search. Hãy kiểm tra các AI "
+                "agent trong Home Assistant rồi thử lại."
+                if total_timeout_reached
+                else "All available search agents failed or timed out. Check the AI "
                 "agents configured in Home Assistant and try again."
                 if language == "en"
                 else "Tất cả AI agent tìm kiếm khả dụng đều lỗi hoặc hết thời gian "
@@ -9093,9 +9356,9 @@ class ConversationalAssistantManager(NoteManagerMixin):
             if zalo:
                 if is_weather:
                     message = (
-                        f"⚠️ **Weather agents unavailable**\n\n{message}"
+                        f"❌ **Weather lookup failed**\n\n{message}"
                         if language == "en"
-                        else f"⚠️ **AI tra cứu thời tiết chưa phản hồi**\n\n{message}"
+                        else f"❌ **Tra cứu thời tiết không thành công**\n\n{message}"
                     )
                 elif is_chat:
                     message = (
@@ -9105,9 +9368,9 @@ class ConversationalAssistantManager(NoteManagerMixin):
                     )
                 else:
                     message = (
-                        f"⚠️ **Search agents unavailable**\n\n{message}"
+                        f"❌ **Search failed**\n\n{message}"
                         if language == "en"
-                        else f"⚠️ **Các AI tìm kiếm đều chưa phản hồi**\n\n{message}"
+                        else f"❌ **Tìm kiếm không thành công**\n\n{message}"
                     )
         return (
             self._append_ai_attempt_summary(
@@ -9864,9 +10127,14 @@ class ConversationalAssistantManager(NoteManagerMixin):
         normalized = normalize_text(text)
         return bool(
             re.search(
-                r"(?:\bhen\s*(?:gio|giơ)\b|\btimer\b|\bschedule\b|"
+                r"(?:\bhen\s*gio\b|\btimer\b|\bschedule\b|"
                 r"\bsau\s+\d|\btrong\s+\d|\d+\s*(?:giay|phut|gio|ngay)\s+nua|"
-                r"\b(?:luc|vao)\s+\d{1,2}(?::\d{2}|\s*gio))",
+                r"\b(?:luc|vao)\s+\d{1,2}(?::\d{2}|\s*(?:h|gio))|"
+                r"\b(?:hom nay|ngay mai|ngay mot|ngay kia|"
+                r"tuan (?:nay|sau|toi|ke tiep)|"
+                r"thu\s*(?:[2-7]|hai|ba|tu|nam|sau|bay)|t\s*[2-7]|chu nhat|"
+                r"today|tomorrow|day after tomorrow|this week|next week)\b|"
+                r"(?<!\d)\d{1,2}[/-]\d{1,2}(?:[/-]\d{2,4})?(?!\d))",
                 normalized,
             )
         )
@@ -9886,7 +10154,7 @@ class ConversationalAssistantManager(NoteManagerMixin):
                 self.zalo_conversation_agent_id
             )
             if candidate[0] != HOME_ASSISTANT_AGENT
-        ]
+        ][:2]
         if not candidates or not targets:
             return None, []
 
@@ -9967,15 +10235,15 @@ class ConversationalAssistantManager(NoteManagerMixin):
         for agent_id, agent_name in candidates:
             attempted_agents.append(agent_name)
             try:
-                async with asyncio.timeout(30):
-                    result = await async_converse(
-                        hass=self.hass,
-                        text=prompt,
-                        conversation_id=None,
-                        context=service_context or Context(),
-                        language=language,
-                        agent_id=agent_id,
-                    )
+                result = await self._async_converse_with_hard_timeout(
+                    timeout_seconds=AI_PARSER_AGENT_TIMEOUT_SECONDS,
+                    hass=self.hass,
+                    text=prompt,
+                    conversation_id=None,
+                    context=service_context or Context(),
+                    language=language,
+                    agent_id=agent_id,
+                )
             except TimeoutError:
                 _LOGGER.warning("Device parser AI %s timed out", agent_id)
                 continue
@@ -11560,7 +11828,11 @@ class ConversationalAssistantManager(NoteManagerMixin):
 
         attempted: list[str] = []
         interpretation = local
-        if not (local.action and local.targets):
+        needs_schedule_fallback = (
+            self._device_timer_wording(user_input.text)
+            and local.scheduled_for is None
+        )
+        if not (local.action and local.targets) or needs_schedule_fallback:
             ai_interpretation, attempted = (
                 await self._async_ai_device_power_interpretation(
                     user_input.text,
@@ -11710,7 +11982,10 @@ class ConversationalAssistantManager(NoteManagerMixin):
             target_domain=pending.target_domain,
         )
         attempted = list(pending.attempted_agents)
-        if not action:
+        if not action or (
+            self._device_timer_wording(user_input.text)
+            and scheduled_for is None
+        ):
             ai_interpretation, ai_attempted = (
                 await self._async_ai_device_power_interpretation(
                     f"{user_input.text} for "
@@ -11994,7 +12269,11 @@ class ConversationalAssistantManager(NoteManagerMixin):
         attempted: list[str] = []
         interpretation = local
 
-        if not (local.action and local.targets):
+        needs_schedule_fallback = (
+            self._device_timer_wording(context.text)
+            and local.scheduled_for is None
+        )
+        if not (local.action and local.targets) or needs_schedule_fallback:
             ai_interpretation, attempted = (
                 await self._async_ai_device_power_interpretation(
                     context.text,
@@ -12139,7 +12418,10 @@ class ConversationalAssistantManager(NoteManagerMixin):
             target_domain=pending.target_domain,
         )
         attempted = list(pending.attempted_agents)
-        if not action:
+        if not action or (
+            self._device_timer_wording(context.text)
+            and scheduled_for is None
+        ):
             ai_interpretation, ai_attempted = (
                 await self._async_ai_device_power_interpretation(
                     f"{context.text} for "
@@ -12190,19 +12472,19 @@ class ConversationalAssistantManager(NoteManagerMixin):
         for index, (agent_id, agent_name) in enumerate(candidates):
             attempted_agents.append(agent_name)
             try:
-                async with asyncio.timeout(ZALO_SEARCH_TIMEOUT_SECONDS):
-                    result = await async_converse(
-                        hass=self.hass,
-                        text=context.text,
-                        conversation_id=(
-                            self._zalo_ha_conversation_ids.get(context.owner_key)
-                            if index == 0
-                            else None
-                        ),
-                        context=service_context or Context(),
-                        language=language,
-                        agent_id=agent_id,
-                    )
+                result = await self._async_converse_with_hard_timeout(
+                    timeout_seconds=ZALO_SEARCH_TIMEOUT_SECONDS,
+                    hass=self.hass,
+                    text=context.text,
+                    conversation_id=(
+                        self._zalo_ha_conversation_ids.get(context.owner_key)
+                        if index == 0
+                        else None
+                    ),
+                    context=service_context or Context(),
+                    language=language,
+                    agent_id=agent_id,
+                )
             except TimeoutError:
                 _LOGGER.warning(
                     "Conversation agent %s timed out after %s seconds for Zalo "
@@ -12307,17 +12589,17 @@ class ConversationalAssistantManager(NoteManagerMixin):
         for index, (agent_id, agent_name) in enumerate(candidates):
             attempted_agents.append(agent_name)
             try:
-                async with asyncio.timeout(ZALO_SEARCH_TIMEOUT_SECONDS):
-                    result = await async_converse(
-                        hass=self.hass,
-                        text=text,
-                        conversation_id=(
-                            user_input.conversation_id if index == 0 else None
-                        ),
-                        context=user_input.context,
-                        language=conversation_language,
-                        agent_id=agent_id,
-                    )
+                result = await self._async_converse_with_hard_timeout(
+                    timeout_seconds=ZALO_SEARCH_TIMEOUT_SECONDS,
+                    hass=self.hass,
+                    text=text,
+                    conversation_id=(
+                        user_input.conversation_id if index == 0 else None
+                    ),
+                    context=user_input.context,
+                    language=conversation_language,
+                    agent_id=agent_id,
+                )
             except TimeoutError:
                 _LOGGER.warning(
                     "Conversation agent %s timed out after %s seconds for learned "
@@ -13011,9 +13293,13 @@ class ConversationalAssistantManager(NoteManagerMixin):
     ) -> tuple[CalendarCreateRequest | None, list[str]]:
         """Ask configured Conversation agents to parse one event request."""
         language = _request_language(text)
-        candidates = self._conversation_agent_candidates(
-            self.zalo_conversation_agent_id
-        )
+        candidates = [
+            candidate
+            for candidate in self._conversation_agent_candidates(
+                self.zalo_conversation_agent_id
+            )
+            if candidate[0] != HOME_ASSISTANT_AGENT
+        ][:2]
         attempted_agents: list[str] = []
         total_attempts = len(candidates)
         prompt = (
@@ -13031,15 +13317,15 @@ class ConversationalAssistantManager(NoteManagerMixin):
         for index, (agent_id, agent_name) in enumerate(candidates):
             attempted_agents.append(agent_name)
             try:
-                async with asyncio.timeout(min(30, ZALO_SEARCH_TIMEOUT_SECONDS)):
-                    result = await async_converse(
-                        hass=self.hass,
-                        text=prompt,
-                        conversation_id=None,
-                        context=service_context or Context(),
-                        language=language,
-                        agent_id=agent_id,
-                    )
+                result = await self._async_converse_with_hard_timeout(
+                    timeout_seconds=AI_PARSER_AGENT_TIMEOUT_SECONDS,
+                    hass=self.hass,
+                    text=prompt,
+                    conversation_id=None,
+                    context=service_context or Context(),
+                    language=language,
+                    agent_id=agent_id,
+                )
             except TimeoutError:
                 _LOGGER.warning(
                     "Calendar parser agent %s timed out for Zalo thread %s",
@@ -13086,9 +13372,13 @@ class ConversationalAssistantManager(NoteManagerMixin):
     ) -> tuple[CalendarWindow | None, list[str]]:
         """Use AI only as a fallback for an uncommon explicit time horizon."""
         language = _request_language(text)
-        candidates = self._conversation_agent_candidates(
-            self.zalo_conversation_agent_id
-        )
+        candidates = [
+            candidate
+            for candidate in self._conversation_agent_candidates(
+                self.zalo_conversation_agent_id
+            )
+            if candidate[0] != HOME_ASSISTANT_AGENT
+        ][:2]
         attempted_agents: list[str] = []
         total_attempts = len(candidates)
         local_now = dt_util.as_local(now)
@@ -13103,15 +13393,15 @@ class ConversationalAssistantManager(NoteManagerMixin):
         for index, (agent_id, agent_name) in enumerate(candidates):
             attempted_agents.append(agent_name)
             try:
-                async with asyncio.timeout(min(30, ZALO_SEARCH_TIMEOUT_SECONDS)):
-                    result = await async_converse(
-                        hass=self.hass,
-                        text=prompt,
-                        conversation_id=None,
-                        context=service_context or Context(),
-                        language=language,
-                        agent_id=agent_id,
-                    )
+                result = await self._async_converse_with_hard_timeout(
+                    timeout_seconds=AI_PARSER_AGENT_TIMEOUT_SECONDS,
+                    hass=self.hass,
+                    text=prompt,
+                    conversation_id=None,
+                    context=service_context or Context(),
+                    language=language,
+                    agent_id=agent_id,
+                )
             except TimeoutError:
                 _LOGGER.warning(
                     "Calendar window parser agent %s timed out", agent_id
@@ -13299,8 +13589,8 @@ class ConversationalAssistantManager(NoteManagerMixin):
         parser_body = body
         named_horizon_pattern = re.compile(
             r"\b(?:"
-            r"(?:thứ|thu)\s+(?:hai|ba|tư|tu|năm|nam|sáu|sau|bảy|bay)"
-            r"\s+(?:tuần|tuan)\s+(?:này|nay|sau|tới|toi)"
+            r"(?:(?:thứ|thu)\s*(?:[2-7]|hai|ba|tư|tu|năm|nam|sáu|sau|bảy|bay)|t\s*[2-7])"
+            r"\s+(?:tuần|tuan)\s+(?:này|nay|sau|tới|toi|kế\s+tiếp|ke\s+tiep)"
             r"|(?:chủ\s+nhật|chu\s+nhat)\s+(?:tuần|tuan)"
             r"\s+(?:này|nay|sau|tới|toi)"
             r"|(?:(?:this|next)\s+)?(?:monday|tuesday|wednesday|"
@@ -13854,9 +14144,12 @@ class ConversationalAssistantManager(NoteManagerMixin):
         try:
             parsed = self._deterministic_calendar_create_request(parser_text, now)
         except ReminderParseError as err:
-            parsed, attempted_agents = await self._async_ai_calendar_create_request(
-                parser_text, now, context, service_context
-            )
+            if self._temporal_parse_error_is_authoritative(err):
+                parsed = None
+            else:
+                parsed, attempted_agents = await self._async_ai_calendar_create_request(
+                    parser_text, now, context, service_context
+                )
             if parsed is None:
                 message = (
                     f"Tôi chưa tách được đầy đủ nội dung và thời gian sự kiện. {err} "
@@ -14205,18 +14498,22 @@ class ConversationalAssistantManager(NoteManagerMixin):
             "{\"error\":\"missing_information\"}."
         )
         attempted: list[str] = []
-        candidates = [c for c in self._conversation_agent_candidates(
-            self.zalo_conversation_agent_id
-        ) if c[0] != HOME_ASSISTANT_AGENT]
+        candidates = [
+            candidate
+            for candidate in self._conversation_agent_candidates(
+                self.zalo_conversation_agent_id
+            )
+            if candidate[0] != HOME_ASSISTANT_AGENT
+        ][:2]
         for agent_id, agent_name in candidates:
             attempted.append(agent_name)
             try:
-                async with asyncio.timeout(min(30, ZALO_SEARCH_TIMEOUT_SECONDS)):
-                    result = await async_converse(
-                        hass=self.hass, text=prompt, conversation_id=None,
-                        context=service_context or Context(),
-                        language=_request_language(text), agent_id=agent_id,
-                    )
+                result = await self._async_converse_with_hard_timeout(
+                    timeout_seconds=AI_PARSER_AGENT_TIMEOUT_SECONDS,
+                    hass=self.hass, text=prompt, conversation_id=None,
+                    context=service_context or Context(),
+                    language=_request_language(text), agent_id=agent_id,
+                )
             except Exception:  # noqa: BLE001 - fail over and retain safe flow
                 _LOGGER.exception("Calendar update parser %s failed", agent_id)
                 continue
@@ -14662,7 +14959,7 @@ class ConversationalAssistantManager(NoteManagerMixin):
             self._zalo_pending_deletions.pop(context.owner_key, None)
             self._zalo_pending_cameras.pop(context.owner_key, None)
             self._zalo_pending_calendar_events.pop(context.owner_key, None)
-            return await self._async_create_from_zalo(context)
+            return await self._async_create_from_zalo(context, service_context)
         if command == "list":
             self._zalo_pending_notes.pop(context.owner_key, None)
             self._zalo_pending_cameras.pop(context.owner_key, None)
@@ -14925,11 +15222,15 @@ class ConversationalAssistantManager(NoteManagerMixin):
                     [camera.display_name for camera in pending_camera.cameras],
                 )
                 camera_count = max(1, len(selected))
-        # Each candidate and selected camera receives a complete timeout window.
-        # The outer timeout is only a final safety net for delivery/cleanup.
-        timeout_seconds = (
-            per_agent_timeout_seconds * candidate_count * camera_count + 120
-        )
+        # Internet search has its own strict total deadline. Other AI features
+        # keep a per-candidate safety calculation because their payloads can be
+        # substantially larger (camera/image/calendar).
+        if action in {ACTION_SEARCH, ACTION_WEATHER, ACTION_CHAT}:
+            timeout_seconds = AI_SEARCH_TOTAL_TIMEOUT_SECONDS + 30
+        else:
+            timeout_seconds = (
+                per_agent_timeout_seconds * candidate_count * camera_count + 120
+            )
         # The webhook path normally starts typing immediately after its optional
         # processing acknowledgement. Retry here only when that first attempt
         # was unavailable or failed, then keep refreshing until delivery ends.
@@ -17281,13 +17582,17 @@ class ConversationalAssistantManager(NoteManagerMixin):
                     "Thiếu thời gian hoặc nội dung nhắc nhở sau tên nơi nhận. "
                     "Ví dụ: nhắc loa Phòng Ngủ 1 phút nữa xuống ăn cơm.",
                 )
-            try:
-                parsed = parse_reminder_request(direct_request)
-            except ReminderParseError as err:
+            parsed, parse_error, _attempted_agents = (
+                await self._async_parse_reminder_with_fallback(
+                    direct_request, service_context=user_input.context
+                )
+            )
+            if parsed is None:
                 return await self._async_voice_response(
                     user_input,
-                    f"Tôi chưa tạo được nhắc nhở. {err} "
-                    "Ví dụ: nhắc loa Phòng Ngủ 1 phút nữa xuống ăn cơm.",
+                    f"Tôi chưa tách được chính xác thời gian và nội dung nhắc. "
+                    f"{parse_error or ''} Hãy nói rõ hơn, ví dụ: nhắc loa "
+                    "Phòng Ngủ lúc 13 giờ 30 thứ 4 tuần sau xuống họp.",
                 )
             reminder = self._reminder_from_targets(parsed, selected_targets)
             await self.async_add_reminder(reminder)
@@ -17299,13 +17604,16 @@ class ConversationalAssistantManager(NoteManagerMixin):
             )
             return await self._async_voice_response(user_input, response)
 
-        try:
-            parsed = parse_reminder_request(request)
-        except ReminderParseError as err:
+        parsed, parse_error, _attempted_agents = (
+            await self._async_parse_reminder_with_fallback(
+                request, service_context=user_input.context
+            )
+        )
+        if parsed is None:
             response = (
-                f"Tôi chưa tạo được nhắc nhở. {err} "
-                "Ví dụ: hẹn 18h30 đi tắm; nhắc 1 phút nữa uống thuốc; "
-                "hoặc nhắc Zalo Khải 1 phút nữa uống thuốc."
+                f"Tôi chưa tách được chính xác thời gian và nội dung nhắc. "
+                f"{parse_error or ''} Hãy nói rõ hơn, ví dụ: hẹn 18 giờ 30 "
+                "đi tắm; hoặc nhắc lúc 13 giờ 30 thứ 4 tuần sau họp."
             )
             return await self._async_voice_response(user_input, response)
 
@@ -17346,20 +17654,24 @@ class ConversationalAssistantManager(NoteManagerMixin):
                     continue
                 seen.add(agent_id)
                 candidates.append((agent_id, agent_name))
+                if len(candidates) >= 2:
+                    break
+            if len(candidates) >= 2:
+                break
 
         attempted: list[str] = []
         for agent_id, agent_name in candidates:
             attempted.append(agent_name)
             try:
-                async with asyncio.timeout(30):
-                    result = await async_converse(
-                        hass=self.hass,
-                        text=prompt,
-                        conversation_id=None,
-                        context=service_context or Context(),
-                        language=_request_language(text),
-                        agent_id=agent_id,
-                    )
+                result = await self._async_converse_with_hard_timeout(
+                    timeout_seconds=AI_PARSER_AGENT_TIMEOUT_SECONDS,
+                    hass=self.hass,
+                    text=prompt,
+                    conversation_id=None,
+                    context=service_context or Context(),
+                    language=_request_language(text),
+                    agent_id=agent_id,
+                )
             except Exception:  # noqa: BLE001 - safe parser failover
                 _LOGGER.exception(
                     "Lunar date parser agent %s failed", agent_id
@@ -17430,20 +17742,24 @@ class ConversationalAssistantManager(NoteManagerMixin):
                     continue
                 seen.add(agent_id)
                 candidates.append((agent_id, agent_name))
+                if len(candidates) >= 2:
+                    break
+            if len(candidates) >= 2:
+                break
 
         attempted: list[str] = []
         for agent_id, agent_name in candidates:
             attempted.append(agent_name)
             try:
-                async with asyncio.timeout(30):
-                    result = await async_converse(
-                        hass=self.hass,
-                        text=prompt,
-                        conversation_id=None,
-                        context=service_context or Context(),
-                        language=_request_language(text),
-                        agent_id=agent_id,
-                    )
+                result = await self._async_converse_with_hard_timeout(
+                    timeout_seconds=AI_PARSER_AGENT_TIMEOUT_SECONDS,
+                    hass=self.hass,
+                    text=prompt,
+                    conversation_id=None,
+                    context=service_context or Context(),
+                    language=_request_language(text),
+                    agent_id=agent_id,
+                )
             except Exception:  # noqa: BLE001 - safe parser failover
                 _LOGGER.exception(
                     "Lunar date lookup parser agent %s failed", agent_id

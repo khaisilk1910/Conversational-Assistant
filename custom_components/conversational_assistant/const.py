@@ -170,8 +170,12 @@ ZALO_SEARCH_TIMEOUT_SECONDS = 180
 # Internet lookup agents are rotated more quickly than local/control agents.
 # This prevents one non-browsing Conversation agent from blocking the entire
 # weather/search request for several minutes before failover can continue.
-AI_SEARCH_AGENT_TIMEOUT_SECONDS = 60
-AI_SEARCH_MAX_CANDIDATES = 8
+AI_SEARCH_AGENT_TIMEOUT_SECONDS = 30
+# Strict intent/time parsers must fail fast; they never perform Internet search.
+AI_PARSER_AGENT_TIMEOUT_SECONDS = 15
+AI_SEARCH_TOTAL_TIMEOUT_SECONDS = 135
+AI_SEARCH_MAX_CANDIDATES = 4
+AI_FAILOVER_NOTICE_TIMEOUT_SECONDS = 5
 ZALO_IMAGE_TIMEOUT_SECONDS = 360
 CAMERA_ANALYSIS_TIMEOUT_SECONDS = 180
 

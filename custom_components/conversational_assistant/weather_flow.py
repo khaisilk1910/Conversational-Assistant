@@ -70,13 +70,13 @@ _EN_NUMBERS = {
 }
 
 _WEEKDAY_PHRASES: tuple[tuple[tuple[str, ...], int], ...] = (
-    (("thu hai", "monday"), 0),
-    (("thu ba", "tuesday"), 1),
-    (("thu tu", "wednesday"), 2),
-    (("thu nam", "thursday"), 3),
-    (("thu sau", "friday"), 4),
-    (("thu bay", "saturday"), 5),
-    (("chu nhat", "sunday"), 6),
+    (("thu hai", "thu 2", "t2", "monday"), 0),
+    (("thu ba", "thu 3", "t3", "tuesday"), 1),
+    (("thu tu", "thu 4", "t4", "wednesday"), 2),
+    (("thu nam", "thu 5", "t5", "thursday"), 3),
+    (("thu sau", "thu 6", "t6", "friday"), 4),
+    (("thu bay", "thu 7", "t7", "saturday"), 5),
+    (("chu nhat", "cn", "sunday"), 6),
 )
 
 _CONDITION_LABELS_VI = {
@@ -458,15 +458,33 @@ def parse_weather_query_plan(
     if any(phrase in normalized for phrase in ("hom nay", "today", "toi nay", "tonight")):
         return WeatherQueryPlan(today, 1, explicit_period=True)
 
-    # Complex relative phrases such as "thứ Ba tuần sau" or "cuối tuần này"
-    # are delegated to the configured AI parser before the actual search.
+    # Any remaining phrase that still looks temporal is delegated to the
+    # strict AI date parser. This covers wording the deterministic parser does
+    # not yet understand (for example "đầu tháng sau") without forcing an
+    # incorrect default date. A request with no time wording still means today.
     temporal_cues = (
         "dau tuan",
         "giua tuan",
+        "cuoi tuan",
+        "tuan",
+        "ngay",
+        "hom",
+        "mai",
+        "kia",
+        "thang",
+        "week",
+        "weekday",
+        "weekend",
+        "day",
+        "tomorrow",
+        "month",
         "early this week",
         "midweek",
     )
-    needs_ai = any(cue in normalized for cue in temporal_cues)
+    needs_ai = any(
+        re.search(rf"\b{re.escape(cue)}\b", normalized)
+        for cue in temporal_cues
+    )
     return WeatherQueryPlan(
         start_date=today,
         day_count=1,
@@ -650,15 +668,17 @@ def weather_query_location_hint(text: str) -> str | None:
     candidate = explicit.group("place") if explicit else normalized
 
     temporal_patterns = (
+        r"\b(?:thu\s*[2-7]|t[2-7]|thu hai|thu ba|thu tu|thu nam|thu sau|"
+        r"thu bay|chu nhat|cn|monday|tuesday|wednesday|thursday|friday|"
+        r"saturday|sunday)\b",
         r"\b(?:hom nay|ngay mai|ngay kia|tuan nay|tuan toi|tuan sau|"
         r"cuoi tuan|sang nay|trua nay|chieu nay|toi nay|dem nay|sang mai|"
         r"trua mai|chieu mai|toi mai|dem mai)\b",
+        r"\b(?:(?:dau|giua|cuoi)\s+)?thang\s+(?:nay|toi|sau)\b",
         r"\b(?:today|tomorrow|this week|next week|this weekend|next weekend|"
         r"this morning|this afternoon|this evening|tonight|tomorrow morning|"
         r"tomorrow afternoon|tomorrow evening|tomorrow night)\b",
         rf"\b{_NUMBER_PATTERN}\s+(?:ngay|day)s?\b",
-        r"\b(?:thu hai|thu ba|thu tu|thu nam|thu sau|thu bay|chu nhat|"
-        r"monday|tuesday|wednesday|thursday|friday|saturday|sunday)\b",
     )
     for pattern in temporal_patterns:
         match = re.search(pattern, candidate)
