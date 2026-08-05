@@ -88,7 +88,7 @@ ACTION_LABELS = {
     ACTION_HOME_ASSISTANT: "thực hiện lệnh Home Assistant",
     ACTION_CALENDAR: "xem lịch Home Assistant",
     ACTION_SEARCH: "tìm kiếm thông tin trên Internet",
-    ACTION_WEATHER: "tra cứu thời tiết bằng AI Search",
+    ACTION_WEATHER: "tra cứu thời tiết bằng Home Assistant, dự phòng AI Search",
     ACTION_IMAGE_GENERATION: "tạo ảnh bằng AI và gửi về Zalo",
     ACTION_ZALO_SEND: "gửi nội dung đến Zalo đã cấu hình",
     ACTION_SPEAKER_ANNOUNCE: "phát nội dung thông báo ra loa TTS",

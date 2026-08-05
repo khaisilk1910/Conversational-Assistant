@@ -125,6 +125,7 @@ class ConversationalAssistantCountSensor(ConversationalAssistantSensorBase):
                 self.manager.zalo_conversation_agent_id
             ),
             "ai_search_agent_id": self.manager.ai_search_agent_id,
+            "weather_entity_id": self.manager.weather_entity_id,
             "weather_location": self.manager.weather_location,
             "weather_forecast_enabled": self.manager.weather_forecast_enabled,
             "weather_forecast_times": [

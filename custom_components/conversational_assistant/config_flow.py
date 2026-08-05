@@ -34,6 +34,7 @@ from .const import (
     CONF_CALENDAR_NOTIFICATION_ZALO_TARGETS,
     CONF_CAMERA_ENTITY_ID,
     CONF_CAMERA_TARGETS,
+    CONF_WEATHER_ENTITY_ID,
     CONF_WEATHER_FORECAST_DAYS,
     CONF_WEATHER_FORECAST_ENABLED,
     CONF_WEATHER_FORECAST_TIMES,
@@ -79,6 +80,7 @@ from .const import (
     DEFAULT_CALENDAR_LOOKAHEAD_DAYS,
     DEFAULT_CALENDAR_NOTIFICATION_ENABLED,
     DEFAULT_CALENDAR_NOTIFICATION_TIME,
+    DEFAULT_WEATHER_ENTITY_ID,
     DEFAULT_WEATHER_FORECAST_DAYS,
     DEFAULT_WEATHER_FORECAST_ENABLED,
     DEFAULT_WEATHER_FORECAST_TIMES,
@@ -570,6 +572,7 @@ def _weather_times_text(value: Any) -> str:
 
 
 def _weather_settings_schema(
+    weather_entity_id: str,
     location: str,
     forecast_enabled: bool,
     forecast_times: Any,
@@ -587,7 +590,20 @@ def _weather_settings_schema(
     valid_storm_targets = [
         value for value in selected_storm_zalo_targets if value in zalo_choices
     ]
-    return vol.Schema(
+    fields: dict[Any, Any] = {}
+    weather_selector = selector.EntitySelector(
+        selector.EntitySelectorConfig(domain="weather", multiple=False)
+    )
+    if weather_entity_id:
+        fields[
+            vol.Optional(
+                CONF_WEATHER_ENTITY_ID,
+                default=weather_entity_id,
+            )
+        ] = weather_selector
+    else:
+        fields[vol.Optional(CONF_WEATHER_ENTITY_ID)] = weather_selector
+    fields.update(
         {
             vol.Optional(
                 CONF_WEATHER_LOCATION,
@@ -646,6 +662,7 @@ def _weather_settings_schema(
             ): _select_multiple_schema(zalo_choices),
         }
     )
+    return vol.Schema(fields)
 
 
 def _parse_weather_times(value: Any) -> tuple[list[str], bool]:
@@ -681,6 +698,10 @@ def _parse_weather_times(value: Any) -> tuple[list[str], bool]:
 def _normalize_weather_settings(user_input: dict[str, Any]) -> dict[str, Any]:
     """Normalize Weather settings into JSON-safe option values."""
     normalized = dict(user_input)
+    normalized[CONF_WEATHER_ENTITY_ID] = str(
+        normalized.get(CONF_WEATHER_ENTITY_ID, DEFAULT_WEATHER_ENTITY_ID)
+        or ""
+    ).strip()
     normalized[CONF_WEATHER_LOCATION] = " ".join(
         str(
             normalized.get(
@@ -1006,6 +1027,19 @@ def _first_tts_entity_id(hass) -> str | None:
     """Return the first currently registered TTS entity, if any."""
     entity_ids = sorted(state.entity_id for state in hass.states.async_all("tts"))
     return entity_ids[0] if entity_ids else None
+
+
+def _first_weather_entity_id(hass: HomeAssistant) -> str | None:
+    """Return the first currently registered weather entity, if any."""
+    entity_ids = sorted(
+        state.entity_id for state in hass.states.async_all("weather")
+    )
+    return entity_ids[0] if entity_ids else None
+
+
+def _weather_entity_count(hass: HomeAssistant) -> int:
+    """Return the number of currently registered weather entities."""
+    return len(hass.states.async_all("weather"))
 
 
 def _named_target_schema(
@@ -1453,6 +1487,12 @@ class ConversationalAssistantOptionsFlow(config_entries.OptionsFlow):
             CONF_CALENDAR_NOTIFICATION_ZALO_TARGETS,
             self.config_entry.data.get(
                 CONF_CALENDAR_NOTIFICATION_ZALO_TARGETS, []
+            ),
+        )
+        options.setdefault(
+            CONF_WEATHER_ENTITY_ID,
+            self.config_entry.data.get(
+                CONF_WEATHER_ENTITY_ID, DEFAULT_WEATHER_ENTITY_ID
             ),
         )
         options.setdefault(
@@ -1983,6 +2023,11 @@ class ConversationalAssistantOptionsFlow(config_entries.OptionsFlow):
         return self.async_show_form(
             step_id="weather",
             data_schema=_weather_settings_schema(
+                str(
+                    normalized.get(CONF_WEATHER_ENTITY_ID, "")
+                    or _first_weather_entity_id(self.hass)
+                    or ""
+                ),
                 str(normalized.get(CONF_WEATHER_LOCATION, "") or ""),
                 bool(normalized[CONF_WEATHER_FORECAST_ENABLED]),
                 values.get(
@@ -2002,6 +2047,7 @@ class ConversationalAssistantOptionsFlow(config_entries.OptionsFlow):
             errors=errors,
             description_placeholders={
                 "zalo_count": str(len(zalo_choices)),
+                "weather_count": str(_weather_entity_count(self.hass)),
             },
         )
 

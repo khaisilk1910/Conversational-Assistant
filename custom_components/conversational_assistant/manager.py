@@ -29,6 +29,11 @@ try:
 except ImportError:  # Home Assistant compatibility fallback
     from homeassistant.components.fan.const import FanEntityFeature
 
+try:
+    from homeassistant.components.weather import WeatherEntityFeature
+except ImportError:  # Home Assistant compatibility fallback
+    from homeassistant.components.weather.const import WeatherEntityFeature
+
 from homeassistant.components.calendar.const import (
     DATA_COMPONENT as CALENDAR_DATA_COMPONENT,
     CalendarEntityFeature,
@@ -101,6 +106,7 @@ from .const import (
     CONF_CALENDAR_NOTIFICATION_ZALO_TARGETS,
     CONF_CAMERA_ENTITY_ID,
     CONF_CAMERA_TARGETS,
+    CONF_WEATHER_ENTITY_ID,
     CONF_WEATHER_FORECAST_DAYS,
     CONF_WEATHER_FORECAST_ENABLED,
     CONF_WEATHER_FORECAST_TIMES,
@@ -146,6 +152,7 @@ from .const import (
     DEFAULT_CALENDAR_LOOKAHEAD_DAYS,
     DEFAULT_CALENDAR_NOTIFICATION_ENABLED,
     DEFAULT_CALENDAR_NOTIFICATION_TIME,
+    DEFAULT_WEATHER_ENTITY_ID,
     DEFAULT_WEATHER_FORECAST_DAYS,
     DEFAULT_WEATHER_FORECAST_ENABLED,
     DEFAULT_WEATHER_FORECAST_TIMES,
@@ -179,6 +186,10 @@ from .const import (
     LUNAR_DATE_CONVERSION_SENTENCES,
     MAX_CALENDAR_LOOKAHEAD_DAYS,
     MAX_WEATHER_FORECAST_DAYS,
+    WEATHER_DOMAIN,
+    WEATHER_NATIVE_CACHE_SECONDS,
+    WEATHER_NATIVE_TIMEOUT_SECONDS,
+    WEATHER_SERVICE_GET_FORECASTS,
     MEDIA_PLAYER_DOMAIN,
     PENDING_FOLLOWUP_SENTENCES,
     PENDING_CONFIRMATION_TIMEOUT_SECONDS,
@@ -289,11 +300,16 @@ from .lunar_calendar import (
 )
 from .weather_flow import (
     WeatherQueryPlan,
+    format_native_weather_response,
     is_storm_check_request,
+    native_forecast_covers_plan,
     parse_weather_query_plan,
     resolved_weather_query,
+    weather_forecast_type_order,
     weather_limit_message,
     weather_plan_from_ai_payload,
+    weather_query_location_hint,
+    weather_query_requests_current,
 )
 from .models import Reminder
 from .named_targets import (
@@ -1289,6 +1305,12 @@ class ConversationalAssistantManager(NoteManagerMixin):
         self._weather_schedule_unsubs: list[Callable[[], None]] = []
         self._weather_forecast_lock = asyncio.Lock()
         self._weather_storm_lock = asyncio.Lock()
+        self._native_weather_locks: dict[
+            tuple[str, str], asyncio.Lock
+        ] = {}
+        self._native_weather_cache: dict[
+            tuple[str, str], tuple[float, list[dict[str, Any]]]
+        ] = {}
         self._weather_last_forecast_at: datetime | None = None
         self._weather_last_forecast_result: str | None = None
         self._weather_last_storm_at: datetime | None = None
@@ -1580,6 +1602,16 @@ class ConversationalAssistantManager(NoteManagerMixin):
             if parsed not in result:
                 result.append(parsed)
         return result
+
+    @property
+    def weather_entity_id(self) -> str:
+        """Return the weather entity selected for native Home Assistant data."""
+        return str(
+            self._option(
+                CONF_WEATHER_ENTITY_ID, DEFAULT_WEATHER_ENTITY_ID
+            )
+            or ""
+        ).strip()
 
     @property
     def weather_location(self) -> str:
@@ -3250,6 +3282,8 @@ class ConversationalAssistantManager(NoteManagerMixin):
         for unsub in self._weather_schedule_unsubs:
             unsub()
         self._weather_schedule_unsubs.clear()
+        self._native_weather_cache.clear()
+        self._native_weather_locks.clear()
         calendar_refresh_task = self._calendar_refresh_task
         if calendar_refresh_task is not None:
             calendar_refresh_task.cancel()
@@ -4594,7 +4628,7 @@ class ConversationalAssistantManager(NoteManagerMixin):
             "VD: `Tắt quạt phòng ngủ sau 30 phút`\n\n"
             "🌦️ **Thời tiết và bão** — thời tiết, dự báo thời tiết, có mưa "
             "không, khả năng mưa, nhiệt độ, độ ẩm, UV, kiểm tra bão, áp thấp.\n"
-            "VD: `Thời tiết Hà Nội 5 ngày tới`\n\n"
+            "VD: `Thời tiết ngày mai`\n\n"
             "⏰ **Nhắc hẹn** — nhắc, hẹn, nhắc tôi, tạo/đặt/thêm nhắc hẹn, "
             "xem danh sách, hủy hoặc xóa nhắc hẹn. Gọi thẳng tên Mobile, "
             "Zalo hoặc loa; nếu không nêu nơi nhận sẽ hiện danh sách chọn.\n"
@@ -4667,8 +4701,12 @@ class ConversationalAssistantManager(NoteManagerMixin):
             "• Điều khiển, xem trạng thái, đổi chế độ điều hòa/quạt và hẹn giờ.\n"
             "• Ví dụ: `Tắt quạt phòng ngủ sau 30 phút`.\n\n"
             "🌦️ **Thời tiết và bão**\n"
-            "• Hỏi hiện tại hoặc tối đa 7 ngày; thời tiết trực tuyến dùng AI Search.\n"
-            "• Ví dụ: `Thời tiết Hà Nội 5 ngày tới`.\n\n"
+            "• Hỏi tự nhiên như hôm nay, ngày mai, 2 ngày tiếp theo hoặc tuần này; "
+            "tối đa 7 ngày.\n"
+            "• Tích hợp ưu tiên thực thể weather đã chọn và action "
+            "`weather.get_forecasts`; chỉ chuyển sang AI Search khi dữ liệu "
+            "Home Assistant không có, không đủ hoặc yêu cầu địa điểm khác.\n"
+            "• Ví dụ: `Thời tiết ngày mai`.\n\n"
             "⏰ **Nhắc hẹn và lịch**\n"
             "• Tạo, xem, sửa, xóa nhắc hẹn hoặc sự kiện; hỗ trợ lặp lại và "
             "nhiều nơi nhận. Gọi thẳng tên Mobile, Zalo hoặc loa đã đặt; nếu "
@@ -7500,7 +7538,7 @@ class ConversationalAssistantManager(NoteManagerMixin):
         *,
         zalo: bool,
         language: str,
-    ) -> tuple[str | None, str | None]:
+    ) -> tuple[str | None, str | None, WeatherQueryPlan | None]:
         """Resolve a natural forecast window and enforce the seven-day limit."""
         reference_time = dt_util.now()
         plan = parse_weather_query_plan(text, reference_time)
@@ -7514,13 +7552,18 @@ class ConversationalAssistantManager(NoteManagerMixin):
             if ai_plan is None:
                 # Let the Internet-capable weather agent interpret the original
                 # complex phrase rather than forcing an incorrect local date.
-                return text, None
+                return text, None, None
             plan = ai_plan
         if plan.exceeds_limit:
-            return None, weather_limit_message(zalo=zalo, language=language)
+            return (
+                None,
+                weather_limit_message(zalo=zalo, language=language),
+                plan,
+            )
         return (
             resolved_weather_query(text, plan, language=language),
             None,
+            plan,
         )
 
     @staticmethod
@@ -8342,26 +8385,38 @@ class ConversationalAssistantManager(NoteManagerMixin):
             resolved_query = resolved_weather_query(
                 query, plan, language="vi"
             )
-            reply, _conversation_id = await self._async_ai_search(
-                resolved_query,
-                conversation_id=None,
-                service_context=None,
+            reply = await self._async_native_weather_response(
+                query,
+                plan,
                 zalo=True,
-                language_hint="vi",
-                feature="weather",
+                language="vi",
+                ignore_location_hint=True,
             )
-            self._weather_last_forecast_at = dt_util.now()
-            if not self._scheduled_weather_reply_is_usable(reply, plan):
-                self._weather_last_forecast_result = (
-                    "Không gửi: AI không trả đủ dự báo cho từng ngày"
+            source = "Home Assistant"
+            if reply is None:
+                source = "AI Search"
+                reply, _conversation_id = await self._async_ai_search(
+                    resolved_query,
+                    conversation_id=None,
+                    service_context=None,
+                    zalo=True,
+                    language_hint="vi",
+                    feature="weather",
                 )
-                self._notify_update()
-                return
+                if not self._scheduled_weather_reply_is_usable(reply, plan):
+                    self._weather_last_forecast_at = dt_util.now()
+                    self._weather_last_forecast_result = (
+                        "Không gửi: Home Assistant không có đủ dữ liệu và "
+                        "AI Search không trả đủ dự báo cho từng ngày"
+                    )
+                    self._notify_update()
+                    return
+            self._weather_last_forecast_at = dt_util.now()
             sent, errors = await self._async_send_fixed_weather_zalo_message(
                 reply, target_ids
             )
             self._weather_last_forecast_result = (
-                f"Đã gửi {sent}/{len(target_ids)} nơi nhận"
+                f"Đã gửi {sent}/{len(target_ids)} nơi nhận bằng {source}"
                 + (f"; lỗi: {'; '.join(errors)}" if errors else "")
             )
             self._notify_update()
@@ -8397,6 +8452,269 @@ class ConversationalAssistantManager(NoteManagerMixin):
                 + (f"; lỗi: {'; '.join(errors)}" if errors else "")
             )
             self._notify_update()
+
+    @staticmethod
+    def _native_weather_feature(forecast_type: str) -> int:
+        """Return the Home Assistant feature bit for one forecast type."""
+        feature_name = {
+            "daily": "FORECAST_DAILY",
+            "hourly": "FORECAST_HOURLY",
+            "twice_daily": "FORECAST_TWICE_DAILY",
+        }.get(forecast_type)
+        if feature_name is None:
+            return 0
+        try:
+            return int(getattr(WeatherEntityFeature, feature_name))
+        except (AttributeError, TypeError, ValueError):
+            return 0
+
+    def _selected_weather_state(self) -> Any | None:
+        """Return the configured, available Home Assistant weather state."""
+        entity_id = self.weather_entity_id
+        if not entity_id:
+            return None
+        state = self.hass.states.get(entity_id)
+        if state is None or state.state in {STATE_UNKNOWN, STATE_UNAVAILABLE}:
+            return None
+        return state
+
+    @staticmethod
+    def _weather_entity_name(state: Any) -> str:
+        """Return a user-facing name for one weather entity."""
+        attributes = getattr(state, "attributes", {}) or {}
+        friendly_name = str(attributes.get("friendly_name") or "").strip()
+        return friendly_name or str(getattr(state, "entity_id", "") or "")
+
+    @staticmethod
+    def _weather_units(state: Any) -> dict[str, str]:
+        """Return the native units exposed by a weather entity."""
+        attributes = getattr(state, "attributes", {}) or {}
+        return {
+            "temperature": str(
+                attributes.get("temperature_unit")
+                or attributes.get("unit_of_measurement")
+                or "°C"
+            ).strip(),
+            "wind_speed": str(
+                attributes.get("wind_speed_unit") or ""
+            ).strip(),
+            "precipitation": str(
+                attributes.get("precipitation_unit") or ""
+            ).strip(),
+            "pressure": str(
+                attributes.get("pressure_unit") or ""
+            ).strip(),
+            "visibility": str(
+                attributes.get("visibility_unit") or ""
+            ).strip(),
+        }
+
+    @staticmethod
+    def _weather_current_payload(state: Any) -> dict[str, Any]:
+        """Return current weather attributes in formatter-friendly form."""
+        payload = dict(getattr(state, "attributes", {}) or {})
+        condition = str(getattr(state, "state", "") or "").strip()
+        if condition:
+            payload["state"] = condition
+            payload.setdefault("condition", condition)
+        return payload
+
+    def _weather_location_aliases(self, state: Any) -> set[str]:
+        """Return normalized aliases that identify the selected weather source."""
+        config = getattr(self.hass, "config", None)
+        entity_id = str(getattr(state, "entity_id", "") or "").strip()
+        values = {
+            self.weather_location,
+            str(getattr(config, "location_name", "") or "").strip(),
+            self._weather_entity_name(state),
+            entity_id,
+            entity_id.split(".", 1)[-1].replace("_", " "),
+        }
+        aliases: set[str] = set()
+        for value in values:
+            normalized = normalize_text(value)
+            if not normalized:
+                continue
+            aliases.add(normalized)
+            without_coordinates = re.sub(r"\([^)]*\)", " ", normalized)
+            without_coordinates = re.sub(r"\s+", " ", without_coordinates).strip()
+            if without_coordinates:
+                aliases.add(without_coordinates)
+        return aliases
+
+    def _weather_query_matches_selected_entity(
+        self, query: str, state: Any
+    ) -> bool:
+        """Avoid using a local weather entity for an explicitly different place."""
+        location_hint = weather_query_location_hint(query)
+        if not location_hint:
+            return True
+        hint = normalize_text(location_hint)
+        if not hint:
+            return True
+        hint_tokens = set(hint.split())
+        for alias in self._weather_location_aliases(state):
+            if hint == alias or hint in alias or alias in hint:
+                return True
+            alias_tokens = set(alias.split())
+            if hint_tokens and (
+                hint_tokens.issubset(alias_tokens)
+                or alias_tokens.issubset(hint_tokens)
+            ):
+                return True
+        return False
+
+    @staticmethod
+    def _native_weather_rows(
+        response: Any, entity_id: str
+    ) -> list[dict[str, Any]]:
+        """Unwrap rows returned by ``weather.get_forecasts``."""
+        if not isinstance(response, dict):
+            return []
+        payload: Any = response.get(entity_id)
+        if not isinstance(payload, dict) and isinstance(
+            response.get("forecast"), list
+        ):
+            payload = response
+        if not isinstance(payload, dict):
+            return []
+        forecasts = payload.get("forecast")
+        if not isinstance(forecasts, list):
+            return []
+        return [dict(item) for item in forecasts if isinstance(item, dict)]
+
+    async def _async_native_weather_forecasts(
+        self, entity_id: str, forecast_type: str
+    ) -> list[dict[str, Any]]:
+        """Call Home Assistant's forecast action with a short shared cache."""
+        cache_key = (entity_id, forecast_type)
+        now = monotonic()
+        cached = self._native_weather_cache.get(cache_key)
+        if cached is not None and now - cached[0] < WEATHER_NATIVE_CACHE_SECONDS:
+            return [dict(item) for item in cached[1]]
+        if not self.hass.services.has_service(
+            WEATHER_DOMAIN, WEATHER_SERVICE_GET_FORECASTS
+        ):
+            return []
+
+        lock = self._native_weather_locks.setdefault(
+            cache_key, asyncio.Lock()
+        )
+        async with lock:
+            now = monotonic()
+            cached = self._native_weather_cache.get(cache_key)
+            if (
+                cached is not None
+                and now - cached[0] < WEATHER_NATIVE_CACHE_SECONDS
+            ):
+                return [dict(item) for item in cached[1]]
+            try:
+                async with asyncio.timeout(WEATHER_NATIVE_TIMEOUT_SECONDS):
+                    response = await self.hass.services.async_call(
+                        WEATHER_DOMAIN,
+                        WEATHER_SERVICE_GET_FORECASTS,
+                        {"type": forecast_type},
+                        blocking=True,
+                        target={"entity_id": entity_id},
+                        return_response=True,
+                    )
+            except TimeoutError:
+                _LOGGER.warning(
+                    "Native weather forecast timed out: %s type=%s",
+                    entity_id,
+                    forecast_type,
+                )
+                return []
+            except Exception:  # noqa: BLE001 - AI Search is the fallback
+                _LOGGER.exception(
+                    "Native weather forecast failed: %s type=%s",
+                    entity_id,
+                    forecast_type,
+                )
+                return []
+
+            rows = self._native_weather_rows(response, entity_id)
+            self._native_weather_cache[cache_key] = (monotonic(), rows)
+            return [dict(item) for item in rows]
+
+    async def _async_native_weather_response(
+        self,
+        query: str,
+        plan: WeatherQueryPlan,
+        *,
+        zalo: bool,
+        language: str,
+        ignore_location_hint: bool = False,
+    ) -> str | None:
+        """Return a deterministic native weather reply, or ``None`` to fall back."""
+        state = self._selected_weather_state()
+        if state is None:
+            return None
+        if not ignore_location_hint and not self._weather_query_matches_selected_entity(
+            query, state
+        ):
+            return None
+
+        entity_id = str(getattr(state, "entity_id", "") or "").strip()
+        if not entity_id:
+            return None
+        attributes = getattr(state, "attributes", {}) or {}
+        try:
+            supported_features = int(
+                attributes.get(ATTR_SUPPORTED_FEATURES, 0) or 0
+            )
+        except (TypeError, ValueError):
+            supported_features = 0
+        include_current = weather_query_requests_current(query, plan)
+        reference_time = dt_util.now()
+        current_payload = self._weather_current_payload(state)
+        units = self._weather_units(state)
+        entity_name = self._weather_entity_name(state)
+
+        for forecast_type in weather_forecast_type_order(query, plan):
+            required_feature = self._native_weather_feature(forecast_type)
+            if (
+                supported_features
+                and required_feature
+                and not supported_features & required_feature
+            ):
+                continue
+            forecasts = await self._async_native_weather_forecasts(
+                entity_id, forecast_type
+            )
+            if not forecasts or not native_forecast_covers_plan(
+                forecasts, plan, reference_time
+            ):
+                continue
+            response = format_native_weather_response(
+                forecasts=forecasts,
+                forecast_type=forecast_type,
+                plan=plan,
+                reference_time=reference_time,
+                current_state=current_payload,
+                entity_name=entity_name,
+                units=units,
+                language=language,
+                zalo=zalo,
+                include_current=include_current,
+            )
+            if response:
+                return response
+
+        if include_current:
+            return format_native_weather_response(
+                forecasts=[],
+                forecast_type="hourly",
+                plan=plan,
+                reference_time=reference_time,
+                current_state=current_payload,
+                entity_name=entity_name,
+                units=units,
+                language=language,
+                zalo=zalo,
+                include_current=True,
+            )
+        return None
 
     def _weather_default_location(self) -> str:
         """Return Home Assistant's configured location for weather fallback."""
@@ -8542,18 +8860,21 @@ class ConversationalAssistantManager(NoteManagerMixin):
 
     @staticmethod
     def _weather_unavailable_text(language: str, *, zalo: bool) -> str:
-        """Return a clear weather response when AI Search is not configured."""
+        """Return a clear response when neither weather source is usable."""
         if language == "en":
             body = (
-                "No AI Search agent is selected. Open Conversational Assistant "
-                "settings and choose an Internet-capable agent under AI Agent Search."
+                "Home Assistant weather data was unavailable and no fallback AI "
+                "Search agent is selected. Choose a weather.* entity under Weather "
+                "settings, or configure an Internet-capable AI Search agent."
             )
-            return f"🌦️ **Weather lookup is not configured**\n\n{body}" if zalo else body
+            return f"🌦️ **No weather data source is configured**\n\n{body}" if zalo else body
         body = (
-            "Chưa chọn AI Agent Search. Hãy mở cấu hình Conversational Assistant "
-            "và chọn một Conversation agent có khả năng tìm kiếm Internet."
+            "Không lấy được dữ liệu từ thực thể weather của Home Assistant và "
+            "chưa chọn AI Agent Search dự phòng. Hãy mở Cài đặt thời tiết để "
+            "chọn một thực thể weather.*, hoặc cấu hình AI Agent Search có khả "
+            "năng tìm kiếm Internet."
         )
-        return f"🌦️ **Chưa cấu hình tra cứu thời tiết**\n\n{body}" if zalo else body
+        return f"🌦️ **Chưa có nguồn dữ liệu thời tiết**\n\n{body}" if zalo else body
 
     @staticmethod
     def _weather_empty_text(language: str, *, zalo: bool) -> str:
@@ -8903,7 +9224,7 @@ class ConversationalAssistantManager(NoteManagerMixin):
                 language=language,
             )
             return reply
-        resolved_query, error = await self._async_resolve_weather_query(
+        resolved_query, error, plan = await self._async_resolve_weather_query(
             query,
             service_context,
             zalo=True,
@@ -8911,6 +9232,15 @@ class ConversationalAssistantManager(NoteManagerMixin):
         )
         if error is not None:
             return error
+        if plan is not None:
+            native_reply = await self._async_native_weather_response(
+                query,
+                plan,
+                zalo=True,
+                language=language,
+            )
+            if native_reply is not None:
+                return native_reply
         reply, _conversation_id = await self._async_ai_search(
             resolved_query or query,
             conversation_id=None,
@@ -16807,7 +17137,7 @@ class ConversationalAssistantManager(NoteManagerMixin):
             return await self._async_voice_response(
                 user_input, reply, ai_generated=True
             )
-        resolved_query, error = await self._async_resolve_weather_query(
+        resolved_query, error, plan = await self._async_resolve_weather_query(
             query,
             user_input.context,
             zalo=False,
@@ -16815,6 +17145,17 @@ class ConversationalAssistantManager(NoteManagerMixin):
         )
         if error is not None:
             return await self._async_voice_response(user_input, error)
+        if plan is not None:
+            native_reply = await self._async_native_weather_response(
+                query,
+                plan,
+                zalo=False,
+                language=language,
+            )
+            if native_reply is not None:
+                return await self._async_voice_response(
+                    user_input, native_reply
+                )
         reply, _conversation_id = await self._async_ai_search(
             resolved_query or query,
             conversation_id=None,
@@ -16961,7 +17302,7 @@ class ConversationalAssistantManager(NoteManagerMixin):
         if command.action == ACTION_WEATHER:
             language = _request_language(request or user_input.text)
             query = weather_search_request(transformed_text) or transformed_text
-            resolved_query, error = await self._async_resolve_weather_query(
+            resolved_query, error, plan = await self._async_resolve_weather_query(
                 query,
                 user_input.context,
                 zalo=False,
@@ -16969,6 +17310,17 @@ class ConversationalAssistantManager(NoteManagerMixin):
             )
             if error is not None:
                 return await self._async_voice_response(user_input, error)
+            if plan is not None:
+                native_reply = await self._async_native_weather_response(
+                    query,
+                    plan,
+                    zalo=False,
+                    language=language,
+                )
+                if native_reply is not None:
+                    return await self._async_voice_response(
+                        user_input, native_reply
+                    )
             reply, _conversation_id = await self._async_ai_search(
                 resolved_query or query,
                 conversation_id=None,

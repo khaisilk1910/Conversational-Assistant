@@ -217,9 +217,10 @@
       },
       "weather": {
         "title": "Weather settings",
-        "description": "Configure scheduled daily forecasts and scheduled checks for tropical systems that may affect Vietnam. Found {zalo_count} enabled Zalo destinations. Submit saves immediately and re-registers every run time.",
+        "description": "Select a Home Assistant weather entity for native current conditions and forecasts. Direct and scheduled weather requests use Home Assistant first, then AI Search only when native data is unavailable or does not cover the requested place or period. Found {weather_count} weather entities and {zalo_count} enabled Zalo destinations. Submit saves immediately and re-registers every run time.",
         "data": {
-          "weather_location": "Default weather lookup and bulletin location",
+          "weather_entity_id": "Home Assistant weather entity",
+          "weather_location": "Fallback location for AI Search and bulletins",
           "weather_forecast_enabled": "Send scheduled daily weather forecasts",
           "weather_forecast_times": "Daily forecast delivery times",
           "weather_forecast_days": "Forecast day count",
@@ -229,12 +230,13 @@
           "weather_storm_zalo_targets": "Zalo storm alert recipients"
         },
         "data_description": {
-          "weather_location": "Used for direct weather requests that do not name a place and for scheduled bulletins. Leave blank to use the Home Assistant location name and coordinates. You may enter a specific place such as Hanoi, Da Nang, or Bangkok.",
-          "weather_forecast_enabled": "When enabled, the AI Search agent retrieves a forecast at every configured time and sends it to the selected Zalo destinations. Invalid AI/error text is not sent as a forecast bulletin.",
+          "weather_entity_id": "Home Assistant automatically lists weather.* entities. The selected entity is used first with weather.get_forecasts for daily, hourly, or twice-daily data. Leave empty to skip native weather and use AI Search.",
+          "weather_location": "Used by AI Search only when native Home Assistant data cannot answer the request, and as the scheduled bulletin location label. Leave blank to use the Home Assistant location name and coordinates.",
+          "weather_forecast_enabled": "At each configured time, the integration first requests the selected Home Assistant weather entity. AI Search is used only when native data is unavailable or incomplete. Invalid/error text is never sent as a forecast bulletin.",
           "weather_forecast_times": "Enter HH:MM or HH:MM:SS values, one per line or comma-separated. Example: 06:30, 12:00, 21:00. Up to 24 distinct times.",
-          "weather_forecast_days": "From 1 to 7 days. The bulletin starts on the run date and lists each day separately with date, conditions, low/high temperature, rain, humidity, and wind when available.",
+          "weather_forecast_days": "From 1 to 7 days. Each requested date is listed separately with condition, low/high temperature, rain, humidity, and wind when the source provides those fields.",
           "weather_forecast_zalo_targets": "Select one or more enabled destinations created under Zalo settings. Required when scheduled forecasts are enabled.",
-          "weather_storm_enabled": "Checks typhoons, tropical storms, depressions, and cyclones with a credible chance of affecting Vietnam land or nearby waters. Zalo is sent only for an alert; no-storm and lookup-error results are not sent.",
+          "weather_storm_enabled": "Storm checks still use current Internet sources because they cover regional systems and official warnings beyond one local weather entity. Zalo is sent only for an alert.",
           "weather_storm_times": "Enter HH:MM or HH:MM:SS values, one per line or comma-separated. Suggested defaults: 06:30, 12:00, and 21:00.",
           "weather_storm_zalo_targets": "Select one or more storm alert recipients. Required when scheduled storm checks are enabled."
         }
