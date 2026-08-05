@@ -29,7 +29,21 @@ Trong bất kỳ phiên nào, gửi một trong các lệnh:
 
 Lệnh hủy không cần Zalo invocation keyword. Tích hợp sẽ dừng ngay phiên ghi chú, nhắc hẹn, thiết bị, lịch, camera, gửi Zalo, thông báo loa, trò chuyện AI hoặc tác vụ nền đang xử lý. Thời gian chờ chọn hoặc xác nhận là 120 giây.
 
-## 3. Xem hướng dẫn và danh sách lệnh
+## 3. Nguyên tắc xử lý và đa luồng
+
+Tích hợp xử lý theo thứ tự cố định để phản hồi nhanh và hạn chế AI can thiệp sai ý:
+
+1. Phân tích bằng parser nội bộ, trạng thái entity và action có sẵn của Home Assistant.
+2. Chỉ dùng AI khi parser hoặc công cụ Home Assistant không lấy đủ ý định, nội dung hay thời gian.
+3. Chỉ dùng AI Search khi yêu cầu cần dữ liệu Internet hoặc dữ liệu trong Home Assistant không có/không đủ.
+4. Kết quả từ action Home Assistant được phản hồi trực tiếp, không gửi qua AI để viết lại lần nữa.
+5. Nếu thiếu nội dung, thời gian, thiết bị hoặc đích đến, tích hợp không tự đoán mà hỏi lại rõ ràng.
+
+Mỗi tài khoản Zalo, nhóm/cuộc trò chuyện, người gửi và nguồn Voice có phiên riêng. Nhiều luồng khác nhau có thể chạy đồng thời; lựa chọn, xác nhận, hủy và phản hồi luôn quay về đúng luồng đã tạo yêu cầu.
+
+Các action chặn được giới hạn thời gian ở phía tích hợp. Một camera, lịch, weather, TTS hoặc custom action bị treo sẽ báo lỗi cho đúng yêu cầu thay vì giữ tác vụ vô thời hạn.
+
+## 4. Xem hướng dẫn và danh sách lệnh
 
 ### Xem hướng dẫn
 
@@ -43,7 +57,7 @@ Ví dụ: `Các lệnh tích hợp`
 
 Phản hồi được chia theo tính năng, ngắt dòng dễ đọc và mỗi tính năng chỉ có một ví dụ.
 
-## 4. Các lệnh tích hợp
+## 5. Các lệnh tích hợp
 
 ### Thiết bị
 
@@ -99,6 +113,8 @@ Ví dụ Âm lịch: `Tạo sự kiện giỗ ông ngày 12/8/2026 âm lịch`
 Từ khóa: `thông báo loa`, `báo loa`, `báo ra loa`, `thông báo ra loa`, `gửi loa`, `nhắn loa`  
 Ví dụ: `Báo loa Phòng Ngủ xuống ăn cơm`
 
+TTS phát khi media player ở trạng thái `idle`, `off` hoặc `paused`. Nếu loa chưa ở một trong ba trạng thái sẵn sàng này, tích hợp kiểm tra lại tối đa **10 lần**, mỗi lần cách nhau **15 giây**. Sau lần kiểm tra thứ 10 mà loa vẫn chưa sẵn sàng, yêu cầu TTS bị hủy và lỗi được gửi về đúng Zalo/Voice đã yêu cầu. Các loa khác nhau vẫn có thể chờ và phát song song; cùng một loa được xếp tuần tự để tránh chồng tiếng.
+
 ### Gửi Zalo
 
 Từ khóa: `gửi Zalo`, `thông báo Zalo`, `báo Zalo`  
@@ -149,7 +165,7 @@ Ví dụ: `Học câu lệnh xem cổng để chụp Cam Cổng`
 Từ khóa: `hủy`, `hủy yêu cầu`, `hủy phiên`, `dừng yêu cầu`, `dừng phiên`, `kết thúc phiên`, `bỏ yêu cầu vừa rồi`  
 Ví dụ: `Hủy`
 
-## 5. Cấu hình
+## 6. Cấu hình
 
 Mở **Settings > Devices & services > Conversational Assistant > Configure** để:
 
