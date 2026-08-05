@@ -81,8 +81,18 @@ Có thể nhắc trực tiếp đến tên **Mobile**, **Zalo** hoặc **loa** �
 
 ### Lịch và sự kiện
 
-Từ khóa: `xem lịch`, `kiểm tra lịch`, `sự kiện`, `tạo sự kiện`, `thêm sự kiện`, `đặt lịch`, `lên lịch`, `cuộc họp`, `cuộc hẹn`  
-Ví dụ: `Tạo sự kiện họp sale ngày mai lúc 8 giờ`
+Từ khóa: `xem lịch`, `kiểm tra lịch`, `sự kiện`, `tạo sự kiện`, `thêm sự kiện`, `đặt lịch`, `lên lịch`, `cuộc họp`, `cuộc hẹn`, `dương lịch`, `lịch dương`, `âm lịch`, `lịch âm`  
+Ví dụ Dương lịch: `Tạo sự kiện họp sale ngày mai lúc 8 giờ dương lịch`  
+Ví dụ Âm lịch: `Tạo sự kiện giỗ ông ngày 12/8/2026 âm lịch`
+
+- Trong **Calendar settings**, chọn riêng **Dương lịch mặc định** và **Âm lịch mặc định**. Home Assistant tự quét các entity `calendar.*` để chọn.
+- Nói rõ `dương lịch` hoặc `lịch dương`: tích hợp ưu tiên Dương lịch đã cấu hình.
+- Nói rõ `âm lịch` hoặc `lịch âm`: tích hợp ưu tiên Âm lịch đã cấu hình và dùng `am_lich_viet_nam.convert_date` với `conversion_type: lunar_to_solar` để lấy ngày dịch vụ chuẩn trước khi tạo.
+- Không nói loại lịch: nếu đã cấu hình đủ hai loại, tích hợp liệt kê Dương lịch và Âm lịch; nếu chưa cấu hình đủ, tích hợp liệt kê các lịch có quyền ghi trong Home Assistant để chọn.
+- Trước khi tạo, tích hợp luôn hiển thị nội dung, ngày giờ và hỏi xác nhận lịch đích.
+- Khi phải lưu sự kiện âm vào lịch dương, phần mô tả ghi rõ ngày âm và ngày dương tương ứng.
+- Nếu tháng âm có cả tháng thường và tháng nhuận nhưng câu lệnh chưa nói rõ, tích hợp sẽ hỏi lại trước khi tạo để tránh lệch ngày.
+- Với sự kiện âm lặp theo tháng hoặc năm, nên cài lịch âm trong Home Assistant và chọn tại Calendar settings vì ngày dương tương ứng thay đổi theo từng kỳ.
 
 ### Thông báo loa
 
@@ -145,6 +155,7 @@ Mở **Settings > Devices & services > Conversational Assistant > Configure** đ
 
 - đặt tên Mobile, Zalo, loa và camera;
 - chọn thực thể `weather.*` trong **Weather settings** để ưu tiên dữ liệu Home Assistant;
+- chọn riêng Dương lịch và Âm lịch mặc định trong **Calendar settings**;
 - cấu hình AI Agent, AI Search dự phòng, lịch, bản tin thời tiết và TTS;
 - bật hoặc tắt yêu cầu Zalo invocation keyword;
 - thay đổi Zalo invocation keyword dùng để gọi tích hợp.
