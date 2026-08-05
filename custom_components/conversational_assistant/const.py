@@ -167,14 +167,13 @@ ZALO_TYPING_REFRESH_SECONDS = 4
 # automation can finish promptly. These limits guarantee a final error message
 # instead of leaving the user waiting forever when an AI provider stalls.
 ZALO_SEARCH_TIMEOUT_SECONDS = 180
-# Internet lookup agents are rotated more quickly than local/control agents.
-# This prevents one non-browsing Conversation agent from blocking the entire
-# weather/search request for several minutes before failover can continue.
-AI_SEARCH_AGENT_TIMEOUT_SECONDS = 30
-# Strict intent/time parsers must fail fast; they never perform Internet search.
-AI_PARSER_AGENT_TIMEOUT_SECONDS = 15
-AI_SEARCH_TOTAL_TIMEOUT_SECONDS = 135
-AI_SEARCH_MAX_CANDIDATES = 4
+# Every Conversation agent gets a full hard wall-clock window. If an agent
+# errors, returns no usable result, or exceeds this limit, failover immediately
+# continues with the next available agent without waiting for cancellation.
+AI_SEARCH_AGENT_TIMEOUT_SECONDS = 120
+# Complex intent/time parsing may also need a larger model. Use the same hard
+# per-agent window while still keeping execution bounded and sequential.
+AI_PARSER_AGENT_TIMEOUT_SECONDS = 120
 AI_FAILOVER_NOTICE_TIMEOUT_SECONDS = 5
 ZALO_IMAGE_TIMEOUT_SECONDS = 360
 CAMERA_ANALYSIS_TIMEOUT_SECONDS = 180
@@ -559,18 +558,18 @@ CREATE_SENTENCES = [
 
 LIST_SENTENCES = [
     "[please ](list|show|read) [my ]reminders",
-    "[please ]show [my ]reminder list",
+    "[please ](list|show|read) [my ]reminder list",
+    "[please ]show me [my ]reminders",
     "what reminders do I have",
     "what is my next reminder",
     "what's my next reminder",
     "next reminder",
-    "liệt kê (nhắc hẹn|nhắc nhở|lịch nhắc|hẹn giờ)",
-    "đọc danh sách (nhắc hẹn|nhắc nhở|lịch nhắc|hẹn giờ)",
-    "xem danh sách (nhắc hẹn|nhắc nhở|lịch nhắc|hẹn giờ)",
-    "danh sách (nhắc hẹn|nhắc nhở|lịch nhắc|hẹn giờ)",
-    "cho tôi danh sách (nhắc hẹn|nhắc nhở|lịch nhắc|hẹn giờ)",
-    "tôi có những (nhắc hẹn|nhắc nhở|lịch nhắc|hẹn giờ) nào",
-    "(nhắc hẹn|nhắc nhở) tiếp theo là gì",
+    "(list|show) danh sách (nhắc hẹn|nhắc nhở|nhắc việc|lịch nhắc|hẹn giờ|lời nhắc)",
+    "[hãy ](liệt kê|đọc|xem|hiển thị) [danh sách ](nhắc hẹn|nhắc nhở|nhắc việc|lịch nhắc|hẹn giờ|lời nhắc)",
+    "[hãy ]cho tôi xem [danh sách ](nhắc hẹn|nhắc nhở|nhắc việc|lịch nhắc|hẹn giờ|lời nhắc)",
+    "[hãy ]cho tôi danh sách (nhắc hẹn|nhắc nhở|nhắc việc|lịch nhắc|hẹn giờ|lời nhắc)",
+    "tôi có [những ](nhắc hẹn|nhắc nhở|nhắc việc|lịch nhắc|hẹn giờ|lời nhắc) nào",
+    "(nhắc hẹn|nhắc nhở|nhắc việc|lời nhắc) tiếp theo [của tôi ]là gì",
 ]
 
 CANCEL_SENTENCES = [

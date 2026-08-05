@@ -82,8 +82,6 @@ from .const import (
     AI_FAILOVER_NOTICE_TIMEOUT_SECONDS,
     AI_PARSER_AGENT_TIMEOUT_SECONDS,
     AI_SEARCH_AGENT_TIMEOUT_SECONDS,
-    AI_SEARCH_MAX_CANDIDATES,
-    AI_SEARCH_TOTAL_TIMEOUT_SECONDS,
     AI_TASK_DOMAIN,
     AI_TASK_SERVICE_GENERATE_DATA,
     AI_TASK_SERVICE_GENERATE_IMAGE,
@@ -661,6 +659,70 @@ def _zalo_send_request(text: str) -> str | None:
         if tuple(normalized_words[start:end]) == prefix:
             return raw[word_matches[end - 1].end() :].lstrip()
     return None
+
+
+def _is_reminder_list_request(text: str) -> bool:
+    """Return whether text clearly asks to list stored reminders.
+
+    Accept common Vietnamese, English, and mixed phrases such as
+    ``list danh sách nhắc hẹn``. Deletion and creation commands are rejected
+    explicitly so this forgiving classifier cannot steal another workflow.
+    """
+    normalized = normalize_text(text)
+    if not normalized:
+        return False
+
+    blocked_prefixes = (
+        "huy ",
+        "xoa ",
+        "xoá ",
+        "delete ",
+        "remove ",
+        "cancel ",
+        "clear ",
+        "tao ",
+        "dat ",
+        "them ",
+        "create ",
+        "set ",
+        "add ",
+        "schedule ",
+    )
+    if normalized.startswith(blocked_prefixes):
+        return False
+
+    reminder_terms = (
+        "nhac hen",
+        "nhac nho",
+        "nhac viec",
+        "lich nhac",
+        "hen gio",
+        "loi nhac",
+        "reminder",
+        "reminders",
+    )
+    padded = f" {normalized} "
+    if not any(f" {term} " in padded for term in reminder_terms):
+        return False
+
+    list_markers = (
+        "list",
+        "show",
+        "read",
+        "liet ke",
+        "doc",
+        "xem",
+        "hien thi",
+        "danh sach",
+    )
+    if any(f" {marker} " in padded for marker in list_markers):
+        return True
+
+    if normalized.startswith(("toi co ", "cho toi biet ")) and normalized.endswith(
+        " nao"
+    ):
+        return True
+    return "tiep theo" in normalized
 
 
 def _reminder_request_tail(text: str) -> tuple[str, bool] | None:
@@ -2054,58 +2116,20 @@ class ConversationalAssistantManager(NoteManagerMixin):
     def _ai_search_agent_candidates(
         self, primary_agent_id: str
     ) -> list[tuple[str, str]]:
-        """Return Internet-capable candidates in a safe, useful order.
+        """Return the selected search agent, then every available AI agent.
 
-        Home Assistant does not currently expose a universal capability flag for
-        web browsing on Conversation agents.  The explicitly selected AI Search
-        agent is therefore always first.  Failover then includes only agents whose
-        entity ID or display name indicates web/search grounding, skips the native
-        Home Assistant and device-control agents, and caps the queue so unrelated
-        Conversation agents cannot block a weather or Internet lookup.
+        Home Assistant does not expose a universal capability flag for Internet
+        access on Conversation agents. The configured AI Search agent is tried
+        first, then every other non-native Conversation agent is allowed to try.
+        Each attempt is independently bounded, so one unsuitable or stalled agent
+        cannot prevent the remaining agents from running.
         """
-        primary = str(primary_agent_id or "").strip()
-        control_agent = str(self.zalo_conversation_agent_id or "").strip()
-        discovered = self._conversation_agent_candidates(primary)
-        search_markers = (
-            "search",
-            "web",
-            "internet",
-            "browse",
-            "browser",
-            "ground",
-            "grounding",
-            "online",
-            "perplexity",
-            "duckduckgo",
-            "bing",
-            "google search",
-            "tim kiem",
-            "tra cuu",
-            "truc tuyen",
-        )
-        ranked: list[tuple[int, int, int, str, str]] = []
-        for order, (agent_id, agent_name) in enumerate(discovered):
-            if agent_id == HOME_ASSISTANT_AGENT:
-                continue
-            haystack = normalize_text(f"{agent_id} {agent_name}")
-            score = sum(1 for marker_text in search_markers if marker_text in haystack)
-            if agent_id == primary:
-                tier = 0
-            elif score:
-                tier = 1
-            else:
-                # Generic Conversation agents are intentionally excluded. The
-                # selected primary remains allowed because the user explicitly
-                # assigned it to the AI Search role in the integration settings.
-                continue
-            ranked.append((tier, -score, order, agent_id, agent_name))
-
-        ranked.sort(key=lambda item: (item[0], item[1], item[2]))
         return [
             (agent_id, agent_name)
-            for _tier, _score, _order, agent_id, agent_name in ranked[
-                :AI_SEARCH_MAX_CANDIDATES
-            ]
+            for agent_id, agent_name in self._conversation_agent_candidates(
+                primary_agent_id
+            )
+            if agent_id != HOME_ASSISTANT_AGENT
         ]
 
     def _ai_task_agent_display_name(self, entity_id: str) -> str:
@@ -4527,6 +4551,12 @@ class ConversationalAssistantManager(NoteManagerMixin):
         if _search_request(text) is not None:
             return ACTION_SEARCH
 
+        if _is_reminder_list_request(text):
+            return "list"
+
+        # Retain the explicit catalog below as documentation for established
+        # phrases. The forgiving classifier above also accepts natural and
+        # mixed-language variants.
         list_phrases = {
             "list reminders",
             "list my reminders",
@@ -4707,9 +4737,11 @@ class ConversationalAssistantManager(NoteManagerMixin):
             "không, khả năng mưa, nhiệt độ, độ ẩm, UV, kiểm tra bão, áp thấp.\n"
             "VD: `Thời tiết ngày mai`\n\n"
             "⏰ **Nhắc hẹn** — nhắc, hẹn, nhắc tôi, tạo/đặt/thêm nhắc hẹn, "
-            "xem danh sách, hủy hoặc xóa nhắc hẹn. Gọi thẳng tên Mobile, "
-            "Zalo hoặc loa; nếu không nêu nơi nhận sẽ hiện danh sách chọn.\n"
-            "VD: `Nhắc Zalo Khải 1 phút nữa uống thuốc`\n\n"
+            "list/xem/liệt kê danh sách, hủy hoặc xóa nhắc hẹn. Gọi thẳng "
+            "tên Mobile, Zalo hoặc loa; nếu không nêu nơi nhận sẽ hiện "
+            "danh sách chọn.\n"
+            "VD tạo: `Nhắc Zalo Khải 1 phút nữa uống thuốc`\n"
+            "VD xem: `List danh sách nhắc hẹn`\n\n"
             "📅 **Lịch và sự kiện** — xem lịch, kiểm tra lịch, sự kiện, "
             "tạo/thêm/đặt/lên lịch cuộc họp hoặc cuộc hẹn. Có thể nói rõ "
             "Dương lịch hoặc Âm lịch; nếu chưa nói, bot sẽ hỏi và liệt kê lịch.\n"
@@ -4791,7 +4823,10 @@ class ConversationalAssistantManager(NoteManagerMixin):
             "Home Assistant không có, không đủ hoặc yêu cầu địa điểm khác.\n"
             "• Ví dụ: `Thời tiết ngày mai`.\n\n"
             "⏰ **Nhắc hẹn và lịch**\n"
-            "• Tạo, xem, sửa, xóa nhắc hẹn hoặc sự kiện. Sự kiện có thể nói "
+            "• Tạo, xem, sửa, xóa nhắc hẹn hoặc sự kiện. Có thể nói "
+            "`List danh sách nhắc hẹn`, `Xem danh sách nhắc hẹn` hoặc "
+            "`Liệt kê nhắc việc`.\n"
+            "• Sự kiện có thể nói "
             "rõ Dương lịch hoặc Âm lịch; nếu chưa nói, tích hợp sẽ hỏi và "
             "liệt kê lịch theo Calendar settings.\n"
             "• Ngày âm được đổi bằng action `am_lich_viet_nam.convert_date`; "
@@ -4829,6 +4864,35 @@ class ConversationalAssistantManager(NoteManagerMixin):
             "AI, lịch, thời tiết, TTS cùng Zalo invocation keyword."
         )
 
+    @staticmethod
+    def _zalo_reminder_owner_aliases(owner_key: str) -> set[str]:
+        """Return current and legacy owner keys for stored Zalo reminders.
+
+        Releases before per-account/per-sender isolation stored reminders as
+        ``zalo:<thread_type>:<thread_id>``. A short-lived intermediate layout
+        could also omit only the sender. Keeping these aliases prevents an
+        upgrade from making valid reminders disappear from list/delete flows.
+        New reminders continue to use the fully isolated owner key.
+        """
+        aliases = {owner_key}
+        parts = owner_key.split(":", 4)
+        if len(parts) == 5 and parts[0] == "zalo":
+            _prefix, account_id, thread_type, thread_id, _sender_id = parts
+            aliases.add(f"zalo:{account_id}:{thread_type}:{thread_id}")
+            aliases.add(f"zalo:{thread_type}:{thread_id}")
+        return aliases
+
+    @classmethod
+    def _reminder_matches_zalo_owner(
+        cls, reminder: Reminder, owner_key: str
+    ) -> bool:
+        """Return whether one reminder belongs to this Zalo source scope."""
+        stored_owner = str(reminder.owner_key or "").strip()
+        return (
+            bool(stored_owner)
+            and stored_owner in cls._zalo_reminder_owner_aliases(owner_key)
+        )
+
     def _zalo_upcoming_reminders(
         self, owner_key: str
     ) -> list[tuple[datetime, Reminder]]:
@@ -4836,7 +4900,7 @@ class ConversationalAssistantManager(NoteManagerMixin):
         return [
             item
             for item in self.upcoming_reminders
-            if item[1].owner_key == owner_key
+            if self._reminder_matches_zalo_owner(item[1], owner_key)
         ]
 
     def _zalo_deletable_reminders(
@@ -4846,7 +4910,7 @@ class ConversationalAssistantManager(NoteManagerMixin):
         return [
             item
             for item in self.deletable_reminders
-            if item[1].owner_key == owner_key
+            if self._reminder_matches_zalo_owner(item[1], owner_key)
         ]
 
     @staticmethod
@@ -5338,7 +5402,7 @@ class ConversationalAssistantManager(NoteManagerMixin):
                 self.zalo_conversation_agent_id
             )
             if candidate[0] != HOME_ASSISTANT_AGENT
-        ][:2]
+        ]
         attempted_agents: list[str] = []
         local_now = dt_util.as_local(now)
         prompt = (
@@ -5614,7 +5678,9 @@ class ConversationalAssistantManager(NoteManagerMixin):
         deleted_names: list[str] = []
         for reminder in selected:
             if (
-                reminder.owner_key == context.owner_key
+                self._reminder_matches_zalo_owner(
+                    reminder, context.owner_key
+                )
                 and await self.async_delete(reminder.reminder_id)
             ):
                 deleted_names.append(reminder.message)
@@ -7699,7 +7765,7 @@ class ConversationalAssistantManager(NoteManagerMixin):
                 self.zalo_conversation_agent_id
             )
             if candidate[0] != HOME_ASSISTANT_AGENT
-        ][:3]
+        ]
         if not candidates:
             return None
         prompt = (
@@ -7932,16 +7998,10 @@ class ConversationalAssistantManager(NoteManagerMixin):
             language=language,
             reference_time=dt_util.now(),
         )
-        search_deadline = monotonic() + AI_SEARCH_TOTAL_TIMEOUT_SECONDS
         for agent_id, _agent_name in candidates:
-            remaining_seconds = search_deadline - monotonic()
-            if remaining_seconds <= 0:
-                break
             try:
                 result = await self._async_converse_with_hard_timeout(
-                    timeout_seconds=min(
-                        AI_SEARCH_AGENT_TIMEOUT_SECONDS, remaining_seconds
-                    ),
+                    timeout_seconds=AI_SEARCH_AGENT_TIMEOUT_SECONDS,
                     hass=self.hass,
                     text=prompt,
                     conversation_id=None,
@@ -9174,8 +9234,6 @@ class ConversationalAssistantManager(NoteManagerMixin):
         had_empty_response = False
         primary_agent_id = self.ai_search_agent_id
         total_attempts = len(candidates)
-        search_deadline = monotonic() + AI_SEARCH_TOTAL_TIMEOUT_SECONDS
-        total_timeout_reached = False
         if is_weather:
             prompt_text = self._weather_search_prompt(
                 query,
@@ -9192,13 +9250,7 @@ class ConversationalAssistantManager(NoteManagerMixin):
             )
 
         for index, (agent_id, agent_name) in enumerate(candidates):
-            remaining_seconds = search_deadline - monotonic()
-            if remaining_seconds <= 0:
-                total_timeout_reached = True
-                break
-            attempt_timeout = min(
-                AI_SEARCH_AGENT_TIMEOUT_SECONDS, remaining_seconds
-            )
+            attempt_timeout = AI_SEARCH_AGENT_TIMEOUT_SECONDS
             attempted_agents.append(agent_name)
             try:
                 result = await self._async_converse_with_hard_timeout(
@@ -9301,10 +9353,7 @@ class ConversationalAssistantManager(NoteManagerMixin):
                     error_code or "empty_reply",
                 )
 
-            if (
-                index + 1 < total_attempts
-                and monotonic() < search_deadline
-            ):
+            if index + 1 < total_attempts:
                 await self._async_send_ai_failover_notice(
                     zalo_context,
                     service_context,
@@ -9315,9 +9364,6 @@ class ConversationalAssistantManager(NoteManagerMixin):
                     total_attempts=total_attempts,
                     language=language,
                 )
-
-        if monotonic() >= search_deadline:
-            total_timeout_reached = True
 
         if had_empty_response:
             if is_chat:
@@ -9341,17 +9387,13 @@ class ConversationalAssistantManager(NoteManagerMixin):
                 )
         else:
             message = (
-                "The total AI Search deadline was reached. Check the AI agents "
-                "configured in Home Assistant and try again."
-                if language == "en" and total_timeout_reached
-                else "Đã hết tổng thời gian chờ AI Search. Hãy kiểm tra các AI "
-                "agent trong Home Assistant rồi thử lại."
-                if total_timeout_reached
-                else "All available search agents failed or timed out. Check the AI "
-                "agents configured in Home Assistant and try again."
+                "All available AI agents failed, returned no usable result, or "
+                "timed out after 120 seconds each. Check the agents configured "
+                "in Home Assistant and try again."
                 if language == "en"
-                else "Tất cả AI agent tìm kiếm khả dụng đều lỗi hoặc hết thời gian "
-                "chờ. Hãy kiểm tra các AI agent trong Home Assistant rồi thử lại."
+                else "Tất cả AI agent khả dụng đều lỗi, không trả kết quả dùng được "
+                "hoặc hết 120 giây chờ cho từng agent. Hãy kiểm tra các AI agent "
+                "trong Home Assistant rồi thử lại."
             )
             if zalo:
                 if is_weather:
@@ -10154,7 +10196,7 @@ class ConversationalAssistantManager(NoteManagerMixin):
                 self.zalo_conversation_agent_id
             )
             if candidate[0] != HOME_ASSISTANT_AGENT
-        ][:2]
+        ]
         if not candidates or not targets:
             return None, []
 
@@ -13184,6 +13226,43 @@ class ConversationalAssistantManager(NoteManagerMixin):
             _LOGGER.exception("Failed resolving calendar entity %s", entity_id)
             return None
 
+    async def _async_calendar_entity_events(
+        self,
+        entity: Any,
+        state: Any,
+        window: CalendarWindow,
+        supported_features: int,
+    ) -> list[CalendarDisplayEvent]:
+        """Fetch rich CalendarEvent objects, including mutation identifiers."""
+        try:
+            async with asyncio.timeout(CALENDAR_SERVICE_TIMEOUT_SECONDS):
+                raw_events = await entity.async_get_events(
+                    self.hass, window.start, window.end
+                )
+            payload: list[dict[str, Any]] = []
+            for raw_event in raw_events:
+                if hasattr(raw_event, "as_dict"):
+                    item = raw_event.as_dict()
+                elif hasattr(raw_event, "__dict__"):
+                    item = dict(raw_event.__dict__)
+                else:
+                    continue
+                if isinstance(item, dict):
+                    payload.append(item)
+            return extract_calendar_events(
+                payload,
+                state.entity_id,
+                str(state.name or state.entity_id),
+                supported_features=supported_features,
+            )
+        except asyncio.CancelledError:
+            raise
+        except Exception:  # noqa: BLE001 - caller keeps public action result
+            _LOGGER.exception(
+                "Direct calendar event fetch failed for %s", state.entity_id
+            )
+            return []
+
     async def _async_calendar_events_for_state(
         self,
         state: Any,
@@ -13198,6 +13277,14 @@ class ConversationalAssistantManager(NoteManagerMixin):
             )
         except (TypeError, ValueError):
             supported_features = 0
+        entity = self._calendar_entity(state.entity_id)
+        if entity is not None:
+            try:
+                supported_features |= int(
+                    getattr(entity, "supported_features", 0) or 0
+                )
+            except (TypeError, ValueError):
+                pass
 
         # Prefer the public Home Assistant action contract. An empty response is
         # a valid calendar result and must not trigger AI or another data source.
@@ -13216,12 +13303,32 @@ class ConversationalAssistantManager(NoteManagerMixin):
                     return_response=True,
                     timeout_seconds=CALENDAR_SERVICE_TIMEOUT_SECONDS,
                 )
-                return extract_calendar_events(
+                events = extract_calendar_events(
                     response,
                     state.entity_id,
                     calendar_name,
                     supported_features=supported_features,
                 )
+                mutation_features = int(
+                    CalendarEntityFeature.UPDATE_EVENT
+                    | CalendarEntityFeature.DELETE_EVENT
+                )
+                # calendar.get_events may omit uid even when the entity supports
+                # update/delete. Fetch the CalendarEntity objects once to retain
+                # the uid required for a safe confirmation-based mutation flow.
+                if (
+                    events
+                    and supported_features & mutation_features
+                    and not all(event.uid for event in events)
+                    and entity is not None
+                    and hasattr(entity, "async_get_events")
+                ):
+                    direct_events = await self._async_calendar_entity_events(
+                        entity, state, window, supported_features
+                    )
+                    if any(event.uid for event in direct_events):
+                        return direct_events
+                return events
             except asyncio.CancelledError:
                 raise
             except Exception:  # noqa: BLE001 - use entity fallback below
@@ -13231,36 +13338,12 @@ class ConversationalAssistantManager(NoteManagerMixin):
 
         # Compatibility fallback for calendar platforms that have not exposed
         # the response action correctly. This path is bounded as well.
-        entity = self._calendar_entity(state.entity_id)
         if entity is not None and hasattr(entity, "async_get_events"):
-            try:
-                async with asyncio.timeout(CALENDAR_SERVICE_TIMEOUT_SECONDS):
-                    raw_events = await entity.async_get_events(
-                        self.hass, window.start, window.end
-                    )
-                payload: list[dict[str, Any]] = []
-                for raw_event in raw_events:
-                    if hasattr(raw_event, "as_dict"):
-                        item = raw_event.as_dict()
-                    elif hasattr(raw_event, "__dict__"):
-                        item = dict(raw_event.__dict__)
-                    else:
-                        continue
-                    if isinstance(item, dict):
-                        payload.append(item)
-                return extract_calendar_events(
-                    payload,
-                    state.entity_id,
-                    calendar_name,
-                    supported_features=supported_features,
-                )
-            except asyncio.CancelledError:
-                raise
-            except Exception:  # noqa: BLE001 - state fallback below
-                _LOGGER.exception(
-                    "Direct calendar event fetch failed for %s",
-                    state.entity_id,
-                )
+            direct_events = await self._async_calendar_entity_events(
+                entity, state, window, supported_features
+            )
+            if direct_events:
+                return direct_events
 
         fallback = event_from_calendar_state(
             dict(state.attributes), state.entity_id, calendar_name
@@ -13299,7 +13382,7 @@ class ConversationalAssistantManager(NoteManagerMixin):
                 self.zalo_conversation_agent_id
             )
             if candidate[0] != HOME_ASSISTANT_AGENT
-        ][:2]
+        ]
         attempted_agents: list[str] = []
         total_attempts = len(candidates)
         prompt = (
@@ -13378,7 +13461,7 @@ class ConversationalAssistantManager(NoteManagerMixin):
                 self.zalo_conversation_agent_id
             )
             if candidate[0] != HOME_ASSISTANT_AGENT
-        ][:2]
+        ]
         attempted_agents: list[str] = []
         total_attempts = len(candidates)
         local_now = dt_util.as_local(now)
@@ -14417,10 +14500,25 @@ class ConversationalAssistantManager(NoteManagerMixin):
                     ai_attempted_agents=attempted_agents,
                 )
             )
-            reply += (
-                "\n\n🛠️ **Bạn có muốn quản lý sự kiện vừa tra cứu không?**\n"
-                "Trả lời **Sửa**, **Xóa** hoặc **Bỏ qua**."
-            )
+            can_delete = any(event.can_delete for event in manageable)
+            can_update = any(event.can_update for event in manageable)
+            if can_delete and can_update:
+                reply += (
+                    "\n\n🗑️ **Bạn có muốn xóa hoặc sửa sự kiện vừa tra cứu không?**\n"
+                    "Trả lời **Xóa** để chọn sự kiện rồi xác nhận xóa, "
+                    "**Sửa** để chỉnh sửa hoặc **Bỏ qua**."
+                )
+            elif can_delete:
+                reply += (
+                    "\n\n🗑️ **Bạn có muốn xóa sự kiện vừa tra cứu không?**\n"
+                    "Trả lời **Xóa** để chọn sự kiện rồi xác nhận xóa, "
+                    "hoặc **Bỏ qua**."
+                )
+            else:
+                reply += (
+                    "\n\n✏️ **Bạn có muốn sửa sự kiện vừa tra cứu không?**\n"
+                    "Trả lời **Sửa** hoặc **Bỏ qua**."
+                )
         else:
             self._zalo_pending_calendar_managements.pop(context.owner_key, None)
 
@@ -14504,7 +14602,7 @@ class ConversationalAssistantManager(NoteManagerMixin):
                 self.zalo_conversation_agent_id
             )
             if candidate[0] != HOME_ASSISTANT_AGENT
-        ][:2]
+        ]
         for agent_id, agent_name in candidates:
             attempted.append(agent_name)
             try:
@@ -14560,6 +14658,16 @@ class ConversationalAssistantManager(NoteManagerMixin):
                 if not candidates:
                     return "Lịch của các sự kiện này không hỗ trợ xóa."
                 pending.events = candidates
+                if len(candidates) == 1:
+                    event = candidates[0]
+                    pending.selected_event = event
+                    pending.phase = "confirm_delete"
+                    return (
+                        f"⚠️ **Xác nhận xóa sự kiện**\n"
+                        f"**Nội dung:** {event.summary}\n"
+                        f"**Lịch:** {event.calendar_name}\n\n"
+                        "Trả lời **Xác nhận xóa** để thực hiện hoặc **Hủy**."
+                    )
                 pending.phase = "select_delete"
                 return self._calendar_management_event_prompt(candidates, "delete")
             return (
@@ -15222,15 +15330,14 @@ class ConversationalAssistantManager(NoteManagerMixin):
                     [camera.display_name for camera in pending_camera.cameras],
                 )
                 camera_count = max(1, len(selected))
-        # Internet search has its own strict total deadline. Other AI features
-        # keep a per-candidate safety calculation because their payloads can be
-        # substantially larger (camera/image/calendar).
-        if action in {ACTION_SEARCH, ACTION_WEATHER, ACTION_CHAT}:
-            timeout_seconds = AI_SEARCH_TOTAL_TIMEOUT_SECONDS + 30
-        else:
-            timeout_seconds = (
-                per_agent_timeout_seconds * candidate_count * camera_count + 120
-            )
+        # Keep an outer safety deadline without cutting off normal failover.
+        # Every Conversation agent receives its full independent timeout window,
+        # plus a small allowance for failover notices and final delivery.
+        timeout_seconds = (
+            per_agent_timeout_seconds * candidate_count * camera_count
+            + AI_FAILOVER_NOTICE_TIMEOUT_SECONDS * max(0, candidate_count - 1)
+            + 120
+        )
         # The webhook path normally starts typing immediately after its optional
         # processing acknowledgement. Retry here only when that first attempt
         # was unavailable or failed, then keep refreshing until delivery ends.
@@ -17654,10 +17761,6 @@ class ConversationalAssistantManager(NoteManagerMixin):
                     continue
                 seen.add(agent_id)
                 candidates.append((agent_id, agent_name))
-                if len(candidates) >= 2:
-                    break
-            if len(candidates) >= 2:
-                break
 
         attempted: list[str] = []
         for agent_id, agent_name in candidates:
@@ -17742,10 +17845,6 @@ class ConversationalAssistantManager(NoteManagerMixin):
                     continue
                 seen.add(agent_id)
                 candidates.append((agent_id, agent_name))
-                if len(candidates) >= 2:
-                    break
-            if len(candidates) >= 2:
-                break
 
         attempted: list[str] = []
         for agent_id, agent_name in candidates:
@@ -18193,6 +18292,8 @@ class ConversationalAssistantManager(NoteManagerMixin):
             _is_integration_commands_request(text)
             or _is_integration_help_request(text)
         ):
+            return True
+        if _is_reminder_list_request(text):
             return True
         if (
             is_lunar_date_conversion_request(text)
