@@ -272,6 +272,9 @@ def explicit_home_assistant_request_kind(text: str) -> str | None:
     if _is_camera_analysis_request(normalized):
         return "camera_analysis"
 
+    if _is_camera_video_request(normalized):
+        return "camera_video"
+
     if _is_camera_image_request(normalized):
         return "camera"
 
@@ -1415,6 +1418,44 @@ _should_skip_lunar_event = calendar_event_should_be_skipped
 _display_event_summary = calendar_event_display_summary
 
 
+def _is_camera_video_request(normalized: str) -> bool:
+    """Return whether text requests a short video from one or more cameras."""
+    if not normalized:
+        return False
+    for polite_prefix in ("hay ", "please "):
+        if normalized.startswith(polite_prefix):
+            normalized = normalized[len(polite_prefix) :].strip()
+            break
+
+    direct_prefixes = (
+        "gui video cam",
+        "gui video camera",
+        "gui video may quay",
+        "xem video cam",
+        "xem video camera",
+        "xem video may quay",
+        "quay video cam",
+        "quay video camera",
+        "quay video may quay",
+        "ghi video cam",
+        "ghi video camera",
+        "ghi video may quay",
+        "gui cam video",
+        "gui camera video",
+        "xem cam video",
+        "xem camera video",
+        "send camera video",
+        "show camera video",
+        "record camera video",
+        "get camera video",
+        "send video camera",
+        "show video camera",
+        "record video camera",
+        "get video camera",
+    )
+    return normalized.startswith(direct_prefixes)
+
+
 def _is_camera_image_request(normalized: str) -> bool:
     """Return whether a Zalo message requests a still image from a camera."""
     if not normalized:
@@ -1442,6 +1483,9 @@ def _is_camera_image_request(normalized: str) -> bool:
         "lay hinh",
         "gui anh",
         "gui hinh",
+        "gui cam",
+        "gui camera",
+        "gui may quay",
     )
     if normalized.startswith(direct_image_prefixes):
         return True
@@ -1482,6 +1526,9 @@ def _is_camera_image_request(normalized: str) -> bool:
         "xem hinh",
         "gui anh",
         "gui hinh",
+        "gui cam",
+        "gui camera",
+        "gui may quay",
         "anh camera",
         "hinh camera",
         "kiem tra camera",

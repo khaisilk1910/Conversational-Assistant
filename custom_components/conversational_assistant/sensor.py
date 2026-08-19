@@ -27,6 +27,7 @@ async def async_setup_entry(
             ConversationalAssistantCountSensor(manager, entry),
             ConversationalAssistantNextSensor(manager, entry),
             ConversationalAssistantCalendarEventCountSensor(manager, entry),
+            ConversationalAssistantCameraScheduleCountSensor(manager, entry),
             ConversationalAssistantNoteCountSensor(manager, entry),
             ConversationalAssistantLearnedCommandCountSensor(manager, entry),
         ]
@@ -271,6 +272,37 @@ class ConversationalAssistantCalendarEventCountSensor(
                 self.manager.calendar_last_notification_error
             ),
             "loi_cap_nhat": self.manager.calendar_refresh_error,
+        }
+
+
+class ConversationalAssistantCameraScheduleCountSensor(
+    ConversationalAssistantSensorBase
+):
+    """Active scheduled camera snapshot count and details."""
+
+    _attr_name = "Số lịch chụp camera"
+    _attr_icon = "mdi:camera-timer"
+
+    def __init__(
+        self,
+        manager: ConversationalAssistantManager,
+        entry: ConfigEntry,
+    ) -> None:
+        """Initialize camera schedule count sensor."""
+        super().__init__(manager, entry)
+        self._attr_unique_id = f"{entry.entry_id}_camera_schedule_count"
+
+    @property
+    def native_value(self) -> int:
+        """Return active camera snapshot schedule count."""
+        return self.manager.camera_schedule_count
+
+    @property
+    def extra_state_attributes(self) -> dict[str, Any]:
+        """Return scheduled camera snapshot details."""
+        return {
+            "list_lich_chup_camera": self.manager.camera_schedule_list_text,
+            "lich_chup_camera": self.manager.camera_schedule_sensor_rows,
         }
 
 

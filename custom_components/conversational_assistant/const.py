@@ -121,6 +121,12 @@ STORAGE_LOAD_TIMEOUT_SECONDS = 10
 TTS_SERVICE_TIMEOUT_SECONDS = 30
 CALENDAR_SERVICE_TIMEOUT_SECONDS = 30
 CAMERA_SERVICE_TIMEOUT_SECONDS = 30
+CAMERA_VIDEO_SERVICE_TIMEOUT_SECONDS = 45
+CAMERA_VIDEO_SEND_TIMEOUT_SECONDS = 120
+CAMERA_VIDEO_DURATION_SECONDS = 10
+CAMERA_VIDEO_LOOKBACK_SECONDS = 3
+CAMERA_VIDEO_WIDTH = 1280
+CAMERA_VIDEO_HEIGHT = 720
 LUNAR_SERVICE_TIMEOUT_SECONDS = 30
 
 AI_TASK_DOMAIN = "ai_task"
@@ -136,7 +142,9 @@ ZALO_DOMAIN = "zalo_bot"
 ZALO_SERVICE_SEND_MESSAGE = "send_message"
 ZALO_SERVICE_CREATE_REMINDER = "create_reminder"
 ZALO_SERVICE_SEND_IMAGE = "send_image"
+ZALO_SERVICE_SEND_VIDEO = "send_video"
 ZALO_SERVICE_SEND_IMAGES_TO_GROUP = "send_images_to_group"
+ZALO_SERVICE_SEND_IMAGES_TO_USER = "send_images_to_user"
 ZALO_SERVICE_SEND_TYPING_EVENT = "send_typing_event"
 ZALO_TYPE_USER = "0"
 ZALO_TYPE_GROUP = "1"
@@ -585,6 +593,18 @@ CANCEL_SENTENCES = [
 ]
 
 
+CAMERA_VIDEO_SENTENCES = [
+    "[please ](send|show|record|get) [a ]video [from ](camera|cameras)",
+    "[please ](send|show|record|get) [a ]video [from ](camera|cameras) {request}",
+    "[please ](send|show|record|get) [a ]camera video",
+    "[please ](send|show|record|get) [a ]camera video {request}",
+    "[hãy ](gửi|xem|quay|ghi) video (camera|máy quay|cam)",
+    "[hãy ](gửi|xem|quay|ghi) video (camera|máy quay|cam) {request}",
+    "[hãy ](gửi|xem|quay|ghi) (camera|máy quay|cam) video",
+    "[hãy ](gửi|xem|quay|ghi) (camera|máy quay|cam) video {request}",
+]
+
+
 CAMERA_SENTENCES = [
     "[please ](take|capture|get|send) (a photo|a picture|an image) [from ](camera|cameras)",
     "[please ](take|capture|get|send) (a photo|a picture|an image) [from ](camera|cameras) {request}",
@@ -594,6 +614,30 @@ CAMERA_SENTENCES = [
     "[hãy ](chụp|lấy) (ảnh|hình) [từ ](camera|máy quay|cam) {request}",
     "[hãy ]chụp (camera|máy quay|cam)",
     "[hãy ]chụp (camera|máy quay|cam) {request}",
+    "[hãy ]gửi (camera|máy quay|cam)",
+    "[hãy ]gửi (camera|máy quay|cam) {request}",
+]
+
+
+# Management of persistent camera-snapshot schedules. Creation commands that
+# start with "hẹn ..." are also detected inside the normal reminder callback so
+# they cannot be mistaken for a text reminder when the generic Hassil sentence
+# wins recognition.
+CAMERA_SCHEDULE_LIST_SENTENCES = [
+    "[hãy ](list|xem|liệt kê|đọc) lịch chụp (camera|cam)",
+    "[hãy ](list|xem|liệt kê|đọc) các lịch chụp (camera|cam)",
+    "[hãy ](list|xem|liệt kê|đọc) danh sách lịch chụp (camera|cam)",
+    "[hãy ]danh sách lịch chụp (camera|cam)",
+    "[please ](list|show) camera snapshot schedules",
+]
+
+CAMERA_SCHEDULE_DELETE_SENTENCES = [
+    "[hãy ](xóa|xoá|hủy|huỷ) lịch chụp (camera|cam)",
+    "[hãy ](xóa|xoá|hủy|huỷ) lịch chụp (camera|cam) {request}",
+    "[hãy ](xóa|xoá|hủy|huỷ) hẹn chụp (camera|cam)",
+    "[hãy ](xóa|xoá|hủy|huỷ) hẹn chụp (camera|cam) {request}",
+    "[please ](delete|cancel) camera snapshot schedule",
+    "[please ](delete|cancel) camera snapshot schedule {request}",
 ]
 
 

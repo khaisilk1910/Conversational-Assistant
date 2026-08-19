@@ -17,6 +17,7 @@ from .targeting import normalize_text
 # integration. A learned phrase is an alias, not arbitrary executable code.
 ACTION_CAMERA = "camera"
 ACTION_CAMERA_ANALYSIS = "camera_analysis"
+ACTION_CAMERA_VIDEO = "camera_video"
 ACTION_REMINDER_CREATE = "create"
 ACTION_REMINDER_LIST = "list"
 ACTION_REMINDER_DELETE = "delete"
@@ -38,6 +39,7 @@ ACTION_LUNAR_DATE_CONVERT = "lunar_date_convert"
 SUPPORTED_ACTIONS = {
     ACTION_CAMERA,
     ACTION_CAMERA_ANALYSIS,
+    ACTION_CAMERA_VIDEO,
     ACTION_REMINDER_CREATE,
     ACTION_REMINDER_LIST,
     ACTION_REMINDER_DELETE,
@@ -61,6 +63,7 @@ MAX_LEARNED_COMMANDS = 100
 
 REQUEST_ACTIONS = {
     ACTION_CAMERA_ANALYSIS,
+    ACTION_CAMERA_VIDEO,
     ACTION_REMINDER_CREATE,
     ACTION_REMINDER_DELETE,
     ACTION_NOTE_CREATE,
@@ -76,6 +79,7 @@ REQUEST_ACTIONS = {
 ACTION_LABELS = {
     ACTION_CAMERA: "chụp ảnh camera",
     ACTION_CAMERA_ANALYSIS: "phân tích camera bằng AI",
+    ACTION_CAMERA_VIDEO: "quay video camera 10 giây và gửi Zalo",
     ACTION_REMINDER_CREATE: "tạo nhắc hẹn",
     ACTION_REMINDER_LIST: "xem danh sách nhắc hẹn",
     ACTION_REMINDER_DELETE: "xóa nhắc hẹn",
@@ -102,6 +106,9 @@ _TARGET_LABELS = {
     "analyse camera": ACTION_CAMERA_ANALYSIS,
     "check camera": ACTION_CAMERA_ANALYSIS,
     "camera analysis": ACTION_CAMERA_ANALYSIS,
+    "camera video": ACTION_CAMERA_VIDEO,
+    "send camera video": ACTION_CAMERA_VIDEO,
+    "record camera video": ACTION_CAMERA_VIDEO,
     "camera": ACTION_CAMERA,
     "take camera photo": ACTION_CAMERA,
     "take a camera photo": ACTION_CAMERA,
@@ -169,6 +176,11 @@ _TARGET_LABELS = {
     "phan tich camera": ACTION_CAMERA_ANALYSIS,
     "kiem tra cam": ACTION_CAMERA_ANALYSIS,
     "kiem tra camera": ACTION_CAMERA_ANALYSIS,
+    "gui video camera": ACTION_CAMERA_VIDEO,
+    "xem video camera": ACTION_CAMERA_VIDEO,
+    "quay video camera": ACTION_CAMERA_VIDEO,
+    "gui video cam": ACTION_CAMERA_VIDEO,
+    "xem video cam": ACTION_CAMERA_VIDEO,
     "tao nhac hen": ACTION_REMINDER_CREATE,
     "tao nhac nho": ACTION_REMINDER_CREATE,
     "dat nhac hen": ACTION_REMINDER_CREATE,
@@ -654,6 +666,7 @@ def canonical_text(
         ACTION_ZALO_SEND: "gửi zalo",
         ACTION_SPEAKER_ANNOUNCE: "thông báo loa",
         ACTION_CAMERA_ANALYSIS: "phân tích camera",
+        ACTION_CAMERA_VIDEO: "gửi video camera",
         ACTION_LUNAR_DATE_CONVERT: "đổi ngày âm dương",
     }
     prefix = prefixes.get(action, "")

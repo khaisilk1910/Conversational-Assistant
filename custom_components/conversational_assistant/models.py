@@ -165,6 +165,123 @@ class Reminder:
 
 
 @dataclass(slots=True)
+class CameraSnapshotSchedule:
+    """Persistent camera snapshot schedule delivered to configured Zalo targets."""
+
+    schedule_id: str
+    camera_entity_ids: list[str]
+    camera_names: dict[str, str]
+    zalo_targets: list[dict[str, Any]]
+    created_at: datetime
+    next_run: datetime | None
+    recurrence: Recurrence
+    interval_minutes: int | None = None
+    owner_key: str | None = None
+    request_text: str = ""
+    last_run: datetime | None = None
+    last_result: str | None = None
+
+    @property
+    def is_recurring(self) -> bool:
+        """Return whether this snapshot schedule repeats."""
+        return bool(self.interval_minutes) or self.recurrence.kind != "none"
+
+    def as_dict(self) -> dict[str, Any]:
+        """Serialize the schedule for Home Assistant Store."""
+        return {
+            "schedule_id": self.schedule_id,
+            "camera_entity_ids": list(self.camera_entity_ids),
+            "camera_names": dict(self.camera_names),
+            "zalo_targets": [dict(item) for item in self.zalo_targets],
+            "created_at": self.created_at.isoformat(),
+            "next_run": self.next_run.isoformat() if self.next_run else None,
+            "recurrence": self.recurrence.as_dict(),
+            "interval_minutes": self.interval_minutes,
+            "owner_key": self.owner_key,
+            "request_text": self.request_text,
+            "last_run": self.last_run.isoformat() if self.last_run else None,
+            "last_result": self.last_result,
+        }
+
+    @classmethod
+    def from_dict(cls, data: dict[str, Any]) -> "CameraSnapshotSchedule":
+        """Deserialize and minimally validate one stored camera schedule."""
+
+        def parse(value: str | None) -> datetime | None:
+            if not value:
+                return None
+            parsed = dt_util.parse_datetime(value)
+            return dt_util.as_local(parsed) if parsed else None
+
+        schedule_id = str(data.get("schedule_id", "")).strip()
+        if not schedule_id:
+            raise ValueError("missing camera schedule id")
+
+        raw_entities = data.get("camera_entity_ids", [])
+        if not isinstance(raw_entities, list):
+            raise ValueError("invalid camera entity list")
+        camera_entity_ids = [
+            str(item).strip() for item in raw_entities if str(item).strip()
+        ]
+        if not camera_entity_ids:
+            raise ValueError("camera schedule has no camera entities")
+
+        raw_names = data.get("camera_names", {})
+        camera_names = (
+            {
+                str(key): str(value)
+                for key, value in raw_names.items()
+                if str(key).strip()
+            }
+            if isinstance(raw_names, dict)
+            else {}
+        )
+
+        raw_targets = data.get("zalo_targets", [])
+        if not isinstance(raw_targets, list):
+            raise ValueError("invalid Zalo target list")
+        zalo_targets = [
+            dict(item) for item in raw_targets if isinstance(item, dict)
+        ]
+        if not zalo_targets:
+            raise ValueError("camera schedule has no Zalo targets")
+
+        interval_minutes: int | None = None
+        raw_interval = data.get("interval_minutes")
+        if raw_interval not in (None, ""):
+            try:
+                interval_minutes = int(raw_interval)
+            except (TypeError, ValueError) as err:
+                raise ValueError("invalid camera schedule interval") from err
+            if interval_minutes <= 0:
+                raise ValueError("camera schedule interval must be positive")
+
+        created_at = parse(data.get("created_at")) or dt_util.now()
+        return cls(
+            schedule_id=schedule_id,
+            camera_entity_ids=camera_entity_ids,
+            camera_names=camera_names,
+            zalo_targets=zalo_targets,
+            created_at=created_at,
+            next_run=parse(data.get("next_run")),
+            recurrence=Recurrence.from_dict(data.get("recurrence")),
+            interval_minutes=interval_minutes,
+            owner_key=(
+                str(data.get("owner_key")).strip()
+                if data.get("owner_key")
+                else None
+            ),
+            request_text=str(data.get("request_text", "") or ""),
+            last_run=parse(data.get("last_run")),
+            last_result=(
+                str(data.get("last_result"))
+                if data.get("last_result") is not None
+                else None
+            ),
+        )
+
+
+@dataclass(slots=True)
 class Note:
     """Stored public or password-encrypted note."""
 
