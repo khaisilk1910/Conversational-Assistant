@@ -600,6 +600,8 @@ CAMERA_VIDEO_SENTENCES = [
     "[please ](send|show|record|get) [a ]camera video {request}",
     "[hãy ](gửi|xem|quay|ghi) video (camera|máy quay|cam)",
     "[hãy ](gửi|xem|quay|ghi) video (camera|máy quay|cam) {request}",
+    "[hãy ](xem|quay|ghi) (camera|máy quay|cam)",
+    "[hãy ](xem|quay|ghi) (camera|máy quay|cam) {request}",
     "[hãy ](gửi|xem|quay|ghi) (camera|máy quay|cam) video",
     "[hãy ](gửi|xem|quay|ghi) (camera|máy quay|cam) video {request}",
 ]

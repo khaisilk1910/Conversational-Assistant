@@ -73,6 +73,7 @@ from homeassistant.helpers.event import (
 )
 from homeassistant.helpers.start import async_at_started
 from homeassistant.helpers.storage import Store
+from homeassistant.setup import async_setup_component
 from homeassistant.util import dt as dt_util
 
 from .const import (
@@ -877,6 +878,16 @@ def _camera_video_request_tail(text: str) -> str | None:
         ("xem", "video", "camera"),
         ("xem", "video", "cam"),
         ("xem", "video", "may", "quay"),
+        # Natural Zalo/Voice forms: xem/ghi/quay cam means a short recording.
+        ("xem", "camera"),
+        ("xem", "cam"),
+        ("xem", "may", "quay"),
+        ("ghi", "camera"),
+        ("ghi", "cam"),
+        ("ghi", "may", "quay"),
+        ("quay", "camera"),
+        ("quay", "cam"),
+        ("quay", "may", "quay"),
         ("quay", "video", "camera"),
         ("quay", "video", "cam"),
         ("quay", "video", "may", "quay"),
@@ -911,12 +922,26 @@ def _split_camera_video_destination(text: str) -> tuple[str, str]:
     word_matches = list(re.finditer(r"[^\W_]+|\d+", raw, re.UNICODE))
     normalized_words = [normalize_text(match.group(0)) for match in word_matches]
     connectors = (
+        ("roi", "gui", "den", "zalo"),
+        ("roi", "gui", "zalo"),
+        ("roi", "gui", "cho"),
+        ("roi", "gui", "den"),
+        ("roi", "gui", "vao"),
+        ("roi", "gui", "ve"),
         ("gui", "den", "zalo"),
+        ("gui", "vao", "zalo"),
+        ("gui", "ve", "zalo"),
+        ("gui", "cho", "zalo"),
         ("gui", "zalo"),
         ("send", "to", "zalo"),
         ("send", "zalo"),
         ("zalo",),
         ("gui", "den"),
+        ("gui", "vao"),
+        ("gui", "ve"),
+        ("gui", "cho"),
+        ("gui", "sang"),
+        ("gui", "lai"),
         ("send", "to"),
         ("den",),
         ("toi",),
@@ -1058,6 +1083,14 @@ class PendingZaloCamera:
     destination_required: bool = False
     schedule_spec: CameraScheduleSpec | None = None
     schedule_request_text: str = ""
+
+
+@dataclass(slots=True)
+class PendingZaloClarification:
+    """Ambiguous feature request waiting for a clearer natural-language reply."""
+
+    features: tuple[str, ...]
+    expires_at: datetime
 
 
 @dataclass(slots=True, frozen=True)
@@ -1469,6 +1502,7 @@ class ConversationalAssistantManager(NoteManagerMixin):
         self._zalo_pending_creations: dict[str, PendingZaloReminder] = {}
         self._zalo_pending_deletions: dict[str, PendingZaloDeletion] = {}
         self._zalo_pending_cameras: dict[str, PendingZaloCamera] = {}
+        self._zalo_pending_clarifications: dict[str, PendingZaloClarification] = {}
         self._zalo_pending_camera_schedule_deletions: dict[
             str, PendingCameraScheduleDeletion
         ] = {}
@@ -1483,6 +1517,11 @@ class ConversationalAssistantManager(NoteManagerMixin):
         self._unsub_camera_schedule_timer: Callable[[], None] | None = None
         self._camera_schedule_tasks: set[asyncio.Task[Any]] = set()
         self._camera_schedule_locks: dict[str, asyncio.Lock] = {}
+        # Serialize this integration's own recordings for the same camera while
+        # unrelated cameras/users remain concurrent. Stream is loaded lazily on
+        # the first video request so integration startup does not pay that cost.
+        self._camera_video_record_locks: dict[str, asyncio.Lock] = {}
+        self._camera_video_stream_setup_lock = asyncio.Lock()
         self._zalo_pending_calendar_events: dict[
             str, PendingZaloCalendarEvent
         ] = {}
@@ -3024,6 +3063,7 @@ class ConversationalAssistantManager(NoteManagerMixin):
             self._zalo_pending_deletions.get(owner_key),
             self._zalo_pending_camera_schedule_deletions.get(owner_key),
             self._zalo_pending_cameras.get(owner_key),
+            self._zalo_pending_clarifications.get(owner_key),
             self._zalo_pending_device_powers.get(owner_key),
             self._zalo_pending_calendar_events.get(owner_key),
             self._zalo_pending_calendar_managements.get(owner_key),
@@ -5360,6 +5400,178 @@ class ConversationalAssistantManager(NoteManagerMixin):
                 return normalized[len(prefix) :].strip()
         return normalized
 
+    @staticmethod
+    def _related_feature_keys(text: str) -> tuple[str, ...]:
+        """Return deterministic feature hints for an ambiguous natural request."""
+        normalized = normalize_text(text)
+        if not normalized:
+            return ()
+        padded = f" {normalized} "
+
+        def has_any(*terms: str) -> bool:
+            return any(term in padded for term in terms)
+
+        camera = has_any(" cam ", " camera ", " may quay ")
+        features: list[str] = []
+        if camera and has_any(
+            " video ", " quay ", " ghi ", " record ", " xem cam ",
+            " xem camera ", " xem may quay ",
+        ):
+            features.append("camera_video")
+        if camera and has_any(
+            " chup ", " anh ", " hinh ", " snapshot ", " gui cam ",
+            " gui camera ",
+        ):
+            features.append("camera_capture")
+        if camera and has_any(" phan tich ", " kiem tra ", " analyze ", " analyse "):
+            features.append("camera_analysis")
+        if camera and has_any(
+            " hen ", " lich ", " moi ", " hang ngay ", " hang tuan ",
+            " lap ", " dinh ky ",
+        ):
+            features.append("camera_schedule")
+        if camera and not features:
+            features.extend(("camera_capture", "camera_video", "camera_analysis"))
+
+        if has_any(
+            " thoi tiet ", " du bao ", " mua ", " bao so ", " bao bien ",
+            " bao nhiet doi ", " con bao ", " ap thap ", " uv ",
+        ):
+            features.append("weather")
+        if has_any(
+            " loa ", " tts ", " doc loa ", " bao ra loa ", " thong bao loa ",
+        ):
+            features.append("speaker")
+        if has_any(" zalo ", " gui zalo ", " thong bao zalo ", " bao zalo ") and not camera:
+            features.append("zalo_send")
+        if has_any(" ghi chu ", " note ", " memo "):
+            features.append("note")
+        if has_any(" su kien ", " cuoc hop ", " cuoc hen ", " calendar "):
+            features.append("calendar")
+        if has_any(" am lich ", " duong lich ", " lich am ", " lich duong "):
+            features.append("lunar")
+        if has_any(" tim kiem ", " tim tren mang ", " tra cuu ", " internet "):
+            features.append("search")
+        if has_any(" tao anh ", " tao buc anh ", " generate image ", " draw image "):
+            features.append("image_generation")
+        if has_any(" tro chuyen ", " tam di ", " buon di ", " chat "):
+            features.append("chat")
+
+        device_words = (
+            " thiet bi ", " den ", " quat ", " dieu hoa ", " climate ",
+            " fan ", " switch ", " cua ", " khoa ", " robot ",
+        )
+        device_actions = (
+            " bat ", " tat ", " mo ", " dong ", " tang ", " giam ",
+            " chinh ", " dat ", " chuyen ", " doi ", " trang thai ",
+        )
+        if has_any(*device_words) and has_any(*device_actions):
+            features.append("device")
+
+        if not camera and has_any(
+            " nhac ", " nhac nho ", " nhac hen ", " hen gio ", " loi nhac ",
+        ):
+            features.append("reminder")
+
+        # Preserve feature priority while avoiding a wall of unrelated hints.
+        return tuple(dict.fromkeys(features))[:4]
+
+    @staticmethod
+    def _feature_clarification_text(
+        features: tuple[str, ...], *, retry: bool = False
+    ) -> str:
+        """Build a short feature-specific clarification with natural examples."""
+        guides = {
+            "camera_capture": (
+                "📸 Chụp ảnh camera",
+                "`Chụp Cam Bếp` · `Chụp Cam Bếp gửi Zalo Khải` · "
+                "`Chụp Cam Bếp và Cam Cổng gửi Zalo Khải`",
+            ),
+            "camera_video": (
+                "🎥 Ghi/xem video camera",
+                "`Xem Cam Bếp` · `Ghi Camera Cổng` · "
+                "`Quay Cam Bếp gửi Zalo Khải` · `Gửi video Cam Bếp đến Zalo Khải`",
+            ),
+            "camera_analysis": (
+                "🔎 Phân tích camera",
+                "`Phân tích Cam Cổng` · `Kiểm tra Camera Bếp`",
+            ),
+            "camera_schedule": (
+                "⏱️ Lịch chụp camera",
+                "`Hẹn 5 phút nữa chụp Cam Bếp gửi Zalo Khải` · "
+                "`Hẹn mỗi 5 phút chụp Cam Bếp gửi Zalo Khải` · "
+                "`Xem lịch chụp camera`",
+            ),
+            "device": (
+                "🏠 Thiết bị",
+                "`Tắt quạt phòng ngủ` · `Đặt điều hòa phòng khách 26 độ` · "
+                "`Tắt quạt sau 30 phút`",
+            ),
+            "weather": (
+                "🌦️ Thời tiết",
+                "`Thời tiết ngày mai` · `3 ngày tới có mưa không` · `Kiểm tra bão`",
+            ),
+            "reminder": (
+                "⏰ Nhắc hẹn",
+                "`Nhắc tôi 5 phút nữa uống thuốc` · `List danh sách nhắc hẹn` · "
+                "`Xóa nhắc hẹn`",
+            ),
+            "calendar": (
+                "📅 Lịch/sự kiện",
+                "`Xem lịch ngày mai` · `Thêm sự kiện 15 giờ mai họp sale`",
+            ),
+            "speaker": (
+                "🔊 Thông báo loa",
+                "`Báo loa Phòng Ngủ xuống ăn cơm`",
+            ),
+            "zalo_send": (
+                "📨 Gửi Zalo",
+                "`Thông báo Zalo Khải xuống ăn cơm`",
+            ),
+            "note": (
+                "📝 Ghi chú",
+                "`Ghi chú mua sữa` · `Xem ghi chú` · `Xóa ghi chú mua sữa`",
+            ),
+            "search": (
+                "🔍 Tìm kiếm Internet",
+                "`Tìm thông tin giá vàng hôm nay`",
+            ),
+            "image_generation": (
+                "🎨 Tạo ảnh AI",
+                "`Tạo ảnh ngôi nhà bên hồ`",
+            ),
+            "lunar": (
+                "🌙 Âm dương lịch",
+                "`Đổi 30/11/1984 sang âm lịch` · `Hôm nay âm lịch ngày mấy`",
+            ),
+            "chat": (
+                "💬 Trò chuyện AI",
+                "`Trò chuyện đi`",
+            ),
+        }
+        lines = [
+            (
+                "⚠️ Tôi vẫn chưa đủ thông tin để thực hiện chính xác."
+                if retry
+                else "🤔 Tôi nhận ra yêu cầu có liên quan đến tính năng của tích hợp, "
+                "nhưng nội dung chưa đủ rõ để thực hiện an toàn."
+            ),
+            "",
+            "Hãy nói lại rõ hành động + đối tượng + thời gian/nơi nhận (nếu có).",
+        ]
+        for feature in features:
+            guide = guides.get(feature)
+            if guide is None:
+                continue
+            title, examples = guide
+            lines.extend(("", title, f"Ví dụ: {examples}"))
+        lines.extend((
+            "",
+            "⏳ Tôi sẽ chờ câu trả lời tiếp theo trong 120 giây; không cần nhập lại "
+            "từ khóa gọi Zalo. Gửi **Hủy** để dừng.",
+        ))
+        return "\n".join(lines)
+
     def _integration_commands_text(self) -> str:
         """Return the compact keyword catalog with one example per feature."""
         keyword = self._zalo_invocation_keyword_markdown()
@@ -5409,13 +5621,16 @@ class ConversationalAssistantManager(NoteManagerMixin):
             "VD: `Chụp Cam Bếp gửi Zalo Khải`\n\n"
             "⏱️ **Hẹn chụp camera → Zalo** — hẹn một lần hoặc lặp theo phút, "
             "giờ, hằng ngày và các chu kỳ thời gian được parser nhắc hẹn hỗ trợ. "
-            "Có thể xem danh sách và xóa sau bước xác nhận.\n"
+            "Có thể xem danh sách và xóa sau bước xác nhận. Sensor `Số lịch "
+            "chụp camera` hiển thị tổng số và chi tiết lịch trong attributes.\n"
             "VD: `Hẹn mỗi 5 phút chụp Cam Bếp gửi Zalo Khải`\n"
-            "VD xem: `Xem lịch chụp camera`\n\n"
-            "🎥 **Video camera → Zalo** — gửi/xem/quay/ghi video cam/camera "
-            "đến tên Zalo đã đặt. Video quay 10 giây; thiếu hoặc chưa rõ camera "
-            "hay Zalo sẽ hiện danh sách để chọn.\n"
-            "VD: `Gửi video Cam Bếp đến Zalo Khải`\n\n"
+            "VD xem: `Xem lịch chụp camera` · VD xóa: `Xóa lịch chụp camera`\n\n"
+            "🎥 **Video camera → Zalo** — gửi/xem/quay/ghi video cam/camera; "
+            "cũng hiểu cách nói tự nhiên `Xem Cam Bếp`, `Ghi Camera Cổng`, "
+            "`Quay Cam Sân`. Trên Zalo, nếu không nêu nơi nhận thì video 10 "
+            "giây được gửi về chính cuộc trò chuyện đang yêu cầu; nếu nêu Zalo "
+            "đích thì gửi đúng tên đã đặt. Chưa rõ camera/Zalo sẽ hỏi lại.\n"
+            "VD: `Xem Cam Bếp` hoặc `Gửi video Cam Bếp đến Zalo Khải`\n\n"
             "🔎 **Phân tích camera** — phân tích cam/camera, kiểm tra "
             "cam/camera, xem và phân tích cam/camera.\n"
             "VD: `Phân tích Cam Cổng`\n\n"
@@ -5438,7 +5653,9 @@ class ConversationalAssistantManager(NoteManagerMixin):
             "dừng yêu cầu, dừng phiên, kết thúc phiên, bỏ yêu cầu vừa rồi.\n"
             "VD: `Hủy`\n\n"
             "⚙️ **Nguyên tắc xử lý** — ưu tiên parser, entity và action có sẵn "
-            "của Home Assistant; AI/AI Search chỉ là dự phòng. Mỗi tài khoản "
+            "của Home Assistant; AI/AI Search chỉ là dự phòng. Yêu cầu rõ thì "
+            "thực hiện ngay; yêu cầu còn mơ hồ nhưng có liên quan tính năng sẽ "
+            "hỏi lại kèm ví dụ đúng tính năng và chờ 120 giây. Mỗi tài khoản "
             "Zalo, nhóm, người gửi và nguồn Voice có phiên riêng.\n\n"
             "💡 Tên Mobile, Zalo, loa và camera là tên đã đặt trong Settings."
         )
@@ -5460,8 +5677,10 @@ class ConversationalAssistantManager(NoteManagerMixin):
             "🔑 **Gọi tích hợp**\n"
             f"{zalo_rule}"
             "• Gửi `Hướng dẫn tích hợp` để xem hướng dẫn này.\n"
-            "• Nếu nội dung sau từ khóa gọi Zalo không khớp tính năng nào, "
-            "tích hợp sẽ tự phản hồi danh sách lệnh.\n"
+            "• Nếu nội dung sau từ khóa gọi Zalo còn mơ hồ nhưng có dấu hiệu "
+            "liên quan một tính năng, tích hợp sẽ hỏi lại kèm ví dụ đúng tính "
+            "năng và chờ 120 giây. Chỉ khi không nhận ra tính năng nào mới hiện "
+            "toàn bộ danh sách lệnh.\n"
             "• Gửi `Lệnh tích hợp`, `Các lệnh tích hợp`, "
             "`Xem lệnh tích hợp` hoặc `Xem lệnh của tích hợp` để xem toàn bộ "
             "từ khóa; mỗi tính năng có một ví dụ.\n\n"
@@ -5511,9 +5730,14 @@ class ConversationalAssistantManager(NoteManagerMixin):
             "Zalo Khải`, `Hẹn mỗi 5 phút...`, `Hẹn 15 giờ 30 hàng ngày...`.\n"
             "• Dùng `Xem lịch chụp camera` để xem; `Xóa lịch chụp camera` sẽ "
             "liệt kê, chờ chọn và yêu cầu xác nhận trước khi xóa.\n"
-            "• Có thể quay video 10 giây rồi gửi đến Zalo đã đặt; nếu camera "
-            "hoặc Zalo chưa rõ, tích hợp liệt kê để chọn trước khi thực hiện.\n"
-            "• Ví dụ: `Gửi video Cam Bếp đến Zalo Khải`.\n\n"
+            "• Video 10 giây: `Xem Cam Bếp`, `Ghi Camera Cổng`, `Quay Cam Sân` "
+            "hoặc `Gửi video Cam Bếp đến Zalo Khải`. Trên Zalo, không nêu đích "
+            "thì gửi về chính nhóm/cuộc trò chuyện đang yêu cầu; Voice Assist "
+            "vẫn cần Zalo đích đã cấu hình.\n"
+            "• Khi ghi video, tích hợp dùng `camera.record`, tự bảo đảm `stream` "
+            "sẵn sàng theo yêu cầu, chờ file hoàn tất rồi mới gọi "
+            "`zalo_bot.send_video`. Cùng một camera được xếp tuần tự để tránh "
+            "hai phiên ghi đè nhau; camera khác vẫn chạy song song.\n\n"
             "⚙️ **Thứ tự xử lý và đa luồng**\n"
             "• Ưu tiên parser, entity và action có sẵn của Home Assistant; AI "
             "chỉ dùng khi không phân tích được, AI Search chỉ dùng khi cần dữ "
@@ -5666,6 +5890,18 @@ class ConversationalAssistantManager(NoteManagerMixin):
             return None
         if pending.expires_at <= dt_util.now():
             self._zalo_pending_cameras.pop(owner_key, None)
+            return None
+        return pending
+
+    def _zalo_pending_clarification(
+        self, owner_key: str
+    ) -> PendingZaloClarification | None:
+        """Return a non-expired ambiguous-feature clarification flow."""
+        pending = self._zalo_pending_clarifications.get(owner_key)
+        if pending is None:
+            return None
+        if pending.expires_at <= dt_util.now():
+            self._zalo_pending_clarifications.pop(owner_key, None)
             return None
         return pending
 
@@ -5952,14 +6188,28 @@ class ConversationalAssistantManager(NoteManagerMixin):
     async def _async_send_unknown_command_catalog_to_zalo(
         self, context: ZaloWebhookContext
     ) -> ZaloDirectResponse:
-        """Explain an unknown keyword-prefixed request and show all commands."""
+        """Clarify related features first; otherwise show the full command catalog."""
         self._clear_zalo_pending_for_owner(context.owner_key)
-        message = (
-            "⚠️ **YÊU CẦU CHƯA ĐÚNG TỪ KHÓA TÍNH NĂNG**\n\n"
-            "Tôi chưa nhận ra tính năng cần thực hiện. Hãy dùng một trong "
-            "các từ khóa dưới đây:\n\n"
-            f"{self._integration_commands_text()}"
-        )
+        features = self._related_feature_keys(context.text)
+        if features:
+            self._zalo_pending_clarifications[context.owner_key] = (
+                PendingZaloClarification(
+                    features=features,
+                    expires_at=dt_util.now()
+                    + timedelta(seconds=PENDING_CONFIRMATION_TIMEOUT_SECONDS),
+                )
+            )
+            message = self._feature_clarification_text(features)
+            self._schedule_pending_expiry()
+            response_type = "feature_clarification"
+        else:
+            message = (
+                "⚠️ **YÊU CẦU CHƯA ĐỦ RÕ**\n\n"
+                "Tôi chưa nhận ra tính năng cần thực hiện. Hãy dùng một trong "
+                "các cách nói dưới đây:\n\n"
+                f"{self._integration_commands_text()}"
+            )
+            response_type = "unknown_command_catalog"
         sent = await self._async_send_zalo_webhook_reply(
             context,
             message,
@@ -5967,14 +6217,12 @@ class ConversationalAssistantManager(NoteManagerMixin):
         )
         if not sent:
             _LOGGER.error(
-                "Failed sending unknown-command catalog to Zalo thread %s "
+                "Failed sending unknown-command guidance to Zalo thread %s "
                 "with account %s",
                 context.thread_id,
                 self._zalo_account_selection_for_context(context),
             )
-        return ZaloDirectResponse(
-            sent=sent, response_type="unknown_command_catalog"
-        )
+        return ZaloDirectResponse(sent=sent, response_type=response_type)
 
     @staticmethod
     def _split_zalo_text(
@@ -6696,6 +6944,108 @@ class ConversationalAssistantManager(NoteManagerMixin):
             if 0 <= index < len(zalo_targets)
         ]
 
+    @staticmethod
+    def _camera_video_destination_is_current(text: str) -> bool:
+        """Return whether a destination phrase means the originating Zalo chat."""
+        normalized = normalize_text(_strip_camera_video_destination_connector(text))
+        return normalized in {
+            "day", "ngay day", "o day", "toi", "hien tai",
+            "zalo hien tai", "zalo nay", "nhom hien tai", "nhom nay",
+            "cuoc tro chuyen nay", "cuoc tro chuyen hien tai",
+            "chat nay", "chat hien tai", "this chat", "current chat",
+        }
+
+    def _camera_video_current_zalo_target(
+        self, context: ZaloWebhookContext
+    ) -> dict[str, Any] | None:
+        """Return the inbound Zalo conversation as a video destination."""
+        account_selection = self._zalo_account_selection_for_context(context)
+        if not account_selection or not context.thread_id:
+            return None
+        target = self._zalo_target_for_context(context, account_selection)
+        target[CONF_ZALO_TARGET_NAME] = (
+            "nhóm hiện tại"
+            if context.thread_type == ZALO_TYPE_GROUP
+            else f"{context.display_name} (cuộc trò chuyện này)"
+        )
+        return target
+
+    def _camera_video_destination_candidates(
+        self, context: ZaloWebhookContext, configured: list[dict[str, Any]]
+    ) -> list[dict[str, Any]]:
+        """Return current Zalo chat plus configured destinations without duplicates."""
+        candidates: list[dict[str, Any]] = []
+        current = self._camera_video_current_zalo_target(context)
+        if current is not None:
+            candidates.append(current)
+        seen = {
+            (
+                str(item.get(CONF_ZALO_TYPE, DEFAULT_ZALO_TYPE)).strip(),
+                str(item.get(CONF_ZALO_THREAD_ID, "")).strip(),
+                str(item.get(CONF_ZALO_ACCOUNT_SELECTION, "")).strip(),
+            )
+            for item in candidates
+        }
+        for target in configured:
+            key = (
+                str(target.get(CONF_ZALO_TYPE, DEFAULT_ZALO_TYPE)).strip(),
+                str(target.get(CONF_ZALO_THREAD_ID, "")).strip(),
+                str(target.get(CONF_ZALO_ACCOUNT_SELECTION, "")).strip(),
+            )
+            if key in seen:
+                continue
+            seen.add(key)
+            candidates.append(dict(target))
+        return candidates
+
+    def _current_camera_video_zalo_targets(
+        self, context: ZaloWebhookContext, originals: list[dict[str, Any]]
+    ) -> list[dict[str, Any]]:
+        """Refresh video destinations while preserving the originating Zalo chat."""
+        current = self._camera_video_current_zalo_target(context)
+        refreshed_configured = self._current_configured_zalo_targets(originals)
+        result: list[dict[str, Any]] = []
+        seen: set[tuple[str, str, str]] = set()
+        for original in originals:
+            original_key = (
+                str(original.get(CONF_ZALO_TYPE, DEFAULT_ZALO_TYPE)).strip(),
+                str(original.get(CONF_ZALO_THREAD_ID, "")).strip(),
+                str(original.get(CONF_ZALO_ACCOUNT_SELECTION, "")).strip(),
+            )
+            candidate = None
+            if current is not None:
+                current_key = (
+                    str(current.get(CONF_ZALO_TYPE, DEFAULT_ZALO_TYPE)).strip(),
+                    str(current.get(CONF_ZALO_THREAD_ID, "")).strip(),
+                    str(current.get(CONF_ZALO_ACCOUNT_SELECTION, "")).strip(),
+                )
+                if original_key == current_key:
+                    candidate = current
+            if candidate is None:
+                candidate = next(
+                    (
+                        item for item in refreshed_configured
+                        if (
+                            str(item.get(CONF_ZALO_TYPE, DEFAULT_ZALO_TYPE)).strip(),
+                            str(item.get(CONF_ZALO_THREAD_ID, "")).strip(),
+                            str(item.get(CONF_ZALO_ACCOUNT_SELECTION, "")).strip(),
+                        ) == original_key
+                    ),
+                    None,
+                )
+            if candidate is None:
+                continue
+            key = (
+                str(candidate.get(CONF_ZALO_TYPE, DEFAULT_ZALO_TYPE)).strip(),
+                str(candidate.get(CONF_ZALO_THREAD_ID, "")).strip(),
+                str(candidate.get(CONF_ZALO_ACCOUNT_SELECTION, "")).strip(),
+            )
+            if key in seen:
+                continue
+            seen.add(key)
+            result.append(dict(candidate))
+        return result
+
     def _current_configured_zalo_targets(
         self, originals: list[dict[str, Any]]
     ) -> list[dict[str, Any]]:
@@ -6742,14 +7092,19 @@ class ConversationalAssistantManager(NoteManagerMixin):
     async def _async_camera_video_from_zalo(
         self, context: ZaloWebhookContext, service_context: Context | None = None
     ) -> str:
-        """Record a 10-second camera clip and send it to configured Zalo."""
+        """Record a short camera clip and send it to the requested/current Zalo."""
         self._clear_zalo_pending_for_owner(context.owner_key)
-        zalo_targets = self._configured_zalo_targets()
-        if not zalo_targets:
+        configured_targets = self._configured_zalo_targets()
+        current_target = self._camera_video_current_zalo_target(context)
+        candidate_targets = self._camera_video_destination_candidates(
+            context, configured_targets
+        )
+        if current_target is None and not configured_targets:
             return (
-                "Chưa có Zalo destination nào được cấu hình. Hãy thêm ít nhất "
-                "một Zalo trong General settings."
+                "Chưa xác định được tài khoản Zalo để gửi video. Hãy kiểm tra "
+                "account của webhook hoặc cấu hình Zalo trong General settings."
             )
+
         cameras = self._discovered_camera_targets()
         if not cameras:
             return (
@@ -6761,9 +7116,23 @@ class ConversationalAssistantManager(NoteManagerMixin):
         camera_indexes, destination_text = self._camera_video_direct_camera(
             tail, cameras
         )
-        selected_zalo = self._camera_video_direct_zalo_targets(
-            destination_text, zalo_targets
-        )
+
+        selected_zalo: list[dict[str, Any]] = []
+        if destination_text:
+            if (
+                current_target is not None
+                and self._camera_video_destination_is_current(destination_text)
+            ):
+                selected_zalo = [current_target]
+            else:
+                selected_zalo = self._camera_video_direct_zalo_targets(
+                    destination_text, configured_targets
+                )
+        elif current_target is not None:
+            # On Zalo, no explicit destination always means this conversation.
+            selected_zalo = [current_target]
+
+        destination_unknown = bool(destination_text and not selected_zalo)
 
         if camera_indexes:
             selected = [cameras[index] for index in camera_indexes]
@@ -6775,7 +7144,8 @@ class ConversationalAssistantManager(NoteManagerMixin):
                 self._zalo_pending_cameras[context.owner_key] = PendingZaloCamera(
                     cameras=cameras,
                     zalo_targets=[
-                        dict(target) for target in (selected_zalo or zalo_targets)
+                        dict(target)
+                        for target in (selected_zalo or candidate_targets)
                     ],
                     phase="selection",
                     mode="video",
@@ -6789,6 +7159,7 @@ class ConversationalAssistantManager(NoteManagerMixin):
                     + ". Hãy chọn camera khác.\n"
                     + self._camera_video_selection_prompt(cameras)
                 )
+
             if selected_zalo:
                 response = await self._async_record_and_send_camera_videos(
                     context.owner_key, available, selected_zalo, service_context
@@ -6804,18 +7175,26 @@ class ConversationalAssistantManager(NoteManagerMixin):
             self._zalo_pending_cameras[context.owner_key] = PendingZaloCamera(
                 cameras=cameras,
                 selected_cameras=available,
-                zalo_targets=[dict(target) for target in zalo_targets],
+                zalo_targets=[dict(target) for target in candidate_targets],
                 phase="destination",
                 mode="video",
                 expires_at=dt_util.now()
                 + timedelta(seconds=PENDING_CONFIRMATION_TIMEOUT_SECONDS),
             )
-            return self._camera_video_destination_prompt(available, zalo_targets)
+            prompt = self._camera_video_destination_prompt(
+                available, candidate_targets
+            )
+            if destination_unknown:
+                prompt = (
+                    f"Chưa xác định chắc chắn Zalo đích '{destination_text}'.\n"
+                    + prompt
+                )
+            return prompt
 
         self._zalo_pending_cameras[context.owner_key] = PendingZaloCamera(
             cameras=cameras,
             zalo_targets=[
-                dict(target) for target in (selected_zalo or zalo_targets)
+                dict(target) for target in (selected_zalo or candidate_targets)
             ],
             phase="selection",
             mode="video",
@@ -6824,10 +7203,15 @@ class ConversationalAssistantManager(NoteManagerMixin):
             + timedelta(seconds=PENDING_CONFIRMATION_TIMEOUT_SECONDS),
         )
         prompt = self._camera_video_selection_prompt(cameras)
-        if destination_text and not selected_zalo:
+        if destination_unknown:
             prompt = (
-                "Chưa xác định chắc chắn Zalo đích nên tôi sẽ hỏi lại sau khi "
-                "chọn camera.\n" + prompt
+                f"Chưa xác định chắc chắn Zalo đích '{destination_text}'. "
+                "Sau khi chọn camera tôi sẽ hỏi lại nơi nhận.\n" + prompt
+            )
+        elif selected_zalo and not destination_text:
+            prompt = (
+                "Video sẽ được gửi về chính cuộc trò chuyện Zalo này sau khi "
+                "bạn chọn camera.\n" + prompt
             )
         return prompt
 
@@ -8159,13 +8543,78 @@ class ConversationalAssistantManager(NoteManagerMixin):
             return None, f"{camera.display_name}: không tạo được file ảnh"
         return image_path, None
 
+    async def _async_ensure_camera_stream_component(
+        self,
+    ) -> tuple[bool, str | None]:
+        """Load Home Assistant stream lazily when a video request needs it."""
+        if "stream" in self.hass.config.components:
+            return True, None
+        async with self._camera_video_stream_setup_lock:
+            if "stream" in self.hass.config.components:
+                return True, None
+            try:
+                async with asyncio.timeout(CAMERA_VIDEO_SERVICE_TIMEOUT_SECONDS):
+                    ready = await async_setup_component(self.hass, "stream", {})
+            except TimeoutError:
+                _LOGGER.warning("Timed out while lazily setting up stream integration")
+                return False, "stream integration khởi tạo quá thời gian"
+            except Exception as err:  # noqa: BLE001 - report request failure only
+                _LOGGER.exception("Failed to lazily set up stream integration")
+                raw_detail = str(err).strip()
+                detail = raw_detail.splitlines()[0][:160] if raw_detail else ""
+                return False, (
+                    "không khởi tạo được stream integration"
+                    + (f" ({detail})" if detail else "")
+                )
+            if not ready:
+                return False, "Home Assistant không khởi tạo được stream integration"
+        return True, None
+
+    @staticmethod
+    def _camera_video_record_error_text(camera_name: str, err: Exception) -> str:
+        """Turn a Home Assistant camera.record exception into an actionable reply."""
+        raw = str(err).strip()
+        normalized = normalize_text(raw)
+        prefix = f"{camera_name}: "
+        if isinstance(err, TimeoutError):
+            return prefix + "camera.record quá thời gian chờ"
+        if "stream integration" in normalized and (
+            "not set up" in normalized or "not setup" in normalized
+        ):
+            return prefix + "stream integration chưa sẵn sàng"
+        if (
+            "does not support record" in normalized
+            or "not support record" in normalized
+        ):
+            return prefix + "camera không hỗ trợ ghi video/stream"
+        if "already recording" in normalized:
+            return prefix + "camera đang có một phiên ghi video khác"
+        if any(
+            term in normalized
+            for term in (
+                "not allowed path",
+                "not allowed to write",
+                "no access to path",
+                "permission denied",
+                "cant write",
+                "cannot write",
+            )
+        ):
+            return prefix + "Home Assistant không có quyền ghi file video vào media"
+        if raw:
+            # Keep the Zalo reply useful without dumping paths/tracebacks.
+            first_line = raw.splitlines()[0]
+            first_line = re.sub(r"/(?:[^\s/]+/)+[^\s]+", "<path>", first_line)
+            return prefix + "camera.record lỗi: " + first_line[:180]
+        return prefix + "camera.record thất bại"
+
     async def _async_record_camera_video(
         self,
         owner_key: str,
         camera: CameraTarget,
         service_context: Context | None,
     ) -> tuple[str | None, str | None]:
-        """Record one short camera clip and return its /media path."""
+        """Record one short camera clip and return its local filesystem path."""
         camera_state = self.hass.states.get(camera.entity_id)
         if (
             camera_state is None
@@ -8175,46 +8624,102 @@ class ConversationalAssistantManager(NoteManagerMixin):
         if not self.hass.services.has_service("camera", "record"):
             return None, "Action camera.record chưa sẵn sàng trên Home Assistant"
 
-        media_root = self.hass.config.media_dirs.get("local", "/media")
-        filename, video_path = self._camera_video_paths(
-            media_root, owner_key, camera
-        )
-        try:
-            await self.hass.async_add_executor_job(
-                _prepare_camera_snapshot_path, filename
-            )
-            await self._async_call_service(
-                "camera",
-                "record",
-                {
-                    "filename": filename,
-                    "duration": CAMERA_VIDEO_DURATION_SECONDS,
-                    "lookback": CAMERA_VIDEO_LOOKBACK_SECONDS,
-                },
-                target={"entity_id": camera.entity_id},
-                blocking=True,
-                context=service_context,
-                timeout_seconds=CAMERA_VIDEO_SERVICE_TIMEOUT_SECONDS,
-            )
-            # Most camera platforms return after the clip is finalized, but a
-            # short bounded check also covers implementations that flush the
-            # file immediately after the action returns.
-            for _attempt in range(10):
-                file_ready = await self.hass.async_add_executor_job(
-                    lambda path=filename: (
-                        os.path.isfile(path) and os.path.getsize(path) > 0
-                    )
-                )
-                if file_ready:
-                    return video_path, None
-                await asyncio.sleep(0.5)
-        except Exception:  # noqa: BLE001 - return a per-camera failure
-            _LOGGER.exception(
-                "Failed recording camera video from %s", camera.entity_id
-            )
-            return None, f"{camera.display_name}: không quay được video"
+        stream_ready, stream_error = await self._async_ensure_camera_stream_component()
+        if not stream_ready:
+            return None, f"{camera.display_name}: {stream_error}"
 
-        return None, f"{camera.display_name}: không tạo được file video"
+        # Serialize this integration's own requests for the same camera so two
+        # Zalo/Voice flows do not start competing recordings at the same instant.
+        # Requests for different camera entities still run in parallel.
+        lock = self._camera_video_record_locks.setdefault(
+            camera.entity_id, asyncio.Lock()
+        )
+        async with lock:
+            # Re-check after waiting for another request using the same camera.
+            camera_state = self.hass.states.get(camera.entity_id)
+            if (
+                camera_state is None
+                or camera_state.state in {STATE_UNAVAILABLE, STATE_UNKNOWN}
+            ):
+                return None, f"{camera.display_name}: camera không khả dụng"
+
+            media_root = self.hass.config.media_dirs.get("local", "/media")
+            filename, _media_path = self._camera_video_paths(
+                media_root, owner_key, camera
+            )
+            # Home Assistant only applies lookback when an HLS stream is
+            # already active. Starting a new recorder with a non-zero lookback
+            # on an idle camera provides no history and can be less compatible
+            # with camera platforms, so request lookback only while streaming.
+            record_lookback = (
+                CAMERA_VIDEO_LOOKBACK_SECONDS
+                if normalize_text(camera_state.state) == "streaming"
+                else 0
+            )
+            try:
+                await self.hass.async_add_executor_job(
+                    _prepare_camera_snapshot_path, filename
+                )
+
+                # A camera platform or another automation may temporarily reject
+                # an overlapping recording. Retry that specific HA error briefly;
+                # surface every other camera.record failure unchanged to the caller.
+                for attempt in range(7):
+                    try:
+                        record_data: dict[str, Any] = {
+                            "filename": filename,
+                            "duration": CAMERA_VIDEO_DURATION_SECONDS,
+                        }
+                        if record_lookback > 0:
+                            record_data["lookback"] = record_lookback
+                        await self._async_call_service(
+                            "camera",
+                            "record",
+                            record_data,
+                            target={"entity_id": camera.entity_id},
+                            blocking=True,
+                            context=service_context,
+                            timeout_seconds=CAMERA_VIDEO_SERVICE_TIMEOUT_SECONDS,
+                        )
+                        break
+                    except Exception as err:  # noqa: BLE001 - inspect HA error text
+                        if (
+                            "already recording" in normalize_text(str(err))
+                            and attempt < 6
+                        ):
+                            await asyncio.sleep(2)
+                            continue
+                        raise
+
+                # camera.record normally returns after the recorder is finalized.
+                # Keep a bounded readiness check for platforms/filesystems that make
+                # the completed file visible a moment later.
+                for _attempt in range(20):
+                    file_ready = await self.hass.async_add_executor_job(
+                        lambda path=filename: (
+                            os.path.isfile(path) and os.path.getsize(path) > 0
+                        )
+                    )
+                    if file_ready:
+                        # zalo_bot.send_video expects a local path or URL. Pass
+                        # the same real filesystem path camera.record wrote, not
+                        # a synthesized /media alias that may differ when the
+                        # user configured a custom local media directory.
+                        return filename, None
+                    await asyncio.sleep(0.5)
+            except Exception as err:  # noqa: BLE001 - return a per-camera failure
+                _LOGGER.exception(
+                    "Failed recording camera video from %s", camera.entity_id
+                )
+                return None, self._camera_video_record_error_text(
+                    camera.display_name, err
+                )
+
+        return (
+            None,
+            f"{camera.display_name}: camera.record đã chạy nhưng không tạo file "
+            "video có dữ liệu trong thư mục media",
+        )
 
     async def _async_send_camera_videos_to_configured_zalo(
         self,
@@ -8271,14 +8776,21 @@ class ConversationalAssistantManager(NoteManagerMixin):
                         context=service_context,
                         timeout_seconds=CAMERA_VIDEO_SEND_TIMEOUT_SECONDS,
                     )
-                except Exception:  # noqa: BLE001 - continue other targets
+                except Exception as err:  # noqa: BLE001 - continue other targets
                     _LOGGER.exception(
                         "Failed sending camera video %s to Zalo target %s",
                         camera_name,
                         thread_id,
                     )
+                    raw_detail = str(err).strip()
+                    detail = raw_detail.splitlines()[0] if raw_detail else ""
+                    if detail:
+                        detail = re.sub(
+                            r"/(?:[^\s/]+/)+[^\s]+", "<path>", detail
+                        )[:160]
                     failures.append(
                         f"{target_name}: gửi video {camera_name} thất bại"
+                        + (f" ({detail})" if detail else "")
                     )
                     target_failed = True
                     break
@@ -8970,14 +9482,14 @@ class ConversationalAssistantManager(NoteManagerMixin):
 
             pending.selected_cameras = available
             if pending.destination_preselected and pending.zalo_targets:
-                current_targets = self._current_configured_zalo_targets(
-                    pending.zalo_targets
+                current_targets = self._current_camera_video_zalo_targets(
+                    context, pending.zalo_targets
                 )
                 if not current_targets:
                     self._zalo_pending_cameras.pop(context.owner_key, None)
                     return (
-                        "Zalo đích đã bị xóa hoặc tắt trong lúc chờ chọn camera. "
-                        "Hãy cấu hình lại rồi yêu cầu lại."
+                        "Zalo đích không còn khả dụng trong lúc chờ chọn camera. "
+                        "Hãy yêu cầu lại hoặc chọn Zalo khác."
                     )
                 self._zalo_pending_cameras.pop(context.owner_key, None)
                 response = await self._async_record_and_send_camera_videos(
@@ -8994,12 +9506,14 @@ class ConversationalAssistantManager(NoteManagerMixin):
                     )
                 return response
 
-            current_targets = self._configured_zalo_targets()
+            current_targets = self._camera_video_destination_candidates(
+                context, self._configured_zalo_targets()
+            )
             if not current_targets:
                 self._zalo_pending_cameras.pop(context.owner_key, None)
                 return (
-                    "Các Zalo destination đã bị xóa hoặc tắt. Hãy cấu hình lại "
-                    "rồi thực hiện yêu cầu quay video camera."
+                    "Không còn Zalo nào khả dụng để gửi video. Hãy kiểm tra "
+                    "tài khoản webhook hoặc cấu hình Zalo."
                 )
             pending.zalo_targets = [dict(target) for target in current_targets]
             pending.phase = "destination"
@@ -9019,10 +9533,16 @@ class ConversationalAssistantManager(NoteManagerMixin):
             return response
 
         if pending.phase == "destination":
-            current_targets = self._configured_zalo_targets()
+            current_targets = self._current_camera_video_zalo_targets(
+                context, pending.zalo_targets
+            )
+            if not current_targets:
+                current_targets = self._camera_video_destination_candidates(
+                    context, self._configured_zalo_targets()
+                )
             if not current_targets:
                 self._zalo_pending_cameras.pop(context.owner_key, None)
-                return "Không còn Zalo destination nào đang bật để gửi video."
+                return "Không còn Zalo nào khả dụng để gửi video."
             target_names = [
                 str(target.get(CONF_ZALO_TARGET_NAME, "")).strip()
                 or str(target.get(CONF_ZALO_THREAD_ID, "")).strip()
@@ -9398,6 +9918,8 @@ class ConversationalAssistantManager(NoteManagerMixin):
                     )
                 )
             )
+        if self._zalo_pending_clarifications.pop(owner_key, None) is not None:
+            labels.append("làm rõ yêu cầu")
         if self._zalo_pending_device_powers.pop(owner_key, None) is not None:
             labels.append("điều khiển thiết bị")
         if self._zalo_pending_calendar_events.pop(owner_key, None) is not None:
@@ -9602,6 +10124,7 @@ class ConversationalAssistantManager(NoteManagerMixin):
         self._zalo_pending_deletions.pop(owner_key, None)
         self._zalo_pending_camera_schedule_deletions.pop(owner_key, None)
         self._zalo_pending_cameras.pop(owner_key, None)
+        self._zalo_pending_clarifications.pop(owner_key, None)
         self._zalo_pending_device_powers.pop(owner_key, None)
         self._zalo_pending_calendar_events.pop(owner_key, None)
         self._zalo_pending_calendar_managements.pop(owner_key, None)
@@ -17032,6 +17555,25 @@ class ConversationalAssistantManager(NoteManagerMixin):
         ):
             explicit_ha_kind = None
 
+        pending_clarification = self._zalo_pending_clarification(
+            context.owner_key
+        )
+        if pending_clarification is not None:
+            if command is not None or explicit_ha_kind is not None:
+                # A clear follow-up becomes a normal command immediately.
+                self._zalo_pending_clarifications.pop(context.owner_key, None)
+            elif context.active_flow_reply:
+                related = self._related_feature_keys(context.text)
+                if related:
+                    pending_clarification.features = related
+                pending_clarification.expires_at = dt_util.now() + timedelta(
+                    seconds=PENDING_CONFIRMATION_TIMEOUT_SECONDS
+                )
+                self._schedule_pending_expiry()
+                return self._feature_clarification_text(
+                    pending_clarification.features, retry=True
+                )
+
         # A new keyword-prefixed message that matches neither a built-in,
         # learned, nor Home Assistant feature must never disappear into an old
         # pending flow. Show the deterministic command catalog immediately.
@@ -17332,7 +17874,13 @@ class ConversationalAssistantManager(NoteManagerMixin):
                     pending.cameras[index].available for index in selected
                 )
             if pending.phase == "destination":
-                current_targets = self._configured_zalo_targets()
+                current_targets = self._current_camera_video_zalo_targets(
+                    context, pending.zalo_targets
+                )
+                if not current_targets:
+                    current_targets = self._camera_video_destination_candidates(
+                        context, self._configured_zalo_targets()
+                    )
                 target_names = [
                     str(target.get(CONF_ZALO_TARGET_NAME, "")).strip()
                     or str(target.get(CONF_ZALO_THREAD_ID, "")).strip()
@@ -17343,8 +17891,7 @@ class ConversationalAssistantManager(NoteManagerMixin):
             return False
 
         cameras = self._discovered_camera_targets()
-        zalo_targets = self._configured_zalo_targets()
-        if not cameras or not zalo_targets:
+        if not cameras:
             return False
         tail = _camera_video_request_tail(context.text) or ""
         camera_indexes, destination_text = self._camera_video_direct_camera(
@@ -17354,8 +17901,16 @@ class ConversationalAssistantManager(NoteManagerMixin):
             return False
         if not any(cameras[index].available for index in camera_indexes):
             return False
+
+        if not destination_text:
+            # A Zalo request without an explicit destination returns to this chat.
+            return self._camera_video_current_zalo_target(context) is not None
+        if self._camera_video_destination_is_current(destination_text):
+            return self._camera_video_current_zalo_target(context) is not None
         return bool(
-            self._camera_video_direct_zalo_targets(destination_text, zalo_targets)
+            self._camera_video_direct_zalo_targets(
+                destination_text, self._configured_zalo_targets()
+            )
         )
 
     def _zalo_long_running_action(
@@ -19513,6 +20068,7 @@ class ConversationalAssistantManager(NoteManagerMixin):
             *self._zalo_pending_deletions.values(),
             *self._zalo_pending_camera_schedule_deletions.values(),
             *self._zalo_pending_cameras.values(),
+            *self._zalo_pending_clarifications.values(),
             *self._zalo_pending_device_powers.values(),
             *self._zalo_pending_calendar_events.values(),
             *self._zalo_pending_calendar_managements.values(),
@@ -19614,6 +20170,9 @@ class ConversationalAssistantManager(NoteManagerMixin):
         for owner_key, pending in list(self._zalo_pending_cameras.items()):
             if pending.expires_at <= now:
                 del self._zalo_pending_cameras[owner_key]
+        for owner_key, pending in list(self._zalo_pending_clarifications.items()):
+            if pending.expires_at <= now:
+                del self._zalo_pending_clarifications[owner_key]
         for owner_key, pending in list(
             self._zalo_pending_device_powers.items()
         ):
