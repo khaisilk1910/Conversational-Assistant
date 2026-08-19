@@ -159,6 +159,16 @@ Tất cả Zalo
 - Khóa tạm thời 5 phút sau 5 lần nhập sai pass.
 - Luồng hội thoại được tách theo thiết bị, người dùng hoặc cuộc trò chuyện Zalo để tránh lẫn câu trả lời xác nhận.
 
+### Camera, lịch chụp và video gửi Zalo
+
+- Chụp ảnh hoặc phân tích camera bằng tên đã đặt trong General settings.
+- `Chụp Cam Bếp gửi Zalo Khải` hoặc `Gửi Cam Bếp Zalo Khải` chụp rồi gửi thẳng đến Zalo đã đặt. Nếu tên camera/Zalo thiếu hoặc không chắc chắn, tích hợp liệt kê lựa chọn và tiếp tục đúng phiên 120 giây; `Hủy` dừng ngay phiên.
+- Nhiều camera được snapshot song song. Khi có từ hai ảnh trở lên, Zalo group ưu tiên `zalo_bot.send_images_to_group`, Zalo cá nhân ưu tiên `zalo_bot.send_images_to_user`; caption ảnh là plain text, không bọc Markdown.
+- Lịch chụp hỗ trợ một lần và lặp: `Hẹn 5 phút nữa...`, `Hẹn mỗi 5 phút...`, `Hẹn 15 giờ 30 hàng ngày...`. `Xem lịch chụp camera` liệt kê lịch; `Xóa lịch chụp camera` yêu cầu chọn và xác nhận trước khi xóa.
+- Sensor `Số lịch chụp camera` chứa tổng số lịch đang hoạt động cùng thuộc tính `list_lich_chup_camera` và `lich_chup_camera`.
+- Yêu cầu `Gửi video Cam Bếp đến Zalo Khải` ưu tiên action Home Assistant `camera.record`, ghi clip 10 giây vào media local rồi gọi `zalo_bot.send_video`.
+- Tác vụ chụp/ghi/gửi chỉ chạy khi có yêu cầu hoặc khi lịch đến hạn, không quét/ghi camera trong quá trình khởi động integration.
+
 ### Điều khiển nhà thông minh từ Zalo
 
 - Bật, tắt, mở, đóng, khóa và điều chỉnh thiết bị.
@@ -176,11 +186,14 @@ Tất cả Zalo
 
 ### Sensor theo dõi dữ liệu
 
-Tích hợp tạo ba sensor:
+Tích hợp có các sensor theo dõi nhắc hẹn, lịch/sự kiện, ghi chú, bộ nhớ câu lệnh và lịch chụp camera, gồm:
 
 - số lượng nhắc hẹn đang hoạt động;
 - thời điểm nhắc hẹn tiếp theo;
-- số lượng ghi chú.
+- số sự kiện sắp diễn ra;
+- **số lịch chụp camera** và danh sách/chi tiết lịch trong attributes;
+- số lượng ghi chú;
+- số câu lệnh đã học.
 
 Các sensor cung cấp thêm thuộc tính để dùng trong dashboard, template và automation.
 
@@ -479,6 +492,20 @@ Kiểm tra trạng thái khu vực sân vườn
 Nhiệt độ phòng khách là bao nhiêu?
 Độ ẩm phòng ngủ hiện tại
 ```
+
+### Ví dụ camera gửi video Zalo
+
+```text
+Xem Cam Bếp
+Ghi Camera Cổng
+Quay Cam Sân
+Gửi video Cam Bếp đến Zalo Khải
+Xem video camera Cam Cổng đến Zalo Gia đình
+```
+
+Trên **Zalo**, `xem/ghi/quay cam/camera` là yêu cầu ghi video ngắn. Nếu không nêu Zalo đích, video được gửi về **chính nhóm/cuộc trò chuyện đang gửi yêu cầu**; nếu nêu tên Zalo đã đặt thì gửi đúng đích đó. Nếu camera hoặc Zalo đích chưa xác định chắc chắn, tích hợp liệt kê lựa chọn và giữ phiên 120 giây. Voice Assist không có khái niệm “Zalo hiện tại”, vì vậy yêu cầu video từ Voice vẫn cần chọn hoặc nói rõ Zalo đích đã cấu hình.
+
+Luồng ghi dùng action `camera.record`, chỉ khởi tạo `stream` khi thực sự có yêu cầu video, chờ file `.mp4` hoàn tất rồi mới gọi `zalo_bot.send_video`. Các yêu cầu ghi **cùng một camera** được xếp tuần tự để tránh xung đột recorder; camera khác vẫn có thể ghi đồng thời.
 
 ### Ví dụ thời tiết
 
