@@ -52,7 +52,7 @@ Hướng dẫn sử dụng tích hợp
 - Nhắc hẹn và ghi chú được nhận diện trước.
 - Lệnh thiết bị, trạng thái và thời tiết được gửi vào Conversation agent.
 - Truy vấn lịch dùng `calendar.get_events`, gộp nhiều calendar và sắp xếp theo giờ.
-- Yêu cầu ảnh camera tạo danh sách đánh số; người dùng có thể chọn một hoặc nhiều camera như `1 3 10`, hoặc gửi `tất cả`. Tích hợp chụp từng camera rồi dùng `zalo_bot.send_images_to_group` để gửi đồng loạt vào nhóm Zalo. Với chat cá nhân hoặc khi action gửi nhóm ảnh không có, tích hợp tự động dùng `zalo_bot.send_image` cho từng ảnh.
+- Yêu cầu ảnh camera tạo danh sách đánh số khi tên chưa rõ; người dùng có thể chọn một hoặc nhiều camera như `1 3 10`, hoặc gửi `tất cả`. Các camera được snapshot song song. Khi có nhiều ảnh, group ưu tiên `zalo_bot.send_images_to_group`, chat cá nhân ưu tiên `zalo_bot.send_images_to_user`; chỉ dự phòng `zalo_bot.send_image` từng ảnh khi action nhiều ảnh tương ứng chưa có.
 - Snapshot được lưu ổn định trong `/media/conversational_assistant/` và ghi đè cho cùng camera/cuộc trò chuyện để không tăng file vô hạn.
 - Mỗi chat riêng giữ một `conversation_id`.
 - Chat nhóm chỉ xử lý câu Home Assistant rõ ràng.
@@ -98,16 +98,47 @@ Camera ở trạng thái `unavailable` hoặc `unknown` vẫn được hiển th
 
 Trong mọi luồng xử lý từ Zalo, tích hợp gọi `zalo_bot.send_typing_event` ngay khi nhận yêu cầu và tự làm mới định kỳ cho đến khi phản hồi cuối cùng đã được gửi. Cơ chế này áp dụng cho điều khiển/kiểm tra thiết bị, lịch, thời tiết, nhắc hẹn, ghi chú, camera và các bước xác nhận. Action này là tùy chọn; nếu phiên bản `zalo_bot` chưa cung cấp thì các chức năng khác vẫn hoạt động bình thường.
 
-Khi có nhiều ảnh và cuộc trò chuyện là nhóm, dữ liệu gửi có dạng:
+Khi có nhiều ảnh, dữ liệu gửi dùng action theo loại đích:
 
 ```yaml
+# Zalo group
 action: zalo_bot.send_images_to_group
 data:
-  thread_id: "<thread_id hiện tại>"
+  thread_id: "<thread_id>"
+  account_selection: "<tài khoản bot>"
+  image_paths: /media/conversational_assistant/camera_1.jpg,/media/conversational_assistant/camera_2.jpg
+
+# Zalo cá nhân
+action: zalo_bot.send_images_to_user
+data:
+  thread_id: "<thread_id>"
   account_selection: "<tài khoản bot>"
   image_paths: /media/conversational_assistant/camera_1.jpg,/media/conversational_assistant/camera_2.jpg
 ```
 
+Caption ảnh gửi bằng `send_image` là plain text, không thêm Markdown. Có thể gọi thẳng `Chụp Cam Bếp gửi Zalo Khải` hoặc `Gửi Cam Bếp Zalo Khải`. Nếu camera/Zalo không chắc chắn, tích hợp liệt kê và giữ phiên 120 giây để chọn.
+
+Lịch chụp cũng dùng cùng cơ chế chọn camera/Zalo:
+
+```text
+Hẹn 5 phút nữa chụp Cam Bếp gửi Zalo Khải
+Hẹn mỗi 5 phút chụp Cam Bếp gửi Zalo Khải
+Hẹn 15 giờ 30 hàng ngày chụp Cam Bếp gửi Zalo Khải
+Xem lịch chụp camera
+Xóa lịch chụp camera
+```
+
+Khi xóa lịch, bot luôn chờ chọn lịch rồi hỏi xác nhận xóa. Sensor `Số lịch chụp camera` lưu tổng số và chi tiết lịch trong attributes.
+
+
+
+## Camera video ngay trong Zalo
+
+Các cách nói `Xem Cam Bếp`, `Ghi Camera Cổng`, `Quay Cam Sân` hoặc `Xem video Cam Bếp` sẽ ghi một clip ngắn bằng `camera.record`. Nếu không nêu Zalo đích, clip được gửi trở lại **chính nhóm/cuộc trò chuyện hiện tại**. Muốn gửi nơi khác, nói rõ tên đã đặt, ví dụ `Gửi video Cam Bếp đến Zalo Khải`.
+
+Nếu camera hoặc Zalo không chắc chắn, bot liệt kê lựa chọn và giữ phiên 120 giây. Tích hợp chỉ khởi tạo `stream` khi thực sự cần ghi video; các yêu cầu cùng một camera được xếp tuần tự, còn camera khác vẫn có thể xử lý đồng thời.
+
+Nếu câu sau invocation keyword chỉ gợi ý một tính năng nhưng chưa đủ rõ, bot trả về hướng dẫn/ ví dụ đúng tính năng đó và chờ câu làm rõ; không đẩy ngay toàn bộ yêu cầu sang AI.
 
 ## Bộ nhớ câu lệnh qua Zalo
 

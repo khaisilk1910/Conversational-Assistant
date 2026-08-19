@@ -77,14 +77,26 @@ Bot sẽ liệt kê các Zalo đã cấu hình và chờ chọn. Nội dung có 
 - `Báo ra loa mời mọi người xuống phòng họp`
 - `Gửi loa cửa cổng đang mở`
 
-Có thể chọn một, nhiều loa hoặc **Tất cả**. Mỗi loa được xử lý độc lập. Loa đang `playing` hoặc `buffering` được kiểm tra lại mỗi 10 giây, tối đa 20 lần.
+Có thể chọn một, nhiều loa hoặc **Tất cả**. Mỗi loa được xử lý độc lập. Loa đang `playing` hoặc `buffering` được kiểm tra lại mỗi 15 giây, tối đa 10 lần.
 
 ### Camera
 
 - `Chụp camera`
+- `Chụp Cam Bếp gửi Zalo Khải`
+- `Gửi Cam Bếp Zalo Khải`
+- `Hẹn 5 phút nữa chụp Cam Bếp gửi Zalo Khải`
+- `Hẹn mỗi 5 phút chụp Cam Bếp gửi Zalo Khải`
+- `Hẹn 15 giờ 30 hàng ngày chụp Cam Bếp gửi Zalo Khải`
+- `Xem lịch chụp camera`
+- `Xóa lịch chụp camera`
 - `Phân tích camera`
+- `Xem Cam Bếp` — ghi video 10 giây và trên Zalo gửi lại chính cuộc trò chuyện hiện tại
+- `Ghi Camera Cổng gửi Zalo Khải`
+- `Gửi video Cam Bếp đến Zalo Khải`
 
-Bot sẽ cho chọn camera và nơi nhận ảnh. Tính năng phân tích dùng AI đã chọn trong cấu hình.
+Nếu camera/Zalo chưa rõ, bot liệt kê và giữ phiên 120 giây để chọn. Xóa lịch luôn có bước chọn và xác nhận cuối. Nhiều camera được chụp song song; nhiều ảnh ưu tiên action gửi nhiều ảnh riêng cho Zalo group/cá nhân. Caption ảnh dùng văn bản thuần, không Markdown. Tính năng phân tích dùng AI đã chọn trong cấu hình.
+
+Với video camera trên Zalo, nếu không nêu Zalo đích thì bot gửi clip về chính nhóm/cuộc trò chuyện đang yêu cầu. `Xem cam`, `ghi camera`, `quay cam` đều được hiểu là ghi video. `stream` chỉ được khởi tạo khi có yêu cầu ghi, cùng một camera được xếp tuần tự còn camera khác vẫn xử lý song song.
 
 ### Ghi chú, trò chuyện, AI và bộ nhớ câu lệnh
 

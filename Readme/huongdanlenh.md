@@ -13,7 +13,7 @@ Thay `[TỪ KHÓA]` bằng giá trị đang cấu hình:
 
 Khi bot đang chờ chọn hoặc xác nhận, chỉ cần trả lời trực tiếp, không cần nhập lại từ khóa.
 
-Nếu người dùng đã nhập đúng Zalo invocation keyword nhưng phần yêu cầu không khớp bất kỳ tính năng hoặc câu lệnh đã học nào, tích hợp sẽ phản hồi **Các lệnh tích hợp** để người dùng chọn lại từ khóa chính xác.
+Nếu người dùng đã nhập đúng Zalo invocation keyword nhưng câu yêu cầu **có liên quan một tính năng mà còn mơ hồ**, tích hợp sẽ ưu tiên hỏi lại theo đúng tính năng đó, kèm ví dụ tự nhiên và giữ phiên **120 giây** để người dùng trả lời tiếp mà không cần nhập lại từ khóa. Chỉ khi không nhận ra tính năng liên quan nào, tích hợp mới phản hồi toàn bộ **Các lệnh tích hợp**.
 
 ## 2. Hủy phiên ngay lập tức
 
@@ -120,10 +120,41 @@ TTS phát khi media player ở trạng thái `idle`, `off` hoặc `paused`. Nế
 Từ khóa: `gửi Zalo`, `thông báo Zalo`, `báo Zalo`  
 Ví dụ: `Thông báo Zalo Khải xuống ăn cơm`
 
-### Chụp camera
+### Chụp camera và gửi Zalo
 
-Từ khóa: `chụp camera`, `chụp cam`, `chụp ảnh từ camera`, `lấy ảnh camera`, `lấy hình camera`  
-Ví dụ: `Chụp Cam Cổng`
+Từ khóa: `chụp camera`, `chụp cam`, `chụp ảnh từ camera`, `lấy ảnh camera`, `lấy hình camera`, `gửi cam`, `gửi camera`  
+Ví dụ: `Chụp Cam Cổng`  
+Ví dụ gửi đích: `Chụp Cam Bếp gửi Zalo Khải` hoặc `Gửi Cam Bếp Zalo Khải`
+
+- Nếu camera hoặc Zalo chưa rõ, tích hợp liệt kê và chờ chọn tối đa **120 giây**.
+- Nếu chọn nhiều camera, các ảnh được chụp song song. Khi gửi nhiều ảnh, group dùng `zalo_bot.send_images_to_group`, cá nhân dùng `zalo_bot.send_images_to_user`; nếu action nhiều ảnh chưa có thì mới dự phòng gửi từng ảnh.
+- Caption ảnh là văn bản thuần, không thêm Markdown `**...**`.
+
+### Hẹn chụp camera gửi Zalo
+
+Ví dụ một lần: `Hẹn 5 phút nữa chụp Cam Bếp gửi Zalo Khải`  
+Ví dụ lặp: `Hẹn mỗi 5 phút chụp Camera Bếp gửi Zalo Khải`  
+Ví dụ hằng ngày: `Hẹn 15 giờ 30 hàng ngày chụp Cam Bếp gửi Zalo Khải`  
+Xem lịch: `Xem lịch chụp camera` hoặc `Liệt kê lịch chụp camera`  
+Xóa lịch: `Xóa lịch chụp camera`
+
+- Nếu thiếu/không chắc camera hoặc Zalo, tích hợp liệt kê và giữ đúng phiên chờ xác nhận.
+- Khi xóa, tích hợp liệt kê lịch, chờ chọn rồi **hỏi xác nhận xóa** trước khi thực hiện.
+- Sensor **Số lịch chụp camera** hiển thị tổng số lịch và thuộc tính chi tiết `lich_chup_camera`, `list_lich_chup_camera`.
+
+### Ghi/xem/quay video camera và gửi Zalo
+
+Cách nói tự nhiên: `xem cam`, `xem camera`, `ghi cam`, `ghi camera`, `quay cam`, `quay camera`, `gửi video camera`, `xem video camera`, `quay video camera`, `ghi video camera`, `gửi video cam`, `xem video cam`.  
+Ví dụ Zalo hiện tại: `Xem Cam Bếp`, `Ghi Camera Cổng`, `Quay Cam Sân`  
+Ví dụ gửi đích khác: `Gửi video Cam Bếp đến Zalo Khải`, `Ghi Cam Cổng gửi Zalo Hass 1080`
+
+- Trên **Zalo**, nếu câu lệnh không nêu nơi nhận thì video **10 giây** được gửi về chính nhóm/cuộc trò chuyện đang yêu cầu. Không cần cấu hình cuộc trò chuyện đó thành một Zalo destination có tên trước.
+- Nếu câu lệnh có tên Zalo đích đã đặt, tích hợp gửi đúng đích đó. Nếu tên Zalo không chắc chắn, bot liệt kê **Zalo hiện tại + các Zalo đã cấu hình** để chọn.
+- Nếu camera chưa rõ, bot liệt kê camera và giữ đúng Zalo đích đã xác định; sau khi người dùng chọn camera sẽ tiếp tục ghi và gửi.
+- Voice Assist không có “Zalo hiện tại”, nên vẫn liệt kê hoặc dùng tên Zalo đích đã cấu hình.
+- Tích hợp dùng `camera.record`; `stream` được kiểm tra/khởi tạo **chỉ khi có yêu cầu video**, không thêm tải vào lúc Conversational Assistant khởi động. Sau khi action kết thúc, tích hợp chờ file `.mp4` có dữ liệu rồi mới gọi `zalo_bot.send_video`.
+- Hai yêu cầu cùng lúc tới **cùng một camera** được xếp tuần tự; các camera khác nhau vẫn ghi song song. Nếu một automation ngoài tích hợp đang ghi camera đó, tích hợp chờ và thử lại ngắn hạn trước khi báo lỗi.
+- Khi `camera.record` lỗi, phản hồi nêu nguyên nhân có ích như stream chưa sẵn sàng, camera không hỗ trợ stream/record, recorder đang bận, lỗi quyền ghi media hoặc timeout thay vì chỉ báo chung “không quay được video”.
 
 ### Phân tích camera
 
@@ -165,7 +196,31 @@ Ví dụ: `Học câu lệnh xem cổng để chụp Cam Cổng`
 Từ khóa: `hủy`, `hủy yêu cầu`, `hủy phiên`, `dừng yêu cầu`, `dừng phiên`, `kết thúc phiên`, `bỏ yêu cầu vừa rồi`  
 Ví dụ: `Hủy`
 
-## 6. Cấu hình
+## 6. Cách nói tự nhiên theo từng tính năng
+
+Không bắt buộc phải nói đúng một mẫu cứng. Các câu dưới đây là ví dụ để parser nhận ý định trước khi phải dùng AI:
+
+- **Thiết bị:** `Bật đèn phòng khách`, `Tắt hết đèn tầng 2`, `Cho quạt phòng ngủ quay`, `Tăng điều hòa lên 26 độ`, `Chuyển điều hòa sang làm lạnh`, `Tắt quạt sau 20 phút`.
+- **Thời tiết:** `Mai có mưa không`, `Thời tiết 3 ngày tới`, `Nhiệt độ chiều nay`, `Độ ẩm ngoài trời`, `UV hôm nay`, `Có bão hay áp thấp nào không`.
+- **Nhắc hẹn:** `5 phút nữa nhắc tôi uống thuốc`, `Nhắc Zalo Khải 7 giờ mai họp`, `Mỗi thứ hai 8 giờ nhắc họp`, `Tôi có những nhắc hẹn nào`, `Xóa nhắc hẹn`.
+- **Lịch/sự kiện:** `Lịch ngày mai có gì`, `Xem sự kiện tuần này`, `Thêm lịch họp 15 giờ mai`, `Tạo cuộc hẹn 8 giờ thứ tư tuần sau dương lịch`.
+- **Loa:** `Báo loa Phòng Ngủ xuống ăn cơm`, `Thông báo ra loa Tầng 1 có khách`, `Gửi loa Phòng Khách chúc ngủ ngon`.
+- **Gửi Zalo:** `Gửi Zalo Khải xuống ăn cơm`, `Báo Zalo Gia đình cửa cổng đang mở`, `Thông báo Zalo Hass 1080 hệ thống đã xong`.
+- **Chụp camera:** `Chụp Cam Bếp`, `Lấy ảnh Camera Cổng`, `Gửi Cam Bếp Zalo Khải`, `Chụp Cam Bếp và Cam Cổng gửi Zalo Khải`.
+- **Video camera:** `Xem Cam Bếp`, `Ghi Camera Cổng`, `Quay Cam Sân`, `Xem video Cam Bếp`, `Gửi video Cam Bếp đến Zalo Khải`.
+- **Lịch chụp camera:** `5 phút nữa chụp Cam Bếp gửi Zalo Khải`, `Hẹn mỗi 5 phút chụp Cam Bếp gửi Zalo Khải`, `15 giờ 30 hàng ngày chụp Cam Bếp gửi Zalo Khải`, `Liệt kê lịch chụp camera`, `Xóa lịch chụp camera`.
+- **Phân tích camera:** `Phân tích Cam Cổng`, `Kiểm tra Camera Bếp`, `Xem và phân tích Cam Sân`.
+- **Ghi chú:** `Ghi chú mua sữa`, `Lưu ghi chú mã cửa 1234`, `Xem ghi chú`, `Sửa ghi chú mua sữa`, `Xóa ghi chú`.
+- **Trò chuyện AI:** `Trò chuyện đi`, `Tám đi`, `Buôn đi`; dùng `Kết thúc` hoặc `Hủy` để dừng phiên.
+- **Tìm Internet:** `Tìm giá vàng hôm nay`, `Tra cứu thông tin ...`, `Tìm trên mạng ...`.
+- **Tạo ảnh AI:** `Tạo ảnh ngôi nhà bên hồ`, `Tạo một bức ảnh robot trong vườn`.
+- **Âm/dương lịch:** `Hôm nay âm lịch ngày mấy`, `Ngày mai thứ mấy`, `Đổi 30/11/1984 sang âm lịch`, `Đổi mùng 1 tháng 8 âm sang dương lịch`.
+- **Bộ nhớ câu lệnh:** `Học câu lệnh xem cổng để chụp Cam Cổng`, `Xem câu lệnh đã học`, `Quên câu lệnh xem cổng`.
+- **Trợ giúp/phiên:** `Hướng dẫn tích hợp`, `Các lệnh tích hợp`, `Hủy`, `Dừng phiên`, `Bỏ yêu cầu vừa rồi`.
+
+Nếu câu nói rõ camera/thiết bị/đích/thời gian thì tích hợp thực hiện ngay. Nếu chỉ nhận ra **chủ đề** nhưng chưa đủ hành động hoặc đối tượng, bot không tự đoán: bot đưa ví dụ đúng chủ đề và chờ người dùng nói rõ trong 120 giây.
+
+## 7. Cấu hình
 
 Mở **Settings > Devices & services > Conversational Assistant > Configure** để:
 
