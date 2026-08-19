@@ -10,5 +10,5 @@
   "integration_type": "service",
   "iot_class": "local_push",
   "requirements": [],
-  "version": "2026.08.19.2310"
+  "version": "2026.08.20.0006"
 }
