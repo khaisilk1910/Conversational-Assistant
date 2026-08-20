@@ -125,7 +125,7 @@ Luồng xử lý:
 
 1. Tách **nội dung cần tìm** và **thiết bị cần phát** bằng parser nội bộ trước; nếu thiếu một trong hai, bot hỏi lại đúng phần còn thiếu và giữ phiên 120 giây.
 2. Ưu tiên `media_player.search_media` nếu media player hỗ trợ tìm kiếm và kết quả trả về là video YouTube.
-3. Nếu không đủ kết quả, gọi `pyscript.youtube_search_tool` với `search_type: video`, `results: 10`. File mẫu `youtube_data_tool.py` dùng YouTube Data API v3.
+3. Nếu chưa đủ kết quả, gọi trực tiếp **YouTube Data API v3** bằng `youtube_api_key` trong **Conversational Assistant options > YouTube Settings**. Nếu chưa cấu hình key hoặc API lỗi, `pyscript.youtube_search_tool` đã có sẵn vẫn được thử như fallback tương thích cũ.
 4. Trả danh sách tối đa **10 video**, người dùng chọn bằng số hoặc tên. Nếu không trả lời trong **20 giây**, tích hợp tự chọn video số 1.
 5. Với **loa**: nếu trạng thái `playing` hoặc `buffering`, bot hỏi **Phát đè** hay tiếp tục chờ. Nếu không phát đè, tích hợp kiểm tra lại mỗi 10 giây, tối đa **10 phút**; loa rảnh thì tự phát, quá 10 phút thì hủy và báo đúng luồng.
 6. Với **TV/video player**: phát ngay, không hỏi phát đè. Ưu tiên phương thức native phù hợp Cast/Android TV/Apple TV; sau đó fallback Media Extractor/`media_player.play_media`.
@@ -133,7 +133,7 @@ Luồng xử lý:
 
 Nếu chưa cấu hình danh sách TV/media riêng, tích hợp chỉ quét `media_player` **khi có yêu cầu YouTube**, không quét lúc khởi động. Có thể đặt tên TV/media player trong **General settings > TV/thiết bị phát media và tên gọi** để câu lệnh tự nhiên chính xác hơn.
 
-> Để tìm YouTube bằng API, cần service `pyscript.youtube_search_tool` từ file mẫu và `youtube_api_key`. Tích hợp không import Pyscript/Google API lúc khởi động nên nếu công cụ này chưa cài, Home Assistant vẫn khởi động bình thường; chỉ yêu cầu tìm YouTube sẽ báo thiếu nguồn tìm kiếm.
+> Khuyến nghị nhập `youtube_api_key` tại **Settings > Devices & services > Conversational Assistant > Configure > YouTube Settings**. Không còn bắt buộc cấu hình key trong Pyscript. Nếu không có key, tích hợp chỉ tìm được khi media player có native `search_media` trả đúng YouTube hoặc `pyscript.youtube_search_tool` đã tự có key; nếu không sẽ hướng dẫn cấu hình. Tất cả truy cập YouTube đều lazy khi có yêu cầu, không chạy lúc Home Assistant khởi động.
 
 ### Gửi Zalo
 
