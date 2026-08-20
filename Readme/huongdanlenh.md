@@ -115,6 +115,26 @@ Ví dụ: `Báo loa Phòng Ngủ xuống ăn cơm`
 
 TTS phát khi media player ở trạng thái `idle`, `off` hoặc `paused`. Nếu loa chưa ở một trong ba trạng thái sẵn sàng này, tích hợp kiểm tra lại tối đa **10 lần**, mỗi lần cách nhau **15 giây**. Sau lần kiểm tra thứ 10 mà loa vẫn chưa sẵn sàng, yêu cầu TTS bị hủy và lỗi được gửi về đúng Zalo/Voice đã yêu cầu. Các loa khác nhau vẫn có thể chờ và phát song song; cùng một loa được xếp tuần tự để tránh chồng tiếng.
 
+### YouTube phát ra loa, TV hoặc media player
+
+Từ khóa/cách nói tự nhiên: `YouTube`, `tìm YouTube`, `tìm trên YouTube`, `tìm kiếm YouTube`, `mở YouTube`, `bật YouTube`, `phát YouTube`, `xem YouTube`.  
+Ví dụ loa: `Tìm YouTube nhạc bolero phát loa Phòng Ngủ`  
+Ví dụ TV: `Tìm YouTube dạy tiếng Anh phát TV Phòng Ngủ`
+
+Luồng xử lý:
+
+1. Tách **nội dung cần tìm** và **thiết bị cần phát** bằng parser nội bộ trước; nếu thiếu một trong hai, bot hỏi lại đúng phần còn thiếu và giữ phiên 120 giây.
+2. Ưu tiên `media_player.search_media` nếu media player hỗ trợ tìm kiếm và kết quả trả về là video YouTube.
+3. Nếu không đủ kết quả, gọi `pyscript.youtube_search_tool` với `search_type: video`, `results: 10`. File mẫu `youtube_data_tool.py` dùng YouTube Data API v3.
+4. Trả danh sách tối đa **10 video**, người dùng chọn bằng số hoặc tên. Nếu không trả lời trong **20 giây**, tích hợp tự chọn video số 1.
+5. Với **loa**: nếu trạng thái `playing` hoặc `buffering`, bot hỏi **Phát đè** hay tiếp tục chờ. Nếu không phát đè, tích hợp kiểm tra lại mỗi 10 giây, tối đa **10 phút**; loa rảnh thì tự phát, quá 10 phút thì hủy và báo đúng luồng.
+6. Với **TV/video player**: phát ngay, không hỏi phát đè. Ưu tiên phương thức native phù hợp Cast/Android TV/Apple TV; sau đó fallback Media Extractor/`media_player.play_media`.
+7. Với **loa**, ưu tiên `media_extractor.extract_media_url` lấy audio rồi gọi `media_player.play_media`; nếu không có action đó thì fallback `media_extractor.play_media`.
+
+Nếu chưa cấu hình danh sách TV/media riêng, tích hợp chỉ quét `media_player` **khi có yêu cầu YouTube**, không quét lúc khởi động. Có thể đặt tên TV/media player trong **General settings > TV/thiết bị phát media và tên gọi** để câu lệnh tự nhiên chính xác hơn.
+
+> Để tìm YouTube bằng API, cần service `pyscript.youtube_search_tool` từ file mẫu và `youtube_api_key`. Tích hợp không import Pyscript/Google API lúc khởi động nên nếu công cụ này chưa cài, Home Assistant vẫn khởi động bình thường; chỉ yêu cầu tìm YouTube sẽ báo thiếu nguồn tìm kiếm.
+
 ### Gửi Zalo
 
 Từ khóa: `gửi Zalo`, `thông báo Zalo`, `báo Zalo`  
@@ -205,6 +225,7 @@ Không bắt buộc phải nói đúng một mẫu cứng. Các câu dưới đ�
 - **Nhắc hẹn:** `5 phút nữa nhắc tôi uống thuốc`, `Nhắc Zalo Khải 7 giờ mai họp`, `Mỗi thứ hai 8 giờ nhắc họp`, `Tôi có những nhắc hẹn nào`, `Xóa nhắc hẹn`.
 - **Lịch/sự kiện:** `Lịch ngày mai có gì`, `Xem sự kiện tuần này`, `Thêm lịch họp 15 giờ mai`, `Tạo cuộc hẹn 8 giờ thứ tư tuần sau dương lịch`.
 - **Loa:** `Báo loa Phòng Ngủ xuống ăn cơm`, `Thông báo ra loa Tầng 1 có khách`, `Gửi loa Phòng Khách chúc ngủ ngon`.
+- **YouTube:** `Tìm YouTube nhạc bolero phát loa Phòng Ngủ`, `Mở YouTube nhạc thiếu nhi trên TV Phòng Khách`, `Tìm trên YouTube dạy tiếng Anh phát tivi Phòng Ngủ`.
 - **Gửi Zalo:** `Gửi Zalo Khải xuống ăn cơm`, `Báo Zalo Gia đình cửa cổng đang mở`, `Thông báo Zalo Hass 1080 hệ thống đã xong`.
 - **Chụp camera:** `Chụp Cam Bếp`, `Lấy ảnh Camera Cổng`, `Gửi Cam Bếp Zalo Khải`, `Chụp Cam Bếp và Cam Cổng gửi Zalo Khải`.
 - **Video camera:** `Xem Cam Bếp`, `Ghi Camera Cổng`, `Quay Cam Sân`, `Xem video Cam Bếp`, `Gửi video Cam Bếp đến Zalo Khải`.
@@ -224,7 +245,7 @@ Nếu câu nói rõ camera/thiết bị/đích/thời gian thì tích hợp th�
 
 Mở **Settings > Devices & services > Conversational Assistant > Configure** để:
 
-- đặt tên Mobile, Zalo, loa và camera;
+- đặt tên Mobile, Zalo, loa, TV/media player và camera;
 - chọn thực thể `weather.*` trong **Weather settings** để ưu tiên dữ liệu Home Assistant;
 - chọn riêng Dương lịch và Âm lịch mặc định trong **Calendar settings**;
 - cấu hình AI Agent, AI Search dự phòng, lịch, bản tin thời tiết và TTS;
