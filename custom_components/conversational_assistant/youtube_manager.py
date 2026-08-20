@@ -3,12 +3,14 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 from collections.abc import Mapping
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 import json
 import logging
 from pathlib import Path
+import re
 from time import monotonic
 from typing import Any
 import uuid
@@ -45,6 +47,8 @@ from .const import (
     PHICOMM_R1_DOMAIN,
     PHICOMM_R1_SERVICE_PLAY_YOUTUBE,
     YOUTUBE_AUDIO_FORMAT_QUERY,
+    YOUTUBE_CAST_DOWNLOAD_TIMEOUT_SECONDS,
+    YOUTUBE_CAST_FILE_TTL_SECONDS,
     YOUTUBE_DATA_API_SEARCH_URL,
     YOUTUBE_MEDIA_SERVICE_TIMEOUT_SECONDS,
     YOUTUBE_SEARCH_RESULT_COUNT,
@@ -107,6 +111,15 @@ class ResolvedYouTubeAudio:
     vcodec: str = "none"
 
 
+@dataclass(slots=True, frozen=True)
+class PreparedYouTubeCastFile:
+    """A fully downloaded audio file ready for buffered Google Cast playback."""
+
+    file_path: Path
+    mime_type: str
+    extension: str
+
+
 class YouTubeManagerMixin:
     """State and actions for searching YouTube and playing results."""
 
@@ -115,6 +128,7 @@ class YouTubeManagerMixin:
         self._pending_voice_youtube: dict[str, PendingYouTubeFlow] = {}
         self._youtube_auto_tasks: dict[str, asyncio.Task[Any]] = {}
         self._youtube_busy_tasks: dict[str, asyncio.Task[Any]] = {}
+        self._youtube_cast_cleanup_tasks: dict[str, asyncio.Task[Any]] = {}
         self._youtube_player_locks: dict[str, asyncio.Lock] = {}
         # Serialize busy-state check + playback decision per media player.
         # The lower-level player lock still protects the actual service calls.
@@ -123,8 +137,10 @@ class YouTubeManagerMixin:
         self._youtube_targets_cache_until = 0.0
 
     async def _async_unload_youtube_state(self) -> None:
-        tasks = tuple(self._youtube_auto_tasks.values()) + tuple(
-            self._youtube_busy_tasks.values()
+        tasks = (
+            tuple(self._youtube_auto_tasks.values())
+            + tuple(self._youtube_busy_tasks.values())
+            + tuple(self._youtube_cast_cleanup_tasks.values())
         )
         for task in tasks:
             if not task.done():
@@ -133,6 +149,7 @@ class YouTubeManagerMixin:
             await asyncio.gather(*tasks, return_exceptions=True)
         self._youtube_auto_tasks.clear()
         self._youtube_busy_tasks.clear()
+        self._youtube_cast_cleanup_tasks.clear()
         self._zalo_pending_youtube.clear()
         self._pending_voice_youtube.clear()
         self._youtube_player_locks.clear()
@@ -1207,6 +1224,8 @@ class YouTubeManagerMixin:
         *,
         label: str,
         attempts: list[str],
+        media_type: str = "audio/mpeg",
+        stream_type: str = "LIVE",
     ) -> str | None:
         """Use HA Cast quick-play without rewriting/signing the media URL.
 
@@ -1226,8 +1245,8 @@ class YouTubeManagerMixin:
         app_data = {
             "app_name": "default_media_receiver",
             "media_id": stream_url,
-            "media_type": "audio/mpeg",
-            "stream_type": "LIVE",
+            "media_type": media_type,
+            "stream_type": stream_type,
             "metadata": {
                 "metadataType": 3,
                 "title": video.title,
@@ -1262,45 +1281,346 @@ class YouTubeManagerMixin:
             )
         return None
 
-    async def _async_play_youtube_cast_audio(
+    async def _async_youtube_ffmpeg_binary(self) -> str:
+        """Resolve Home Assistant's FFmpeg binary only when playback needs it."""
+        try:
+            from homeassistant.components.ffmpeg import get_ffmpeg_manager
+            from homeassistant.setup import async_setup_component
+
+            try:
+                return str(get_ffmpeg_manager(self.hass).binary)
+            except ValueError:
+                if await async_setup_component(self.hass, "ffmpeg", {}):
+                    return str(get_ffmpeg_manager(self.hass).binary)
+        except Exception:  # noqa: BLE001
+            _LOGGER.debug("Could not resolve Home Assistant FFmpeg manager", exc_info=True)
+        return "ffmpeg"
+
+    @staticmethod
+    def _youtube_safe_ffmpeg_error(stderr: bytes) -> str:
+        text = stderr.decode("utf-8", errors="replace").strip()
+        text = re.sub(r"https?://\S+", "<url>", text)
+        return text[-1800:]
+
+    async def _async_youtube_unlink(self, path: Path) -> None:
+        """Remove one temporary YouTube file without blocking HA's event loop."""
+        def _unlink() -> None:
+            with contextlib.suppress(FileNotFoundError, OSError):
+                path.unlink()
+
+        await self.hass.async_add_executor_job(_unlink)
+
+    async def _async_youtube_file_size(self, path: Path) -> int:
+        """Return a temporary media file size using the executor."""
+        return await self.hass.async_add_executor_job(lambda: path.stat().st_size)
+
+    async def _async_prepare_youtube_cast_file(
+        self, audio_stream: ResolvedYouTubeAudio
+    ) -> PreparedYouTubeCastFile:
+        """Download/remux the resolved audio into a complete local file.
+
+        Cast is much more reliable with a finite, seekable HTTP file than an
+        expiring Googlevideo URL or an on-demand transcoder.  For AAC/itag 140
+        FFmpeg performs a stream-copy remux to a normal M4A container; no audio
+        re-encoding is needed.  Other codecs are converted to MP3.
+        """
+        cache_dir = Path(
+            self.hass.config.config_dir,
+            ".conversational_assistant_cache",
+            "youtube",
+        )
+        now_ts = datetime.now().timestamp()
+
+        def _prepare_dir() -> None:
+            cache_dir.mkdir(parents=True, exist_ok=True)
+            # Crash/restart safety: remove abandoned cache files older than 12h.
+            for old in cache_dir.glob("youtube_*.*"):
+                try:
+                    if now_ts - old.stat().st_mtime > 12 * 60 * 60:
+                        old.unlink()
+                except OSError:
+                    continue
+
+        await self.hass.async_add_executor_job(_prepare_dir)
+
+        stem = f"youtube_{uuid.uuid4().hex}"
+        codec = str(audio_stream.acodec or "").casefold()
+        copy_aac = codec.startswith("mp4a") or "aac" in codec
+        extension = "m4a" if copy_aac else "mp3"
+        cast_codec = codec if codec.startswith("mp4a.") else "mp4a.40.2"
+        mime_type = (
+            f'audio/mp4; codecs="{cast_codec}"' if copy_aac else "audio/mpeg"
+        )
+        output_path = cache_dir / f"{stem}.{extension}"
+
+        header_lines: list[str] = []
+        for key, value in audio_stream.headers.items():
+            safe_key = str(key).replace("\r", "").replace("\n", "").strip()
+            safe_value = str(value).replace("\r", " ").replace("\n", " ").strip()
+            if safe_key and safe_value:
+                header_lines.append(f"{safe_key}: {safe_value}")
+        header_blob = "\r\n".join(header_lines)
+        if header_blob:
+            header_blob += "\r\n"
+
+        ffmpeg = await self._async_youtube_ffmpeg_binary()
+        args = [
+            ffmpeg,
+            "-hide_banner",
+            "-loglevel",
+            "error",
+            "-nostdin",
+            "-y",
+            "-reconnect",
+            "1",
+            "-reconnect_streamed",
+            "1",
+            "-reconnect_delay_max",
+            "5",
+        ]
+        if header_blob:
+            args.extend(["-headers", header_blob])
+        args.extend(["-i", audio_stream.stream_url, "-map", "0:a:0", "-vn", "-sn", "-dn"])
+        if copy_aac:
+            args.extend(["-c:a", "copy", "-movflags", "+faststart"])
+        else:
+            args.extend(["-c:a", "libmp3lame", "-b:a", "128k", "-ar", "44100", "-ac", "2"])
+        args.append(str(output_path))
+
+        try:
+            proc = await asyncio.create_subprocess_exec(
+                *args,
+                stdout=asyncio.subprocess.DEVNULL,
+                stderr=asyncio.subprocess.PIPE,
+            )
+        except (FileNotFoundError, OSError) as err:
+            raise RuntimeError(f"FFmpeg không khả dụng để chuẩn bị audio: {err}") from err
+
+        try:
+            _, stderr = await asyncio.wait_for(
+                proc.communicate(), timeout=YOUTUBE_CAST_DOWNLOAD_TIMEOUT_SECONDS
+            )
+        except asyncio.TimeoutError as err:
+            if proc.returncode is None:
+                with contextlib.suppress(ProcessLookupError):
+                    proc.terminate()
+                with contextlib.suppress(asyncio.TimeoutError):
+                    await asyncio.wait_for(proc.wait(), timeout=3)
+            if proc.returncode is None:
+                with contextlib.suppress(ProcessLookupError):
+                    proc.kill()
+                with contextlib.suppress(Exception):
+                    await proc.wait()
+            await self._async_youtube_unlink(output_path)
+            raise RuntimeError(
+                "quá thời gian tải audio YouTube về Home Assistant"
+            ) from err
+
+        if proc.returncode != 0:
+            detail = self._youtube_safe_ffmpeg_error(stderr or b"")
+            await self._async_youtube_unlink(output_path)
+            raise RuntimeError(
+                "FFmpeg không tải/remux được audio YouTube"
+                + (f": {detail}" if detail else "")
+            )
+
+        try:
+            size = await self._async_youtube_file_size(output_path)
+        except OSError as err:
+            raise RuntimeError("không tạo được file audio tạm") from err
+        if size < 4096:
+            await self._async_youtube_unlink(output_path)
+            raise RuntimeError("file audio tải về không hợp lệ hoặc quá nhỏ")
+
+        _LOGGER.debug(
+            "Prepared static YouTube Cast file %s (%d bytes, %s)",
+            output_path.name,
+            size,
+            mime_type,
+        )
+        return PreparedYouTubeCastFile(output_path, mime_type, extension)
+
+    async def _async_transcode_youtube_cast_file_mp3(
+        self, prepared: PreparedYouTubeCastFile
+    ) -> PreparedYouTubeCastFile:
+        """Convert a completed local M4A/WebM file to MP3 as compatibility fallback."""
+        if prepared.extension == "mp3":
+            return prepared
+        output_path = prepared.file_path.with_suffix(".mp3")
+        ffmpeg = await self._async_youtube_ffmpeg_binary()
+        args = [
+            ffmpeg, "-hide_banner", "-loglevel", "error", "-nostdin", "-y",
+            "-i", str(prepared.file_path), "-map", "0:a:0", "-vn", "-sn", "-dn",
+            "-c:a", "libmp3lame", "-b:a", "128k", "-ar", "44100", "-ac", "2",
+            str(output_path),
+        ]
+        proc = await asyncio.create_subprocess_exec(
+            *args, stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.PIPE
+        )
+        try:
+            _, stderr = await asyncio.wait_for(
+                proc.communicate(), timeout=YOUTUBE_CAST_DOWNLOAD_TIMEOUT_SECONDS
+            )
+        except asyncio.TimeoutError as err:
+            if proc.returncode is None:
+                with contextlib.suppress(ProcessLookupError):
+                    proc.terminate()
+                with contextlib.suppress(asyncio.TimeoutError):
+                    await asyncio.wait_for(proc.wait(), timeout=3)
+            if proc.returncode is None:
+                with contextlib.suppress(ProcessLookupError):
+                    proc.kill()
+                with contextlib.suppress(Exception):
+                    await proc.wait()
+            await self._async_youtube_unlink(output_path)
+            raise RuntimeError("quá thời gian chuyển audio sang MP3") from err
+        try:
+            output_size = await self._async_youtube_file_size(output_path)
+        except OSError:
+            output_size = 0
+        if proc.returncode != 0 or output_size < 4096:
+            detail = self._youtube_safe_ffmpeg_error(stderr or b"")
+            await self._async_youtube_unlink(output_path)
+            raise RuntimeError(
+                "không chuyển được file audio sang MP3"
+                + (f": {detail}" if detail else "")
+            )
+        return PreparedYouTubeCastFile(output_path, "audio/mpeg", "mp3")
+
+    def _schedule_youtube_cast_file_cleanup(
+        self, *, token: str, entity_id: str
+    ) -> None:
+        """Delete a downloaded YouTube file after Cast playback finishes."""
+        old = self._youtube_cast_cleanup_tasks.pop(token, None)
+        if old is not None and not old.done():
+            old.cancel()
+
+        async def _cleanup() -> None:
+            from .youtube_proxy import async_remove_youtube_cast_file
+
+            seen_playing = False
+            deadline = monotonic() + YOUTUBE_CAST_FILE_TTL_SECONDS
+            try:
+                while monotonic() < deadline:
+                    state = self.hass.states.get(entity_id)
+                    current = str(getattr(state, "state", "") or "").casefold()
+                    if current in {"playing", "buffering"}:
+                        seen_playing = True
+                    elif seen_playing and current in {
+                        "idle", "off", "paused", "standby",
+                        STATE_UNAVAILABLE, STATE_UNKNOWN,
+                    }:
+                        # Allow the receiver to finish its last reads before unlinking.
+                        await asyncio.sleep(15)
+                        verify = self.hass.states.get(entity_id)
+                        verify_state = str(getattr(verify, "state", "") or "").casefold()
+                        if verify_state not in {"playing", "buffering"}:
+                            break
+                    await asyncio.sleep(5)
+            finally:
+                await async_remove_youtube_cast_file(self.hass, token)
+
+        task = self.hass.async_create_task(_cleanup())
+        self._youtube_cast_cleanup_tasks[token] = task
+
+        def _done(done_task: asyncio.Task[Any]) -> None:
+            if self._youtube_cast_cleanup_tasks.get(token) is done_task:
+                self._youtube_cast_cleanup_tasks.pop(token, None)
+            if done_task.cancelled():
+                return
+            with contextlib.suppress(Exception):
+                done_task.result()
+
+        task.add_done_callback(_done)
+
+    async def _async_play_youtube_cast_downloaded_audio(
         self,
         target: YouTubeTarget,
         video: YouTubeVideo,
         audio_stream: ResolvedYouTubeAudio,
         attempts: list[str],
     ) -> str | None:
-        """Transcode audio-only to MP3 and send it through Cast quick-play."""
+        """Download audio first, then Cast a finite static file and auto-delete it."""
+        from .youtube_proxy import (
+            async_register_youtube_cast_file,
+            async_remove_youtube_cast_file,
+        )
+
         try:
-            from .youtube_proxy import async_register_youtube_cast_audio_proxy
-
-            urls = async_register_youtube_cast_audio_proxy(
-                self.hass,
-                stream_url=audio_stream.stream_url,
-                headers=audio_stream.headers,
-            )
+            prepared = await self._async_prepare_youtube_cast_file(audio_stream)
         except Exception as err:  # noqa: BLE001
-            attempts.append(f"cast_mp3_proxy:create:{type(err).__name__}")
-            _LOGGER.debug("Could not create Cast YouTube MP3 proxy", exc_info=True)
+            attempts.append(f"cast_file_prepare:{type(err).__name__}")
+            _LOGGER.warning("Could not prepare static YouTube Cast file: %s", err)
             return None
 
-        if not urls:
-            attempts.append("cast_mp3_proxy:no_ha_url")
-            return None
-
-        # Do not use normal media_player URL playback here.  HA signs custom
-        # /api paths in that branch, which changes the token URL to ?authSig=.
-        # Cast's explicit quick-play branch forwards app data before URL
-        # processing and therefore preserves the exact internal/external URL.
-        for index, url in enumerate(urls, start=1):
-            method = await self._async_play_youtube_cast_quick_play(
-                target,
-                video,
-                url,
-                label=f"cast_mp3_proxy_{index}",
-                attempts=attempts,
+        token = ""
+        try:
+            token, urls = async_register_youtube_cast_file(
+                self.hass,
+                file_path=prepared.file_path,
+                mime_type=prepared.mime_type,
+                extension=prepared.extension,
+                ttl_seconds=YOUTUBE_CAST_FILE_TTL_SECONDS,
             )
-            if method:
-                return method
+            for index, url in enumerate(urls, start=1):
+                method = await self._async_play_youtube_cast_quick_play(
+                    target,
+                    video,
+                    url,
+                    label=f"cast_static_{prepared.extension}_{index}",
+                    attempts=attempts,
+                    media_type=prepared.mime_type,
+                    stream_type="BUFFERED",
+                )
+                if method:
+                    self._schedule_youtube_cast_file_cleanup(
+                        token=token, entity_id=target.entity_id
+                    )
+                    return method
+
+            # Static M4A/AAC is officially supported by Cast.  If a particular
+            # receiver still rejects it, convert the already-downloaded file to
+            # MP3 and retry without touching YouTube again.
+            if prepared.extension != "mp3":
+                try:
+                    mp3 = await self._async_transcode_youtube_cast_file_mp3(prepared)
+                except Exception as err:  # noqa: BLE001
+                    attempts.append(f"cast_static_mp3_prepare:{type(err).__name__}")
+                    _LOGGER.debug("Local Cast MP3 conversion failed", exc_info=True)
+                else:
+                    await async_remove_youtube_cast_file(
+                        self.hass, token, delete_file=False
+                    )
+                    await self._async_youtube_unlink(prepared.file_path)
+                    token, urls = async_register_youtube_cast_file(
+                        self.hass,
+                        file_path=mp3.file_path,
+                        mime_type=mp3.mime_type,
+                        extension=mp3.extension,
+                        ttl_seconds=YOUTUBE_CAST_FILE_TTL_SECONDS,
+                    )
+                    for index, url in enumerate(urls, start=1):
+                        method = await self._async_play_youtube_cast_quick_play(
+                            target,
+                            video,
+                            url,
+                            label=f"cast_static_mp3_{index}",
+                            attempts=attempts,
+                            media_type="audio/mpeg",
+                            stream_type="BUFFERED",
+                        )
+                        if method:
+                            self._schedule_youtube_cast_file_cleanup(
+                                token=token, entity_id=target.entity_id
+                            )
+                            return method
+        finally:
+            # Successful playback hands ownership to the cleanup task.
+            cleanup_task = self._youtube_cast_cleanup_tasks.get(token) if token else None
+            if token and cleanup_task is None:
+                await async_remove_youtube_cast_file(self.hass, token)
+            elif not token:
+                await self._async_youtube_unlink(prepared.file_path)
         return None
 
     async def _async_play_youtube_speaker(
@@ -1353,7 +1673,7 @@ class YouTubeManagerMixin:
                 f"{audio_stream.acodec}"
             )
             if is_cast:
-                cast_method = await self._async_play_youtube_cast_audio(
+                cast_method = await self._async_play_youtube_cast_downloaded_audio(
                     target, video, audio_stream, attempts
                 )
                 if cast_method:
@@ -1405,7 +1725,7 @@ class YouTubeManagerMixin:
         if shell_stream:
             attempts.append("shell_yt_dlp_audio:ok")
             if is_cast:
-                cast_method = await self._async_play_youtube_cast_audio(
+                cast_method = await self._async_play_youtube_cast_downloaded_audio(
                     target, video, shell_stream, attempts
                 )
                 if cast_method:

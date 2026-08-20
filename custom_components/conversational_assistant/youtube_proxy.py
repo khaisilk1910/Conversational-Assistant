@@ -1,16 +1,16 @@
-"""Short-lived Home Assistant proxies for YouTube audio streams.
+"""Short-lived HTTP helpers for YouTube audio playback.
 
-Two proxy modes are intentionally provided:
+Two deliberately separate paths are provided:
 
-* the generic byte-range proxy preserves the yt-dlp selected audio stream and
-  headers for media players that can consume M4A/WebM directly;
-* the Cast proxy is a token-protected, unauthenticated HTTP endpoint which
-  transcodes the selected audio-only stream to MP3 on demand.  Google Cast's
-  Default Media Receiver then sees a conventional ``audio/mpeg`` stream and
-  never has to fetch an expiring Googlevideo URL or reproduce yt-dlp headers.
+* generic speakers can consume a signed byte-range proxy of the yt-dlp
+  selected audio stream;
+* Google Cast / Google Home / Nest receives a *completed local audio file*.
+  The integration downloads/remuxes the file before playback, then this module
+  exposes it through a short random capability URL with normal file/range
+  semantics.  The file is deleted after playback or by a TTL safety task.
 
-Nothing is downloaded or transcoded at Home Assistant startup.  FFmpeg is only
-spawned after a Cast device actually requests a generated stream URL.
+No YouTube network request, download, file scan, or FFmpeg process runs while
+Home Assistant starts.  These views only register lightweight HTTP routes.
 """
 
 from __future__ import annotations
@@ -19,7 +19,7 @@ import asyncio
 import contextlib
 from dataclasses import dataclass
 import logging
-import re
+from pathlib import Path
 from secrets import token_urlsafe
 from time import monotonic
 from typing import Mapping
@@ -37,9 +37,9 @@ from .const import DOMAIN
 _LOGGER = logging.getLogger(__name__)
 
 _DATA_KEY = "youtube_audio_proxy"
-_CAST_DATA_KEY = "youtube_cast_audio_proxy"
+_CAST_FILE_DATA_KEY = "youtube_cast_file_proxy"
 _PROXY_TTL_SECONDS = 5 * 60 * 60
-_CAST_PROXY_TTL_SECONDS = 60 * 60
+_CAST_FILE_TTL_SECONDS = 8 * 60 * 60
 _ALLOWED_EXTENSIONS = {"m4a", "mp4", "mp3", "aac", "webm", "ogg", "opus"}
 _FORWARD_RESPONSE_HEADERS = {
     "accept-ranges",
@@ -62,7 +62,9 @@ _CORS_HEADERS = {
     "Access-Control-Allow-Origin": "*",
     "Access-Control-Allow-Methods": "GET, HEAD, OPTIONS",
     "Access-Control-Allow-Headers": "Range, Content-Type",
-    "Access-Control-Expose-Headers": "Content-Length, Content-Range, Accept-Ranges, Content-Type",
+    "Access-Control-Expose-Headers": (
+        "Content-Length, Content-Range, Accept-Ranges, Content-Type"
+    ),
 }
 
 
@@ -77,11 +79,12 @@ class YouTubeAudioProxyItem:
 
 
 @dataclass(slots=True)
-class YouTubeCastAudioProxyItem:
-    """An audio-only upstream which will be transcoded for Google Cast."""
+class YouTubeCastFileItem:
+    """One fully downloaded audio file exposed temporarily to Google Cast."""
 
-    stream_url: str
-    headers: dict[str, str]
+    file_path: Path
+    mime_type: str
+    extension: str
     expires_at: float
 
 
@@ -96,34 +99,34 @@ def _proxy_store(hass: HomeAssistant) -> dict[str, YouTubeAudioProxyItem]:
 
 
 @callback
-def _cast_proxy_store(hass: HomeAssistant) -> dict[str, YouTubeCastAudioProxyItem]:
+def _cast_file_store(hass: HomeAssistant) -> dict[str, YouTubeCastFileItem]:
     domain_data = hass.data.setdefault(DOMAIN, {})
-    store = domain_data.get(_CAST_DATA_KEY)
+    store = domain_data.get(_CAST_FILE_DATA_KEY)
     if not isinstance(store, dict):
         store = {}
-        domain_data[_CAST_DATA_KEY] = store
+        domain_data[_CAST_FILE_DATA_KEY] = store
     return store
 
 
 @callback
-def _purge_expired(hass: HomeAssistant) -> None:
+def _purge_expired_proxy_items(hass: HomeAssistant) -> None:
     now = monotonic()
-    for store in (_proxy_store(hass), _cast_proxy_store(hass)):
-        for token, item in list(store.items()):
-            if item.expires_at <= now:
-                store.pop(token, None)
+    store = _proxy_store(hass)
+    for token, item in list(store.items()):
+        if item.expires_at <= now:
+            store.pop(token, None)
 
 
 @callback
 def async_setup_youtube_audio_proxy(hass: HomeAssistant) -> None:
-    """Register both proxy endpoints once without doing network I/O."""
+    """Register lightweight YouTube HTTP endpoints once."""
     domain_data = hass.data.setdefault(DOMAIN, {})
     if domain_data.get(f"{_DATA_KEY}_view_registered"):
         return
     _proxy_store(hass)
-    _cast_proxy_store(hass)
+    _cast_file_store(hass)
     hass.http.register_view(YouTubeAudioProxyView)
-    hass.http.register_view(YouTubeCastAudioProxyView)
+    hass.http.register_view(YouTubeCastFileView)
     domain_data[f"{_DATA_KEY}_view_registered"] = True
 
 
@@ -137,7 +140,7 @@ def async_register_youtube_audio_proxy(
     extension: str = "m4a",
 ) -> str:
     """Expose one upstream stream and return a signed absolute HA URL."""
-    _purge_expired(hass)
+    _purge_expired_proxy_items(hass)
     ext = str(extension or "m4a").strip().casefold().lstrip(".")
     if ext not in _ALLOWED_EXTENSIONS:
         ext = "m4a"
@@ -179,34 +182,117 @@ def _candidate_base_urls(hass: HomeAssistant) -> list[str]:
     return bases
 
 
+async def async_remove_youtube_cast_file(
+    hass: HomeAssistant, token: str, *, delete_file: bool = True
+) -> None:
+    """Forget a temporary Cast file and optionally remove it from disk."""
+    item = _cast_file_store(hass).pop(str(token), None)
+    if not isinstance(item, YouTubeCastFileItem) or not delete_file:
+        return
+
+    def _unlink() -> None:
+        with contextlib.suppress(FileNotFoundError, OSError):
+            item.file_path.unlink()
+
+    await hass.async_add_executor_job(_unlink)
+
+
 @callback
-def async_register_youtube_cast_audio_proxy(
+def async_register_youtube_cast_file(
     hass: HomeAssistant,
     *,
-    stream_url: str,
-    headers: Mapping[str, str] | None = None,
-) -> list[str]:
-    """Return short capability URLs that transcode one source to MP3 for Cast.
-
-    This view deliberately uses a long random token instead of Home Assistant's
-    ``authSig`` query string.  Some Cast receivers are sensitive to long URLs,
-    and the endpoint contains no reusable credential beyond the short-lived
-    random capability itself.
-    """
-    _purge_expired(hass)
+    file_path: str | Path,
+    mime_type: str,
+    extension: str,
+    ttl_seconds: int = _CAST_FILE_TTL_SECONDS,
+) -> tuple[str, list[str]]:
+    """Expose a completed local audio file using a random capability URL."""
+    path_obj = Path(file_path)
+    ext = str(extension or path_obj.suffix.lstrip(".") or "m4a").casefold().lstrip(".")
+    if ext not in _ALLOWED_EXTENSIONS:
+        ext = "m4a"
+    ttl = max(300, int(ttl_seconds))
     token = token_urlsafe(24).replace(".", "_")
-    cleaned_headers = {
-        str(key): str(value)
-        for key, value in dict(headers or {}).items()
-        if key and value and str(key).casefold() not in _DROP_REQUEST_HEADERS
-    }
-    _cast_proxy_store(hass)[token] = YouTubeCastAudioProxyItem(
-        stream_url=str(stream_url),
-        headers=cleaned_headers,
-        expires_at=monotonic() + _CAST_PROXY_TTL_SECONDS,
+    _cast_file_store(hass)[token] = YouTubeCastFileItem(
+        file_path=path_obj,
+        mime_type=str(mime_type or "audio/mp4"),
+        extension=ext,
+        expires_at=monotonic() + ttl,
     )
-    path = f"/api/{DOMAIN}/youtube_cast_audio/{token}.mp3"
-    return [f"{base}{path}" for base in _candidate_base_urls(hass)]
+    route = f"/api/{DOMAIN}/youtube_cast_file/{token}.{ext}"
+    urls = [f"{base}{route}" for base in _candidate_base_urls(hass)]
+
+    async def _expire_later() -> None:
+        await asyncio.sleep(ttl)
+        await async_remove_youtube_cast_file(hass, token)
+
+    hass.async_create_task(_expire_later())
+    return token, urls
+
+
+class YouTubeCastFileView(HomeAssistantView):
+    """Serve a completed local audio file with byte-range support for Cast."""
+
+    url = f"/api/{DOMAIN}/youtube_cast_file/{{token}}.{{ext}}"
+    name = f"api:{DOMAIN}:youtube_cast_file"
+    # The long random token is the short-lived capability.  No reusable HA
+    # credential is embedded in the URL.
+    requires_auth = False
+    cors_allowed = True
+
+    async def get(
+        self, request: web.Request, token: str, ext: str
+    ) -> web.StreamResponse:
+        return await self._serve(request, token=token, ext=ext, head_only=False)
+
+    async def head(
+        self, request: web.Request, token: str, ext: str
+    ) -> web.StreamResponse:
+        return await self._serve(request, token=token, ext=ext, head_only=True)
+
+    async def _serve(
+        self,
+        request: web.Request,
+        *,
+        token: str,
+        ext: str,
+        head_only: bool,
+    ) -> web.StreamResponse:
+        hass: HomeAssistant = request.app[KEY_HASS]
+        item = _cast_file_store(hass).get(str(token))
+        if not isinstance(item, YouTubeCastFileItem):
+            raise web.HTTPNotFound()
+        if item.expires_at <= monotonic():
+            hass.async_create_task(async_remove_youtube_cast_file(hass, str(token)))
+            raise web.HTTPNotFound()
+
+        def _stat_file() -> tuple[bool, int]:
+            try:
+                stat = item.file_path.stat()
+                return item.file_path.is_file(), stat.st_size
+            except OSError:
+                return False, 0
+
+        exists, file_size = await hass.async_add_executor_job(_stat_file)
+        if not exists:
+            _cast_file_store(hass).pop(str(token), None)
+            raise web.HTTPNotFound()
+
+        headers = {
+            **_CORS_HEADERS,
+            "Content-Type": item.mime_type,
+            "Cache-Control": "no-store",
+            "Content-Disposition": f'inline; filename="youtube_audio.{item.extension}"',
+            "X-Content-Type-Options": "nosniff",
+            "Accept-Ranges": "bytes",
+        }
+        if head_only:
+            headers["Content-Length"] = str(file_size)
+            return web.Response(status=200, headers=headers)
+
+        # aiohttp FileResponse handles Range requests and partial responses for
+        # seekable/buffered Cast playback.
+        return web.FileResponse(path=item.file_path, headers=headers)
 
 
 class YouTubeAudioProxyView(HomeAssistantView):
@@ -217,17 +303,22 @@ class YouTubeAudioProxyView(HomeAssistantView):
     requires_auth = True
     cors_allowed = True
 
-    async def get(self, request: web.Request) -> web.StreamResponse:
-        return await self._handle(request, head_only=False)
+    async def get(
+        self, request: web.Request, token: str, ext: str
+    ) -> web.StreamResponse:
+        return await self._handle(request, token=token, head_only=False)
 
-    async def head(self, request: web.Request) -> web.StreamResponse:
-        return await self._handle(request, head_only=True)
+    async def head(
+        self, request: web.Request, token: str, ext: str
+    ) -> web.StreamResponse:
+        return await self._handle(request, token=token, head_only=True)
 
-    async def _handle(self, request: web.Request, *, head_only: bool) -> web.StreamResponse:
+    async def _handle(
+        self, request: web.Request, *, token: str, head_only: bool
+    ) -> web.StreamResponse:
         hass: HomeAssistant = request.app[KEY_HASS]
-        _purge_expired(hass)
-        token = str(request.match_info.get("token", ""))
-        item = _proxy_store(hass).get(token)
+        _purge_expired_proxy_items(hass)
+        item = _proxy_store(hass).get(str(token))
         if not isinstance(item, YouTubeAudioProxyItem):
             raise web.HTTPNotFound()
 
@@ -279,212 +370,3 @@ class YouTubeAudioProxyView(HomeAssistantView):
             return response
         finally:
             upstream.release()
-
-
-class YouTubeCastAudioProxyView(HomeAssistantView):
-    """Transcode yt-dlp audio-only input to a simple MP3 stream for Cast."""
-
-    url = f"/api/{DOMAIN}/youtube_cast_audio/{{token}}.mp3"
-    name = f"api:{DOMAIN}:youtube_cast_audio"
-    # The random path token is the short-lived capability.  Avoid authSig so the
-    # Cast receiver sees a short URL and does not need HA authentication logic.
-    requires_auth = False
-    cors_allowed = True
-
-    async def head(self, request: web.Request) -> web.StreamResponse:
-        hass: HomeAssistant = request.app[KEY_HASS]
-        _purge_expired(hass)
-        token = str(request.match_info.get("token", ""))
-        if not isinstance(_cast_proxy_store(hass).get(token), YouTubeCastAudioProxyItem):
-            raise web.HTTPNotFound()
-        return web.Response(
-            status=200,
-            headers={
-                **_CORS_HEADERS,
-                "Content-Type": "audio/mpeg",
-                "Cache-Control": "no-store",
-            },
-        )
-
-    async def get(self, request: web.Request) -> web.StreamResponse:
-        hass: HomeAssistant = request.app[KEY_HASS]
-        _purge_expired(hass)
-        token = str(request.match_info.get("token", ""))
-        item = _cast_proxy_store(hass).get(token)
-        if not isinstance(item, YouTubeCastAudioProxyItem):
-            raise web.HTTPNotFound()
-
-        header_lines: list[str] = []
-        for key, value in item.headers.items():
-            safe_key = str(key).replace("\r", "").replace("\n", "").strip()
-            safe_value = str(value).replace("\r", " ").replace("\n", " ").strip()
-            if safe_key and safe_value:
-                header_lines.append(f"{safe_key}: {safe_value}")
-        header_blob = "\r\n".join(header_lines)
-        if header_blob:
-            header_blob += "\r\n"
-
-        args = [
-            "ffmpeg",
-            "-hide_banner",
-            "-loglevel",
-            "error",
-            "-nostdin",
-            "-reconnect",
-            "1",
-            "-reconnect_streamed",
-            "1",
-            "-reconnect_delay_max",
-            "5",
-        ]
-        if header_blob:
-            args.extend(["-headers", header_blob])
-        args.extend(
-            [
-                "-i",
-                item.stream_url,
-                "-map",
-                "0:a:0",
-                "-vn",
-                "-sn",
-                "-dn",
-                "-c:a",
-                "libmp3lame",
-                "-b:a",
-                "128k",
-                "-ar",
-                "44100",
-                "-ac",
-                "2",
-                "-f",
-                "mp3",
-                "pipe:1",
-            ]
-        )
-
-        ffmpeg_binary = "ffmpeg"
-        try:
-            from homeassistant.components.ffmpeg import get_ffmpeg_manager
-            from homeassistant.setup import async_setup_component
-
-            try:
-                ffmpeg_binary = get_ffmpeg_manager(hass).binary
-            except ValueError:
-                if await async_setup_component(hass, "ffmpeg", {}):
-                    ffmpeg_binary = get_ffmpeg_manager(hass).binary
-        except Exception:  # noqa: BLE001 - keep executable fallback
-            _LOGGER.debug(
-                "Could not resolve Home Assistant FFmpeg manager; using ffmpeg from PATH",
-                exc_info=True,
-            )
-        args[0] = ffmpeg_binary
-
-        try:
-            proc = await asyncio.create_subprocess_exec(
-                *args,
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.PIPE,
-            )
-        except (FileNotFoundError, OSError) as err:
-            _LOGGER.warning("FFmpeg is unavailable for YouTube Cast audio: %s", err)
-            raise web.HTTPServiceUnavailable(text="FFmpeg unavailable") from err
-
-        assert proc.stdout is not None
-        assert proc.stderr is not None
-        stderr_tail = bytearray()
-
-        async def _drain_stderr() -> None:
-            while chunk := await proc.stderr.read(4096):
-                stderr_tail.extend(chunk)
-                if len(stderr_tail) > 12 * 1024:
-                    del stderr_tail[: len(stderr_tail) - 12 * 1024]
-
-        stderr_task = asyncio.create_task(_drain_stderr())
-
-        def _safe_stderr() -> str:
-            text = stderr_tail.decode("utf-8", errors="replace").strip()
-            text = re.sub(r"https?://\S+", "<url>", text)
-            return text[-1500:]
-
-        # Do not answer 200 until FFmpeg has actually produced MP3 bytes.
-        # Otherwise Cast sees a successful but empty stream and only reports its
-        # generic IDLE/ERROR reachability message, hiding the useful failure.
-        try:
-            first_chunk = await asyncio.wait_for(proc.stdout.read(64 * 1024), timeout=12)
-        except asyncio.TimeoutError as err:
-            if proc.returncode is None:
-                with contextlib.suppress(ProcessLookupError):
-                    proc.terminate()
-            with contextlib.suppress(asyncio.TimeoutError):
-                await asyncio.wait_for(proc.wait(), timeout=2)
-            with contextlib.suppress(asyncio.TimeoutError):
-                await asyncio.wait_for(stderr_task, timeout=1)
-            detail = _safe_stderr()
-            _LOGGER.warning(
-                "YouTube Cast FFmpeg produced no audio within 12 seconds%s",
-                f": {detail}" if detail else "",
-            )
-            raise web.HTTPBadGateway(text="FFmpeg produced no audio") from err
-
-        if not first_chunk:
-            with contextlib.suppress(asyncio.TimeoutError):
-                await asyncio.wait_for(proc.wait(), timeout=2)
-            with contextlib.suppress(asyncio.TimeoutError):
-                await asyncio.wait_for(stderr_task, timeout=1)
-            detail = _safe_stderr()
-            _LOGGER.warning(
-                "YouTube Cast FFmpeg exited before producing audio (code=%s)%s",
-                proc.returncode,
-                f": {detail}" if detail else "",
-            )
-            raise web.HTTPBadGateway(text="FFmpeg could not open YouTube audio")
-
-        response = web.StreamResponse(
-            status=200,
-            headers={
-                **_CORS_HEADERS,
-                "Content-Type": "audio/mpeg",
-                "Cache-Control": "no-store",
-                "Content-Disposition": 'inline; filename="youtube_audio.mp3"',
-                "X-Content-Type-Options": "nosniff",
-            },
-        )
-        await response.prepare(request)
-
-        try:
-            await response.write(first_chunk)
-            while chunk := await proc.stdout.read(64 * 1024):
-                await response.write(chunk)
-        except (ConnectionResetError, RuntimeError):
-            if proc.returncode is None:
-                proc.terminate()
-        except asyncio.CancelledError:
-            if proc.returncode is None:
-                proc.terminate()
-            raise
-        finally:
-            if proc.returncode is None:
-                with contextlib.suppress(ProcessLookupError):
-                    proc.terminate()
-            with contextlib.suppress(asyncio.TimeoutError):
-                await asyncio.wait_for(proc.wait(), timeout=3)
-            if proc.returncode is None:
-                with contextlib.suppress(ProcessLookupError):
-                    proc.kill()
-                with contextlib.suppress(Exception):
-                    await proc.wait()
-            with contextlib.suppress(asyncio.TimeoutError, asyncio.CancelledError):
-                await asyncio.wait_for(stderr_task, timeout=1)
-            if not stderr_task.done():
-                stderr_task.cancel()
-            if proc.returncode not in (0, None):
-                detail = _safe_stderr()
-                _LOGGER.debug(
-                    "YouTube Cast FFmpeg exited with code %s%s",
-                    proc.returncode,
-                    f": {detail}" if detail else "",
-                )
-
-        with contextlib.suppress(ConnectionResetError, RuntimeError):
-            await response.write_eof()
-        return response
