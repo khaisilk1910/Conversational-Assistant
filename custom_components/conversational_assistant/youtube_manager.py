@@ -70,10 +70,6 @@ from .youtube_flow import (
     strip_target_from_query,
     target_kind_from_device_class,
 )
-from .youtube_proxy import (
-    async_register_youtube_audio_proxy,
-    async_register_youtube_cast_audio_proxy,
-)
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -1209,6 +1205,8 @@ class YouTubeManagerMixin:
         converts the already validated audio-only source to a simple MP3 stream.
         """
         try:
+            from .youtube_proxy import async_register_youtube_cast_audio_proxy
+
             urls = async_register_youtube_cast_audio_proxy(
                 self.hass,
                 stream_url=audio_stream.stream_url,
@@ -1318,6 +1316,8 @@ class YouTubeManagerMixin:
             # especially useful for old speakers that probe a suffix or issue
             # byte-range requests and cannot reproduce yt-dlp's HTTP headers.
             try:
+                from .youtube_proxy import async_register_youtube_audio_proxy
+
                 proxy_url = async_register_youtube_audio_proxy(
                     self.hass,
                     stream_url=audio_stream.stream_url,
@@ -1379,6 +1379,8 @@ class YouTubeManagerMixin:
                 if cast_method:
                     return cast_method
             try:
+                from .youtube_proxy import async_register_youtube_audio_proxy
+
                 proxy_url = async_register_youtube_audio_proxy(
                     self.hass,
                     stream_url=shell_stream.stream_url,

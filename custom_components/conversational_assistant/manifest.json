@@ -6,11 +6,15 @@
   "dependencies": [
     "ai_task",
     "conversation",
-    "http",
-    "media_extractor"
+    "http"
   ],
   "integration_type": "service",
   "iot_class": "local_push",
   "requirements": [],
-  "version": "2026.08.20.1205"
+  "version": "2026.08.20.1600",
+  "after_dependencies": [
+    "cast",
+    "ffmpeg",
+    "media_extractor"
+  ]
 }

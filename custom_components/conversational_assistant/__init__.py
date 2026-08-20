@@ -23,7 +23,6 @@ from .const import (
     SERVICE_PROCESS_ZALO_WEBHOOK,
 )
 from .manager import ConversationalAssistantManager
-from .youtube_proxy import async_setup_youtube_audio_proxy
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -82,8 +81,7 @@ def _normalize_payload(value: Any) -> dict[str, Any]:
 
 
 async def async_setup(hass: HomeAssistant, _config: ConfigType) -> bool:
-    """Register integration actions and lightweight HTTP helpers."""
-    async_setup_youtube_audio_proxy(hass)
+    """Register core integration actions; optional HTTP helpers must never block setup."""
 
     async def async_process_zalo_webhook(call: ServiceCall) -> None:
         manager = _loaded_manager(
@@ -96,12 +94,24 @@ async def async_setup(hass: HomeAssistant, _config: ConfigType) -> bool:
         )
         _LOGGER.debug("Processed existing Zalo webhook payload: %s", result)
 
+    # Register the critical Zalo action first.  Optional YouTube HTTP proxy
+    # setup must never be able to remove the integration's core actions.
     hass.services.async_register(
         DOMAIN,
         SERVICE_PROCESS_ZALO_WEBHOOK,
         async_process_zalo_webhook,
         schema=_PROCESS_ZALO_SCHEMA,
     )
+
+    try:
+        from .youtube_proxy import async_setup_youtube_audio_proxy
+
+        async_setup_youtube_audio_proxy(hass)
+    except Exception:  # noqa: BLE001 - optional helper must not block integration
+        _LOGGER.exception(
+            "YouTube audio proxy setup failed; core Conversational Assistant "
+            "services will remain available"
+        )
     return True
 
 

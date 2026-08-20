@@ -214,15 +214,13 @@ class YouTubeAudioProxyView(HomeAssistantView):
     url = f"/api/{DOMAIN}/youtube_audio/{{token}}.{{ext}}"
     name = f"api:{DOMAIN}:youtube_audio"
     requires_auth = True
+    cors_allowed = True
 
     async def get(self, request: web.Request) -> web.StreamResponse:
         return await self._handle(request, head_only=False)
 
     async def head(self, request: web.Request) -> web.StreamResponse:
         return await self._handle(request, head_only=True)
-
-    async def options(self, request: web.Request) -> web.StreamResponse:
-        return web.Response(status=204, headers=_CORS_HEADERS)
 
     async def _handle(self, request: web.Request, *, head_only: bool) -> web.StreamResponse:
         hass: HomeAssistant = request.app[KEY_HASS]
@@ -290,9 +288,7 @@ class YouTubeCastAudioProxyView(HomeAssistantView):
     # The random path token is the short-lived capability.  Avoid authSig so the
     # Cast receiver sees a short URL and does not need HA authentication logic.
     requires_auth = False
-
-    async def options(self, request: web.Request) -> web.StreamResponse:
-        return web.Response(status=204, headers=_CORS_HEADERS)
+    cors_allowed = True
 
     async def head(self, request: web.Request) -> web.StreamResponse:
         hass: HomeAssistant = request.app[KEY_HASS]
@@ -364,6 +360,23 @@ class YouTubeCastAudioProxyView(HomeAssistantView):
                 "pipe:1",
             ]
         )
+
+        ffmpeg_binary = "ffmpeg"
+        try:
+            from homeassistant.components.ffmpeg import get_ffmpeg_manager
+            from homeassistant.setup import async_setup_component
+
+            try:
+                ffmpeg_binary = get_ffmpeg_manager(hass).binary
+            except ValueError:
+                if await async_setup_component(hass, "ffmpeg", {}):
+                    ffmpeg_binary = get_ffmpeg_manager(hass).binary
+        except Exception:  # noqa: BLE001 - keep executable fallback
+            _LOGGER.debug(
+                "Could not resolve Home Assistant FFmpeg manager; using ffmpeg from PATH",
+                exc_info=True,
+            )
+        args[0] = ffmpeg_binary
 
         try:
             proc = await asyncio.create_subprocess_exec(
