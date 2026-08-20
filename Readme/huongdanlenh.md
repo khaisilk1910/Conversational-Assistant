@@ -129,7 +129,7 @@ Luồng xử lý:
 4. Trả danh sách tối đa **10 video**, người dùng chọn bằng số hoặc tên. Nếu không trả lời trong **20 giây**, tích hợp tự chọn video số 1.
 5. Với **loa**: nếu trạng thái `playing` hoặc `buffering`, bot hỏi **Phát đè** hay tiếp tục chờ. Nếu không phát đè, tích hợp kiểm tra lại mỗi 10 giây, tối đa **10 phút**; loa rảnh thì tự phát, quá 10 phút thì hủy và báo đúng luồng.
 6. Với **TV/video player**: phát ngay, không hỏi phát đè. Ưu tiên phương thức native phù hợp Cast/Android TV/Apple TV; sau đó fallback Media Extractor/`media_player.play_media`.
-7. Với **loa**, ưu tiên `media_extractor.extract_media_url` lấy audio rồi gọi `media_player.play_media`; nếu không có action đó thì fallback `media_extractor.play_media`.
+7. Với **loa**, gọi `media_extractor.play_media` trước với `media_content_type: music` đúng schema Home Assistant và **kiểm tra thật** entity đã chuyển sang `playing`/`buffering`. Nếu loa không phát do URL YouTube dạng audio+video, tích hợp tự lấy stream **audio-only** rồi gọi `media_player.play_media` với MIME thực (`audio/mp4`, `audio/webm`, ...). Chỉ báo “Đã phát” sau khi xác nhận trạng thái phát; nếu các phương thức đều thất bại sẽ báo lỗi thay vì báo thành công giả.
 
 Nếu chưa cấu hình danh sách TV/media riêng, tích hợp chỉ quét `media_player` **khi có yêu cầu YouTube**, không quét lúc khởi động. Có thể đặt tên TV/media player trong **General settings > TV/thiết bị phát media và tên gọi** để câu lệnh tự nhiên chính xác hơn.
 
