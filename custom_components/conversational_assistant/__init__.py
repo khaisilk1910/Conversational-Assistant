@@ -23,6 +23,7 @@ from .const import (
     SERVICE_PROCESS_ZALO_WEBHOOK,
 )
 from .manager import ConversationalAssistantManager
+from .youtube_proxy import async_setup_youtube_audio_proxy
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -81,7 +82,8 @@ def _normalize_payload(value: Any) -> dict[str, Any]:
 
 
 async def async_setup(hass: HomeAssistant, _config: ConfigType) -> bool:
-    """Register the action used by the user's existing webhook."""
+    """Register integration actions and lightweight HTTP helpers."""
+    async_setup_youtube_audio_proxy(hass)
 
     async def async_process_zalo_webhook(call: ServiceCall) -> None:
         manager = _loaded_manager(
