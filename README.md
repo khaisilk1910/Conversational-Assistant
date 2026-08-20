@@ -164,7 +164,7 @@ Tất cả Zalo
 - Hiểu câu tự nhiên như `Tìm YouTube nhạc bolero phát loa Phòng Ngủ` hoặc `Tìm YouTube dạy tiếng Anh phát TV Phòng Ngủ`.
 - Trả tối đa 10 video để chọn; nếu không có phản hồi sau 20 giây sẽ tự chọn video đầu tiên.
 - Loa đang `playing/buffering` sẽ hỏi có **phát đè** hay không và có thể chờ rảnh tối đa 10 phút; TV phát video ngay.
-- Ưu tiên action Home Assistant: `media_player.search_media`, `media_extractor.extract_media_url`, `media_extractor.play_media`, `media_player.play_media`; YouTube Data API v3 được gọi bất đồng bộ trực tiếp bằng key trong **YouTube Settings**, còn `pyscript.youtube_search_tool` chỉ là fallback tương thích cũ.
+- Ưu tiên action Home Assistant: `media_player.search_media`, `media_extractor.play_media`, `media_player.play_media`; YouTube Data API v3 được gọi bất đồng bộ trực tiếp bằng key trong **YouTube Settings**, còn `pyscript.youtube_search_tool` chỉ là fallback tương thích cũ. Riêng loa, tích hợp kiểm tra entity thật sự vào `playing/buffering`; nếu Media Extractor trả stream YouTube dạng video+audio mà loa không nhận, tích hợp mới lấy audio-only và phát lại với MIME audio cụ thể.
 - Thêm **Conversational Assistant options > YouTube Settings** để nhập `youtube_api_key`; không cần khai báo key trong `configuration.yaml`/Pyscript. Danh sách media player và kết nối YouTube chỉ được dùng lazily khi có yêu cầu, không làm nặng quá trình khởi động integration.
 
 ### Camera, lịch chụp và video gửi Zalo
