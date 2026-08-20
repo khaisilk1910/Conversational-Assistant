@@ -1,6 +1,6 @@
 # Conversational Assistant
 
-[![Home Assistant](https://img.shields.io/badge/Home%20Assistant-2026.7.0%2B-41BDF5.svg)](https://www.home-assistant.io/)
+[![Home Assistant](https://img.shields.io/badge/Home%20Assistant-2026.8.0%2B-41BDF5.svg)](https://www.home-assistant.io/)
 [![HACS](https://img.shields.io/badge/HACS-Custom-41BDF5.svg)](https://hacs.xyz/)
 [![Languages](https://img.shields.io/badge/ngôn%20ngữ-Tiếng%20Việt%20%7C%20English-red.svg)](#ngôn-ngữ)
 
@@ -158,6 +158,14 @@ Tất cả Zalo
 - Không lưu pass trong Home Assistant Store.
 - Khóa tạm thời 5 phút sau 5 lần nhập sai pass.
 - Luồng hội thoại được tách theo thiết bị, người dùng hoặc cuộc trò chuyện Zalo để tránh lẫn câu trả lời xác nhận.
+
+### YouTube tìm kiếm và phát ra loa/TV
+
+- Hiểu câu tự nhiên như `Tìm YouTube nhạc bolero phát loa Phòng Ngủ` hoặc `Tìm YouTube dạy tiếng Anh phát TV Phòng Ngủ`.
+- Trả tối đa 10 video để chọn; nếu không có phản hồi sau 20 giây sẽ tự chọn video đầu tiên.
+- Loa đang `playing/buffering` sẽ hỏi có **phát đè** hay không và có thể chờ rảnh tối đa 10 phút; TV phát video ngay.
+- Ưu tiên action Home Assistant: `media_player.search_media`, `media_extractor.extract_media_url`, `media_extractor.play_media`, `media_player.play_media`; tìm kiếm YouTube Data API qua `pyscript.youtube_search_tool` là fallback/nguồn bổ sung.
+- Danh sách media player được quét lazily khi có yêu cầu, không làm nặng quá trình khởi động integration.
 
 ### Camera, lịch chụp và video gửi Zalo
 
