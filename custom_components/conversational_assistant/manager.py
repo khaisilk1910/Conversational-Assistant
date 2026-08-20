@@ -5433,23 +5433,29 @@ class ConversationalAssistantManager(NoteManagerMixin, YouTubeManagerMixin):
         def has_any(*terms: str) -> bool:
             return any(term in padded for term in terms)
 
-        camera = has_any(" cam ", " camera ", " may quay ")
+        camera = has_any(
+            " cam ", " camera ", " may quay ", " camera an ninh ",
+            " camera giam sat ",
+        )
         features: list[str] = []
         if camera and has_any(
             " video ", " quay ", " ghi ", " record ", " xem cam ",
-            " xem camera ", " xem may quay ",
+            " xem camera ", " xem may quay ", " coi cam ", " coi camera ",
         ):
             features.append("camera_video")
         if camera and has_any(
             " chup ", " anh ", " hinh ", " snapshot ", " gui cam ",
-            " gui camera ",
+            " gui camera ", " lay anh ", " lay hinh ",
         ):
             features.append("camera_capture")
-        if camera and has_any(" phan tich ", " kiem tra ", " analyze ", " analyse "):
+        if camera and has_any(
+            " phan tich ", " kiem tra ", " analyze ", " analyse ",
+            " co gi ", " co ai ",
+        ):
             features.append("camera_analysis")
         if camera and has_any(
             " hen ", " lich ", " moi ", " hang ngay ", " hang tuan ",
-            " lap ", " dinh ky ",
+            " lap ", " dinh ky ", " sau ",
         ):
             features.append("camera_schedule")
         if camera and not features:
@@ -5458,135 +5464,109 @@ class ConversationalAssistantManager(NoteManagerMixin, YouTubeManagerMixin):
         if has_any(
             " thoi tiet ", " du bao ", " mua ", " bao so ", " bao bien ",
             " bao nhiet doi ", " con bao ", " ap thap ", " uv ",
+            " nhiet do ngoai troi ", " do am ", " nang ", " gio manh ",
         ):
             features.append("weather")
-        if has_any(" youtube ", " you tube ", " youtu be "):
+        if has_any(
+            " youtube ", " you tube ", " youtu be ", " yt ",
+            " mo clip youtube ", " tim video youtube ",
+        ):
             features.append("youtube")
         if has_any(
-            " loa ", " tts ", " doc loa ", " bao ra loa ", " thong bao loa ",
+            " loa ", " speaker ", " tts ", " doc loa ", " bao ra loa ",
+            " thong bao loa ", " noi qua loa ", " nhan loa ", " gui loa ",
+            " phat ra loa ",
         ):
             features.append("speaker")
-        if has_any(" zalo ", " gui zalo ", " thong bao zalo ", " bao zalo ") and not camera:
+        if has_any(
+            " zalo ", " gui zalo ", " thong bao zalo ", " bao zalo ",
+            " nhan zalo ", " nhan qua zalo ",
+        ) and not camera:
             features.append("zalo_send")
-        if has_any(" ghi chu ", " note ", " memo "):
+        if has_any(
+            " ghi chu ", " note ", " memo ", " luu lai ", " note lai ",
+        ):
             features.append("note")
-        if has_any(" su kien ", " cuoc hop ", " cuoc hen ", " calendar "):
+        if has_any(
+            " su kien ", " cuoc hop ", " cuoc hen ", " calendar ",
+            " lich lam viec ", " lich hom nay ", " lich ngay mai ",
+            " lich tuan ", " dat lich ", " them lich ",
+        ):
             features.append("calendar")
-        if has_any(" am lich ", " duong lich ", " lich am ", " lich duong "):
+        if has_any(
+            " am lich ", " duong lich ", " lich am ", " lich duong ",
+            " ngay am ", " ngay duong ", " doi ngay ", " quy doi ngay ",
+        ):
             features.append("lunar")
         if (
             "youtube" not in features
-            and has_any(" tim kiem ", " tim tren mang ", " tra cuu ", " internet ")
+            and has_any(
+                " tim kiem ", " tim tren mang ", " tra cuu ", " internet ",
+                " search ", " tim thong tin ", " tra mang ", " tim web ",
+            )
         ):
             features.append("search")
-        if has_any(" tao anh ", " tao buc anh ", " generate image ", " draw image "):
+        if has_any(
+            " tao anh ", " tao buc anh ", " tao hinh ", " ve anh ",
+            " ve hinh ", " generate image ", " draw image ",
+        ):
             features.append("image_generation")
-        if has_any(" tro chuyen ", " tam di ", " buon di ", " chat "):
+        if has_any(
+            " tro chuyen ", " tam di ", " buon di ", " chat ",
+            " noi chuyen ", " hoi ai ",
+        ):
             features.append("chat")
 
         device_words = (
             " thiet bi ", " den ", " quat ", " dieu hoa ", " climate ",
             " fan ", " switch ", " cua ", " khoa ", " robot ",
+            " rem ", " binh nong lanh ", " may loc ", " may hut ",
         )
         device_actions = (
             " bat ", " tat ", " mo ", " dong ", " tang ", " giam ",
             " chinh ", " dat ", " chuyen ", " doi ", " trang thai ",
+            " hen gio ", " sau ", " quay ", " dao gio ",
         )
         if has_any(*device_words) and has_any(*device_actions):
             features.append("device")
 
-        if not camera and has_any(
-            " nhac ", " nhac nho ", " nhac hen ", " hen gio ", " loi nhac ",
+        if not camera and "youtube" not in features and has_any(
+            " nhac ", " nhac nho ", " nhac hen ", " hen gio ",
+            " loi nhac ", " nho nhac ", " bao toi ", " nho bao ",
+            " dat gio nhac ", " viec can nhac ",
         ):
             features.append("reminder")
 
-        # Preserve feature priority while avoiding a wall of unrelated hints.
         return tuple(dict.fromkeys(features))[:4]
 
     @staticmethod
     def _feature_clarification_text(
-        features: tuple[str, ...], *, retry: bool = False
+        features: tuple[str, ...], *, retry: bool = False, zalo: bool = True
     ) -> str:
         """Build a short feature-specific clarification with natural examples."""
         guides = {
-            "camera_capture": (
-                "📸 Chụp ảnh camera",
-                "`Chụp Cam Bếp` · `Chụp Cam Bếp gửi Zalo Khải` · "
-                "`Chụp Cam Bếp và Cam Cổng gửi Zalo Khải`",
-            ),
-            "camera_video": (
-                "🎥 Ghi/xem video camera",
-                "`Xem Cam Bếp` · `Ghi Camera Cổng` · "
-                "`Quay Cam Bếp gửi Zalo Khải` · `Gửi video Cam Bếp đến Zalo Khải`",
-            ),
-            "camera_analysis": (
-                "🔎 Phân tích camera",
-                "`Phân tích Cam Cổng` · `Kiểm tra Camera Bếp`",
-            ),
-            "camera_schedule": (
-                "⏱️ Lịch chụp camera",
-                "`Hẹn 5 phút nữa chụp Cam Bếp gửi Zalo Khải` · "
-                "`Hẹn mỗi 5 phút chụp Cam Bếp gửi Zalo Khải` · "
-                "`Xem lịch chụp camera`",
-            ),
-            "device": (
-                "🏠 Thiết bị",
-                "`Tắt quạt phòng ngủ` · `Đặt điều hòa phòng khách 26 độ` · "
-                "`Tắt quạt sau 30 phút`",
-            ),
-            "weather": (
-                "🌦️ Thời tiết",
-                "`Thời tiết ngày mai` · `3 ngày tới có mưa không` · `Kiểm tra bão`",
-            ),
-            "reminder": (
-                "⏰ Nhắc hẹn",
-                "`Nhắc tôi 5 phút nữa uống thuốc` · `List danh sách nhắc hẹn` · "
-                "`Xóa nhắc hẹn`",
-            ),
-            "calendar": (
-                "📅 Lịch/sự kiện",
-                "`Xem lịch ngày mai` · `Thêm sự kiện 15 giờ mai họp sale`",
-            ),
-            "speaker": (
-                "🔊 Thông báo loa",
-                "`Báo loa Phòng Ngủ xuống ăn cơm`",
-            ),
-            "youtube": (
-                "🎬 YouTube",
-                "`Tìm YouTube nhạc bolero phát loa Phòng Ngủ` · "
-                "`Tìm YouTube dạy tiếng Anh phát TV Phòng Ngủ`",
-            ),
-            "zalo_send": (
-                "📨 Gửi Zalo",
-                "`Thông báo Zalo Khải xuống ăn cơm`",
-            ),
-            "note": (
-                "📝 Ghi chú",
-                "`Ghi chú mua sữa` · `Xem ghi chú` · `Xóa ghi chú mua sữa`",
-            ),
-            "search": (
-                "🔍 Tìm kiếm Internet",
-                "`Tìm thông tin giá vàng hôm nay`",
-            ),
-            "image_generation": (
-                "🎨 Tạo ảnh AI",
-                "`Tạo ảnh ngôi nhà bên hồ`",
-            ),
-            "lunar": (
-                "🌙 Âm dương lịch",
-                "`Đổi 30/11/1984 sang âm lịch` · `Hôm nay âm lịch ngày mấy`",
-            ),
-            "chat": (
-                "💬 Trò chuyện AI",
-                "`Trò chuyện đi`",
-            ),
+            "camera_capture": ("📸 Chụp ảnh camera", "`Chụp Cam Bếp` · `Lấy ảnh Camera Cổng` · `Chụp Cam Bếp gửi Zalo Khải`"),
+            "camera_video": ("🎥 Ghi/xem video camera", "`Xem Cam Bếp` · `Ghi Camera Cổng` · `Quay Cam Bếp gửi Zalo Khải`"),
+            "camera_analysis": ("🔎 Phân tích camera", "`Phân tích Cam Cổng` · `Kiểm tra Camera Bếp có gì`"),
+            "camera_schedule": ("⏱️ Lịch chụp camera", "`5 phút nữa chụp Cam Bếp gửi Zalo Khải` · `Mỗi 5 phút chụp Cam Bếp gửi Zalo Khải`"),
+            "device": ("🏠 Thiết bị", "`Tắt quạt phòng ngủ` · `Đặt điều hòa phòng khách 26 độ` · `Tắt quạt sau 30 phút`"),
+            "weather": ("🌦️ Thời tiết", "`Mai có mưa không` · `Nhiệt độ chiều nay` · `3 ngày tới thời tiết thế nào` · `Kiểm tra bão`"),
+            "reminder": ("⏰ Nhắc hẹn", "`5 phút nữa nhắc tôi uống thuốc` · `Nhắc Zalo Khải 7 giờ mai họp` · `List danh sách nhắc hẹn`"),
+            "calendar": ("📅 Lịch/sự kiện", "`Lịch ngày mai có gì` · `Thêm sự kiện 15 giờ mai họp sale`"),
+            "speaker": ("🔊 Thông báo loa", "`Báo loa Phòng Ngủ xuống ăn cơm` · `Nói qua loa Phòng Khách là có khách`"),
+            "youtube": ("🎬 YouTube", "`Tìm YouTube nhạc bolero phát loa Phòng Ngủ` · `Mở YouTube dạy tiếng Anh trên TV Phòng Ngủ`"),
+            "zalo_send": ("📨 Gửi Zalo", "`Thông báo Zalo Khải xuống ăn cơm` · `Nhắn Zalo Gia đình cửa cổng đang mở`"),
+            "note": ("📝 Ghi chú", "`Ghi chú mua sữa` · `Xem ghi chú` · `Xóa ghi chú mua sữa`"),
+            "search": ("🔍 Tìm kiếm Internet", "`Tìm thông tin giá vàng hôm nay` · `Tra mạng thông tin Home Assistant mới nhất`"),
+            "image_generation": ("🎨 Tạo ảnh AI", "`Tạo ảnh ngôi nhà bên hồ`"),
+            "lunar": ("🌙 Âm dương lịch", "`Đổi 30/11/1984 sang âm lịch` · `Hôm nay âm lịch ngày mấy`"),
+            "chat": ("💬 Trò chuyện AI", "`Trò chuyện đi` · `Nói chuyện với tôi`"),
         }
         lines = [
             (
                 "⚠️ Tôi vẫn chưa đủ thông tin để thực hiện chính xác."
                 if retry
-                else "🤔 Tôi nhận ra yêu cầu có liên quan đến tính năng của tích hợp, "
-                "nhưng nội dung chưa đủ rõ để thực hiện an toàn."
+                else "🤔 Tôi nhận ra yêu cầu có liên quan đến tính năng của tích hợp, nhưng nội dung chưa đủ rõ để thực hiện an toàn."
             ),
             "",
             "Hãy nói lại rõ hành động + đối tượng + thời gian/nơi nhận (nếu có).",
@@ -5597,11 +5577,13 @@ class ConversationalAssistantManager(NoteManagerMixin, YouTubeManagerMixin):
                 continue
             title, examples = guide
             lines.extend(("", title, f"Ví dụ: {examples}"))
-        lines.extend((
-            "",
-            "⏳ Tôi sẽ chờ câu trả lời tiếp theo trong 120 giây; không cần nhập lại "
-            "từ khóa gọi Zalo. Gửi **Hủy** để dừng.",
-        ))
+        if zalo:
+            lines.extend((
+                "",
+                "⏳ Tôi sẽ chờ câu trả lời tiếp theo trong 120 giây; không cần nhập lại từ khóa gọi Zalo. Gửi **Hủy** để dừng.",
+            ))
+        else:
+            lines.extend(("", "Hãy nói lại yêu cầu rõ hơn; nói `Các lệnh tích hợp` nếu muốn nghe danh sách tính năng."))
         return "\n".join(lines)
 
     def _integration_commands_text(self) -> str:
@@ -5770,9 +5752,13 @@ class ConversationalAssistantManager(NoteManagerMixin, YouTubeManagerMixin):
             "• Sau danh sách, chọn số/tên video; không phản hồi trong 20 giây "
             "thì tự chọn video đầu tiên. Loa `playing/buffering` sẽ hỏi có phát "
             "đè không và đồng thời chờ rảnh tối đa 10 phút; TV phát video ngay.\n"
-            "• Phát loa ưu tiên `media_extractor.extract_media_url` lấy audio "
-            "rồi `media_player.play_media`; TV ưu tiên cách phát native theo "
-            "Cast/Android TV/Apple TV và fallback Media Extractor.\n\n"
+            "• Loa Cast/Google Home/Nest dùng yt-dlp audio-only → FFmpeg MP3 "
+            "theo yêu cầu → Cast Default Media Receiver quick-play; URL proxy "
+            "được chuyển nguyên trạng, không đi qua nhánh HA tự thêm `authSig`. "
+            "Phicomm R1 ưu tiên action native; loa khác dùng proxy audio generic.\n"
+            "• `no_intent_match` từ Home Assistant Conversation được coi là "
+            "không khớp ý định, không phải lỗi hệ thống: tích hợp sẽ so khớp "
+            "tính năng, hỏi lại kèm ví dụ và chờ thay vì ghi warning lỗi.\n\n"
             "📸 **Camera**\n"
             "• Chụp hoặc phân tích trực tiếp bằng tên camera đã đặt.\n"
             "• Có thể chụp rồi gửi thẳng đến Zalo: `Chụp Cam Bếp gửi Zalo Khải`.\n"
@@ -15247,6 +15233,7 @@ class ConversationalAssistantManager(NoteManagerMixin, YouTubeManagerMixin):
         )
         attempted_agents: list[str] = []
         total_attempts = len(candidates)
+        saw_no_intent_match = False
 
         for index, (agent_id, agent_name) in enumerate(candidates):
             attempted_agents.append(agent_name)
@@ -15312,11 +15299,19 @@ class ConversationalAssistantManager(NoteManagerMixin, YouTubeManagerMixin):
                         zalo=True,
                     )
 
-                _LOGGER.warning(
-                    "Conversation agent %s returned no usable answer (error=%s)",
-                    agent_id,
-                    error_code or "empty_reply",
-                )
+                if error_code == "no_intent_match":
+                    saw_no_intent_match = True
+                    _LOGGER.debug(
+                        "Conversation agent %s did not match an intent for Zalo thread %s",
+                        agent_id,
+                        context.thread_id,
+                    )
+                else:
+                    _LOGGER.warning(
+                        "Conversation agent %s returned no usable answer (error=%s)",
+                        agent_id,
+                        error_code or "empty_reply",
+                    )
 
             if index + 1 < total_attempts:
                 await self._async_send_ai_failover_notice(
@@ -15329,6 +15324,23 @@ class ConversationalAssistantManager(NoteManagerMixin, YouTubeManagerMixin):
                     total_attempts=total_attempts,
                     language=language,
                 )
+
+        if saw_no_intent_match:
+            features = self._related_feature_keys(context.text)
+            if features:
+                self._zalo_pending_clarifications[context.owner_key] = PendingZaloClarification(
+                    features=features,
+                    expires_at=dt_util.now() + timedelta(
+                        seconds=PENDING_CONFIRMATION_TIMEOUT_SECONDS
+                    ),
+                )
+                self._schedule_pending_expiry()
+                return self._feature_clarification_text(features)
+            return (
+                "🤔 Tôi chưa nhận ra tính năng cần thực hiện từ câu vừa rồi. "
+                "Hãy nói rõ hành động và đối tượng, hoặc gửi `Các lệnh tích hợp` "
+                "để xem toàn bộ cách nói hỗ trợ."
+            )
 
         message = (
             "All available Conversation agents failed or timed out. Check the "
@@ -15364,6 +15376,7 @@ class ConversationalAssistantManager(NoteManagerMixin, YouTubeManagerMixin):
             primary_agent_id
         )
         attempted_agents: list[str] = []
+        saw_no_intent_match = False
 
         for index, (agent_id, agent_name) in enumerate(candidates):
             attempted_agents.append(agent_name)
@@ -15425,12 +15438,33 @@ class ConversationalAssistantManager(NoteManagerMixin, YouTubeManagerMixin):
                         user_input, reply, ai_generated=True
                     )
 
-                _LOGGER.warning(
-                    "Conversation agent %s returned no usable answer for learned "
-                    "command (error=%s)",
-                    agent_id,
-                    error_code or "empty_reply",
+                if error_code == "no_intent_match":
+                    saw_no_intent_match = True
+                    _LOGGER.debug(
+                        "Conversation agent %s did not match an intent for voice text %s",
+                        agent_id,
+                        text,
+                    )
+                else:
+                    _LOGGER.warning(
+                        "Conversation agent %s returned no usable answer for learned "
+                        "command (error=%s)",
+                        agent_id,
+                        error_code or "empty_reply",
+                    )
+
+        if saw_no_intent_match:
+            features = self._related_feature_keys(text)
+            if features:
+                reply = self._feature_clarification_text(features, zalo=False)
+            else:
+                reply = (
+                    "Tôi chưa nhận ra tính năng cần thực hiện. Hãy nói rõ hành động "
+                    "và đối tượng, hoặc nói Các lệnh tích hợp để xem hướng dẫn."
                 )
+            return await self._async_voice_response(
+                user_input, reply, ai_generated=False
+            )
 
         reply = (
             "All available Conversation agents failed or timed out. Check the "

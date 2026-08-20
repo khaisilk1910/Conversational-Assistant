@@ -1189,6 +1189,79 @@ class YouTubeManagerMixin:
                 )
         return None
 
+    def _youtube_is_cast_target(self, target: YouTubeTarget) -> bool:
+        """Return whether the media player is a native Google Cast entity."""
+        if str(target.platform or "").strip().casefold() == CAST_DOMAIN:
+            return True
+        try:
+            entry = er.async_get(self.hass).async_get(target.entity_id)
+        except Exception:  # noqa: BLE001 - registry lookup is only a hint
+            return False
+        return str(getattr(entry, "platform", "") or "").casefold() == CAST_DOMAIN
+
+    async def _async_play_youtube_cast_quick_play(
+        self,
+        target: YouTubeTarget,
+        video: YouTubeVideo,
+        stream_url: str,
+        *,
+        label: str,
+        attempts: list[str],
+    ) -> str | None:
+        """Use HA Cast quick-play without rewriting/signing the media URL.
+
+        Home Assistant's Cast entity has an explicit ``media_type == cast``
+        branch.  Supplying ``app_name=default_media_receiver`` sends app data
+        directly to PyChromecast before ``async_process_play_media_url`` runs.
+        This is important for our random-token MP3 endpoint: the Cast receiver
+        gets the exact capability URL instead of a second HA ``authSig`` URL.
+        """
+        if not self.hass.services.has_service(
+            MEDIA_PLAYER_DOMAIN, MEDIA_PLAYER_SERVICE_PLAY_MEDIA
+        ):
+            attempts.append(f"{label}:play_media_unavailable")
+            return None
+
+        before = self._youtube_playback_signature(target.entity_id)
+        app_data = {
+            "app_name": "default_media_receiver",
+            "media_id": stream_url,
+            "media_type": "audio/mpeg",
+            "stream_type": "LIVE",
+            "metadata": {
+                "metadataType": 3,
+                "title": video.title,
+            },
+        }
+        try:
+            await self._async_call_service(
+                MEDIA_PLAYER_DOMAIN,
+                MEDIA_PLAYER_SERVICE_PLAY_MEDIA,
+                {
+                    "media_content_id": json.dumps(
+                        app_data, ensure_ascii=False, separators=(",", ":")
+                    ),
+                    "media_content_type": CAST_DOMAIN,
+                },
+                blocking=True,
+                target={"entity_id": target.entity_id},
+                timeout_seconds=YOUTUBE_MEDIA_SERVICE_TIMEOUT_SECONDS,
+            )
+            if await self._async_wait_youtube_speaker_started(
+                target, before, timeout_seconds=20.0
+            ):
+                return f"{label}:cast_quick_play"
+            attempts.append(f"{label}:cast_quick_play:no_state_change")
+        except Exception as err:  # noqa: BLE001
+            attempts.append(f"{label}:cast_quick_play:{type(err).__name__}")
+            _LOGGER.debug(
+                "Google Cast quick-play failed for %s via %s",
+                target.entity_id,
+                label,
+                exc_info=True,
+            )
+        return None
+
     async def _async_play_youtube_cast_audio(
         self,
         target: YouTubeTarget,
@@ -1196,14 +1269,7 @@ class YouTubeManagerMixin:
         audio_stream: ResolvedYouTubeAudio,
         attempts: list[str],
     ) -> str | None:
-        """Play YouTube audio on Google Cast through a local MP3 transcode.
-
-        Cast's receiver is the component which fetches the media URL.  It cannot
-        reproduce yt-dlp's Googlevideo request headers, and long-lived YouTube
-        M4A DASH URLs can fail even though Home Assistant itself can fetch them.
-        A short capability URL is therefore served by Home Assistant and FFmpeg
-        converts the already validated audio-only source to a simple MP3 stream.
-        """
+        """Transcode audio-only to MP3 and send it through Cast quick-play."""
         try:
             from .youtube_proxy import async_register_youtube_cast_audio_proxy
 
@@ -1221,26 +1287,17 @@ class YouTubeManagerMixin:
             attempts.append("cast_mp3_proxy:no_ha_url")
             return None
 
-        # PyChromecast's default media receiver expects a MIME content type.
-        # LIVE is intentional because the on-demand transcode has no fixed
-        # Content-Length and does not implement byte-range seeking.
-        extra = {
-            "stream_type": "LIVE",
-            "metadata": {
-                "metadataType": 3,
-                "title": video.title,
-            },
-        }
+        # Do not use normal media_player URL playback here.  HA signs custom
+        # /api paths in that branch, which changes the token URL to ?authSig=.
+        # Cast's explicit quick-play branch forwards app data before URL
+        # processing and therefore preserves the exact internal/external URL.
         for index, url in enumerate(urls, start=1):
-            method = await self._async_play_youtube_audio_url(
+            method = await self._async_play_youtube_cast_quick_play(
                 target,
+                video,
                 url,
-                "audio/mpeg",
                 label=f"cast_mp3_proxy_{index}",
                 attempts=attempts,
-                content_types=["audio/mpeg"],
-                extra=extra,
-                verify_timeout=18.0,
             )
             if method:
                 return method
@@ -1249,19 +1306,11 @@ class YouTubeManagerMixin:
     async def _async_play_youtube_speaker(
         self, target: YouTubeTarget, video: YouTubeVideo
     ) -> str:
-        """Play YouTube on an audio target using the most compatible path.
-
-        Native speaker integrations win when they expose their own YouTube
-        action.  Generic speakers then receive a signed Home Assistant proxy URL
-        for a yt-dlp-validated audio-only stream.  The proxy preserves yt-dlp's
-        calculated request headers and Range semantics and gives older players a
-        conventional .m4a/.webm suffix.
-        """
+        """Play YouTube audio without mixing incompatible player fallbacks."""
         attempts: list[str] = []
+        is_cast = self._youtube_is_cast_target(target)
 
-        # 0) Platform-native playback. Phicomm R1 has a dedicated entity service
-        # that sends the YouTube video id to AiboxPlus; do not force this device
-        # through media_player.play_media when its own API is available.
+        # 0) Platform-native action first (notably Phicomm R1).
         native_method = await self._async_play_youtube_platform_native(
             target, video, attempts
         )
@@ -1293,9 +1342,8 @@ class YouTubeManagerMixin:
                     exc_info=True,
                 )
 
-        # 1) Resolve a real audio-only stream with yt-dlp.  The attached yt-dlp
-        # source shows that selected format headers/container/codecs are copied
-        # into the final info dict; retain and use those values.
+        # 1) Python yt-dlp: accept only a genuine audio-only format and retain
+        # its request headers/container/codec metadata.
         audio_stream = await self._async_extract_youtube_audio_stream(video.url)
         if audio_stream:
             attempts.append(
@@ -1304,128 +1352,113 @@ class YouTubeManagerMixin:
                 f"{audio_stream.container or audio_stream.extension}:"
                 f"{audio_stream.acodec}"
             )
-            if str(target.platform or "").strip().casefold() == CAST_DOMAIN:
+            if is_cast:
                 cast_method = await self._async_play_youtube_cast_audio(
                     target, video, audio_stream, attempts
                 )
                 if cast_method:
                     return cast_method
-                # Continue with the generic proxy only as a compatibility
-                # fallback.  Cast-specific MP3 transcoding is deliberately first.
-            # Prefer a signed HA URL over exposing Googlevideo directly. This is
-            # especially useful for old speakers that probe a suffix or issue
-            # byte-range requests and cannot reproduce yt-dlp's HTTP headers.
-            try:
-                from .youtube_proxy import async_register_youtube_audio_proxy
-
-                proxy_url = async_register_youtube_audio_proxy(
-                    self.hass,
-                    stream_url=audio_stream.stream_url,
-                    mime_type=audio_stream.mime_type,
-                    headers=audio_stream.headers,
-                    extension=audio_stream.extension,
-                )
-            except Exception as err:  # noqa: BLE001
-                attempts.append(f"ha_audio_proxy:create:{type(err).__name__}")
-                _LOGGER.debug(
-                    "Could not create Home Assistant YouTube audio proxy",
-                    exc_info=True,
-                )
             else:
+                try:
+                    from .youtube_proxy import async_register_youtube_audio_proxy
+
+                    proxy_url = async_register_youtube_audio_proxy(
+                        self.hass,
+                        stream_url=audio_stream.stream_url,
+                        mime_type=audio_stream.mime_type,
+                        headers=audio_stream.headers,
+                        extension=audio_stream.extension,
+                    )
+                except Exception as err:  # noqa: BLE001
+                    attempts.append(f"ha_audio_proxy:create:{type(err).__name__}")
+                    _LOGGER.debug(
+                        "Could not create Home Assistant YouTube audio proxy",
+                        exc_info=True,
+                    )
+                else:
+                    method = await self._async_play_youtube_audio_url(
+                        target,
+                        proxy_url,
+                        audio_stream.mime_type,
+                        label="ha_audio_proxy",
+                        attempts=attempts,
+                    )
+                    if method:
+                        return method
+
                 method = await self._async_play_youtube_audio_url(
                     target,
-                    proxy_url,
+                    audio_stream.stream_url,
                     audio_stream.mime_type,
-                    label="ha_audio_proxy",
+                    label="yt_dlp_audio_direct",
                     attempts=attempts,
-                    content_types=(
-                        [audio_stream.mime_type]
-                        if str(target.platform or "").strip().casefold() == CAST_DOMAIN
-                        else None
-                    ),
                 )
                 if method:
                     return method
-
-            # Keep direct Googlevideo as a compatibility fallback for speakers
-            # that already understand the upstream URL.
-            method = await self._async_play_youtube_audio_url(
-                target,
-                audio_stream.stream_url,
-                audio_stream.mime_type,
-                label="yt_dlp_audio_direct",
-                attempts=attempts,
-                content_types=(
-                    [audio_stream.mime_type]
-                    if str(target.platform or "").strip().casefold() == CAST_DOMAIN
-                    else None
-                ),
-            )
-            if method:
-                return method
         else:
             attempts.append("yt_dlp_audio:no_url")
 
-        # 2) Exact compatibility fallback for an existing
-        # shell_command.youtube_stream using ``yt-dlp -f 140 -g``.
+        # 2) Compatibility with an existing shell_command.youtube_stream.
         shell_stream = await self._async_extract_youtube_audio_stream_shell(
             video.video_id
         )
         if shell_stream:
-            if str(target.platform or "").strip().casefold() == CAST_DOMAIN:
+            attempts.append("shell_yt_dlp_audio:ok")
+            if is_cast:
                 cast_method = await self._async_play_youtube_cast_audio(
                     target, video, shell_stream, attempts
                 )
                 if cast_method:
                     return cast_method
-            try:
-                from .youtube_proxy import async_register_youtube_audio_proxy
-
-                proxy_url = async_register_youtube_audio_proxy(
-                    self.hass,
-                    stream_url=shell_stream.stream_url,
-                    mime_type=shell_stream.mime_type,
-                    headers=shell_stream.headers,
-                    extension=shell_stream.extension,
-                )
-            except Exception as err:  # noqa: BLE001
-                attempts.append(f"shell_audio_proxy:create:{type(err).__name__}")
             else:
+                try:
+                    from .youtube_proxy import async_register_youtube_audio_proxy
+
+                    proxy_url = async_register_youtube_audio_proxy(
+                        self.hass,
+                        stream_url=shell_stream.stream_url,
+                        mime_type=shell_stream.mime_type,
+                        headers=shell_stream.headers,
+                        extension=shell_stream.extension,
+                    )
+                except Exception as err:  # noqa: BLE001
+                    attempts.append(f"shell_audio_proxy:create:{type(err).__name__}")
+                else:
+                    method = await self._async_play_youtube_audio_url(
+                        target,
+                        proxy_url,
+                        shell_stream.mime_type,
+                        label="shell_audio_proxy",
+                        attempts=attempts,
+                    )
+                    if method:
+                        return method
                 method = await self._async_play_youtube_audio_url(
                     target,
-                    proxy_url,
+                    shell_stream.stream_url,
                     shell_stream.mime_type,
-                    label="shell_audio_proxy",
+                    label="shell_yt_dlp_audio_direct",
                     attempts=attempts,
                 )
                 if method:
                     return method
-            method = await self._async_play_youtube_audio_url(
-                target,
-                shell_stream.stream_url,
-                shell_stream.mime_type,
-                label="shell_yt_dlp_audio_direct",
-                attempts=attempts,
-            )
-            if method:
-                return method
         elif self.hass.services.has_service(
             YOUTUBE_SHELL_COMMAND_DOMAIN, YOUTUBE_SHELL_COMMAND_SERVICE
         ):
             attempts.append("shell_yt_dlp_audio:no_url")
 
-        # 3) Cast already tried a dedicated MP3 transcode and concrete MIME
-        # fallbacks. Do not invoke Media Extractor for Cast: current yt-dlp may
-        # emit JavaScript-runtime warnings there and the Cast receiver still has
-        # to fetch the resulting URL itself.
-        if str(target.platform or "").strip().casefold() == CAST_DOMAIN:
+        # For Cast, M4A/Googlevideo/Media Extractor all still require the
+        # receiver to fetch an upstream URL and were already proven to fail in
+        # this environment.  Stop here instead of generating repeated Cast
+        # errors and JavaScript-runtime warnings.
+        if is_cast:
             raise RuntimeError(
-                "Google Cast không xác nhận phát audio; đã thử MP3 transcode qua "
-                "Home Assistant và audio-only fallback (" + ", ".join(attempts) + ")"
+                "Google Cast chưa xác nhận phát audio MP3 từ Home Assistant; "
+                "đã dùng Default Media Receiver quick-play và không dùng lại "
+                "M4A/Googlevideo/Media Extractor (" + ", ".join(attempts) + ")"
             )
 
-        # 3) Late Home Assistant fallback for non-Cast players. Media Extractor
-        # can choose a muxed YouTube format, so it stays behind audio-only paths.
+        # 3) Late Home Assistant fallback for non-Cast players only.
         if self.hass.services.has_service(
             MEDIA_EXTRACTOR_DOMAIN, MEDIA_EXTRACTOR_SERVICE_PLAY_MEDIA
         ):
@@ -1450,7 +1483,7 @@ class YouTubeManagerMixin:
             except Exception as err:  # noqa: BLE001
                 attempts.append(f"media_extractor.play_media:{type(err).__name__}")
 
-        # 4) A few integrations accept a YouTube page URL directly.
+        # 4) Some non-Cast integrations accept a YouTube page URL directly.
         if self.hass.services.has_service(
             MEDIA_PLAYER_DOMAIN, MEDIA_PLAYER_SERVICE_PLAY_MEDIA
         ):
@@ -1468,18 +1501,18 @@ class YouTubeManagerMixin:
                     timeout_seconds=YOUTUBE_MEDIA_SERVICE_TIMEOUT_SECONDS,
                 )
                 if await self._async_wait_youtube_speaker_started(
-                    target, before, timeout_seconds=8.0
+                    target, before, timeout_seconds=10.0
                 ):
                     return "media_player.youtube_url"
                 attempts.append("media_player.youtube_url:no_state_change")
             except Exception as err:  # noqa: BLE001
                 attempts.append(f"media_player.youtube_url:{type(err).__name__}")
 
-        detail = ", ".join(attempts[-10:]) or "no supported playback action"
         raise RuntimeError(
             "không xác nhận được loa đã bắt đầu phát; đã thử native YouTube, "
-            "audio-only qua Home Assistant proxy và các fallback "
-            f"({detail})"
+            "audio-only qua Home Assistant và fallback phù hợp ("
+            + ", ".join(attempts)
+            + ")"
         )
 
     async def _async_play_youtube_video(self, target: YouTubeTarget, video: YouTubeVideo) -> str:

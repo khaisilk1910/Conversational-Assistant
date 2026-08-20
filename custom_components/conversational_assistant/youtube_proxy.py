@@ -19,6 +19,7 @@ import asyncio
 import contextlib
 from dataclasses import dataclass
 import logging
+import re
 from secrets import token_urlsafe
 from time import monotonic
 from typing import Mapping
@@ -382,11 +383,61 @@ class YouTubeCastAudioProxyView(HomeAssistantView):
             proc = await asyncio.create_subprocess_exec(
                 *args,
                 stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.DEVNULL,
+                stderr=asyncio.subprocess.PIPE,
             )
         except (FileNotFoundError, OSError) as err:
             _LOGGER.warning("FFmpeg is unavailable for YouTube Cast audio: %s", err)
             raise web.HTTPServiceUnavailable(text="FFmpeg unavailable") from err
+
+        assert proc.stdout is not None
+        assert proc.stderr is not None
+        stderr_tail = bytearray()
+
+        async def _drain_stderr() -> None:
+            while chunk := await proc.stderr.read(4096):
+                stderr_tail.extend(chunk)
+                if len(stderr_tail) > 12 * 1024:
+                    del stderr_tail[: len(stderr_tail) - 12 * 1024]
+
+        stderr_task = asyncio.create_task(_drain_stderr())
+
+        def _safe_stderr() -> str:
+            text = stderr_tail.decode("utf-8", errors="replace").strip()
+            text = re.sub(r"https?://\S+", "<url>", text)
+            return text[-1500:]
+
+        # Do not answer 200 until FFmpeg has actually produced MP3 bytes.
+        # Otherwise Cast sees a successful but empty stream and only reports its
+        # generic IDLE/ERROR reachability message, hiding the useful failure.
+        try:
+            first_chunk = await asyncio.wait_for(proc.stdout.read(64 * 1024), timeout=12)
+        except asyncio.TimeoutError as err:
+            if proc.returncode is None:
+                with contextlib.suppress(ProcessLookupError):
+                    proc.terminate()
+            with contextlib.suppress(asyncio.TimeoutError):
+                await asyncio.wait_for(proc.wait(), timeout=2)
+            with contextlib.suppress(asyncio.TimeoutError):
+                await asyncio.wait_for(stderr_task, timeout=1)
+            detail = _safe_stderr()
+            _LOGGER.warning(
+                "YouTube Cast FFmpeg produced no audio within 12 seconds%s",
+                f": {detail}" if detail else "",
+            )
+            raise web.HTTPBadGateway(text="FFmpeg produced no audio") from err
+
+        if not first_chunk:
+            with contextlib.suppress(asyncio.TimeoutError):
+                await asyncio.wait_for(proc.wait(), timeout=2)
+            with contextlib.suppress(asyncio.TimeoutError):
+                await asyncio.wait_for(stderr_task, timeout=1)
+            detail = _safe_stderr()
+            _LOGGER.warning(
+                "YouTube Cast FFmpeg exited before producing audio (code=%s)%s",
+                proc.returncode,
+                f": {detail}" if detail else "",
+            )
+            raise web.HTTPBadGateway(text="FFmpeg could not open YouTube audio")
 
         response = web.StreamResponse(
             status=200,
@@ -395,12 +446,13 @@ class YouTubeCastAudioProxyView(HomeAssistantView):
                 "Content-Type": "audio/mpeg",
                 "Cache-Control": "no-store",
                 "Content-Disposition": 'inline; filename="youtube_audio.mp3"',
+                "X-Content-Type-Options": "nosniff",
             },
         )
         await response.prepare(request)
 
         try:
-            assert proc.stdout is not None
+            await response.write(first_chunk)
             while chunk := await proc.stdout.read(64 * 1024):
                 await response.write(chunk)
         except (ConnectionResetError, RuntimeError):
@@ -421,8 +473,17 @@ class YouTubeCastAudioProxyView(HomeAssistantView):
                     proc.kill()
                 with contextlib.suppress(Exception):
                     await proc.wait()
+            with contextlib.suppress(asyncio.TimeoutError, asyncio.CancelledError):
+                await asyncio.wait_for(stderr_task, timeout=1)
+            if not stderr_task.done():
+                stderr_task.cancel()
             if proc.returncode not in (0, None):
-                _LOGGER.debug("YouTube Cast FFmpeg exited with code %s", proc.returncode)
+                detail = _safe_stderr()
+                _LOGGER.debug(
+                    "YouTube Cast FFmpeg exited with code %s%s",
+                    proc.returncode,
+                    f": {detail}" if detail else "",
+                )
 
         with contextlib.suppress(ConnectionResetError, RuntimeError):
             await response.write_eof()
