@@ -48,6 +48,8 @@ from .const import (
     CONF_CONFIRM_TARGETS,
     CONF_MOBILE_DEVICE_ID,
     CONF_MOBILE_TARGETS,
+    CONF_MEDIA_ENTITY_ID,
+    CONF_MEDIA_TARGETS,
     CONF_NAMED_TARGET_ENABLED,
     CONF_NAMED_TARGET_ID,
     CONF_NAMED_TARGET_NAME,
@@ -1663,6 +1665,7 @@ class ConversationalAssistantOptionsFlow(config_entries.OptionsFlow):
         for list_key, reference_key in (
             (CONF_MOBILE_TARGETS, CONF_MOBILE_DEVICE_ID),
             (CONF_SPEAKER_TARGETS, CONF_SPEAKER_ENTITY_ID),
+            (CONF_MEDIA_TARGETS, CONF_MEDIA_ENTITY_ID),
             (CONF_CAMERA_TARGETS, CONF_CAMERA_ENTITY_ID),
         ):
             if list_key in options:
@@ -1702,6 +1705,7 @@ class ConversationalAssistantOptionsFlow(config_entries.OptionsFlow):
         specs = {
             "mobile": (CONF_MOBILE_TARGETS, CONF_MOBILE_DEVICE_ID),
             "speaker": (CONF_SPEAKER_TARGETS, CONF_SPEAKER_ENTITY_ID),
+            "media": (CONF_MEDIA_TARGETS, CONF_MEDIA_ENTITY_ID),
             "camera": (CONF_CAMERA_TARGETS, CONF_CAMERA_ENTITY_ID),
         }
         return specs[kind]
@@ -1730,6 +1734,10 @@ class ConversationalAssistantOptionsFlow(config_entries.OptionsFlow):
         if kind == "speaker":
             return _entity_target_schema(
                 "media_player", CONF_SPEAKER_ENTITY_ID, target
+            )
+        if kind == "media":
+            return _entity_target_schema(
+                "media_player", CONF_MEDIA_ENTITY_ID, target
             )
         return _entity_target_schema("camera", CONF_CAMERA_ENTITY_ID, target)
 
@@ -1891,6 +1899,7 @@ class ConversationalAssistantOptionsFlow(config_entries.OptionsFlow):
                 "mobile_targets",
                 "zalo",
                 "speaker_targets",
+                "media_targets",
                 "camera_targets",
                 "init",
             ],
@@ -1901,6 +1910,9 @@ class ConversationalAssistantOptionsFlow(config_entries.OptionsFlow):
                 "zalo_count": str(len(self._zalo_targets())),
                 "speaker_count": str(
                     len(self._named_targets("speaker", explicit=False))
+                ),
+                "media_count": str(
+                    len(self._named_targets("media", explicit=False))
                 ),
                 "camera_count": str(
                     len(self._named_targets("camera", explicit=False))
@@ -1946,6 +1958,11 @@ class ConversationalAssistantOptionsFlow(config_entries.OptionsFlow):
     ) -> ConfigFlowResult:
         return await self._async_named_targets_menu("speaker")
 
+    async def async_step_media_targets(
+        self, _user_input: dict[str, Any] | None = None
+    ) -> ConfigFlowResult:
+        return await self._async_named_targets_menu("media")
+
     async def async_step_camera_targets(
         self, _user_input: dict[str, Any] | None = None
     ) -> ConfigFlowResult:
@@ -1974,6 +1991,18 @@ class ConversationalAssistantOptionsFlow(config_entries.OptionsFlow):
 
     async def async_step_delete_speaker_target(self, user_input=None):
         return await self._async_delete_named_target("speaker", user_input)
+
+    async def async_step_add_media_target(self, user_input=None):
+        return await self._async_add_named_target("media", user_input)
+
+    async def async_step_edit_media_target_select(self, user_input=None):
+        return await self._async_select_named_target("media", user_input)
+
+    async def async_step_edit_media_target(self, user_input=None):
+        return await self._async_edit_named_target("media", user_input)
+
+    async def async_step_delete_media_target(self, user_input=None):
+        return await self._async_delete_named_target("media", user_input)
 
     async def async_step_add_camera_target(self, user_input=None):
         return await self._async_add_named_target("camera", user_input)

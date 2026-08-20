@@ -211,6 +211,8 @@ from .const import (
     PENDING_CONFIRMATION_TIMEOUT_SECONDS,
     SEARCH_SENTENCES,
     WEATHER_SENTENCES,
+    YOUTUBE_SENTENCES,
+    YOUTUBE_SEARCH_TIMEOUT_SECONDS,
     SIGNAL_UPDATE,
     SPEAKER_ANNOUNCE_SENTENCES,
     SPEAKER_BUSY_RETRY_COUNT,
@@ -278,6 +280,7 @@ from .command_memory import (
     ACTION_SEARCH,
     ACTION_SPEAKER_ANNOUNCE,
     ACTION_WEATHER,
+    ACTION_YOUTUBE,
     ACTION_ZALO_SEND,
     CommandMemoryError,
     LearnedCommand,
@@ -348,6 +351,12 @@ from .named_targets import (
     normalize_named_target_list,
     target_aliases,
 )
+from .youtube_flow import (
+    find_target_indexes,
+    has_youtube_cue,
+    parse_youtube_request,
+)
+from .youtube_manager import YouTubeManagerMixin
 from .note_flow import (
     NoteManagerMixin,
     is_primary_note_voice_command,
@@ -1471,7 +1480,7 @@ class _ConversationInputTextProxy:
         return getattr(self._original, name)
 
 
-class ConversationalAssistantManager(NoteManagerMixin):
+class ConversationalAssistantManager(NoteManagerMixin, YouTubeManagerMixin):
     """Store, schedule, send, and manage reminders."""
 
     def __init__(self, hass: HomeAssistant, entry: ConfigEntry) -> None:
@@ -1482,6 +1491,7 @@ class ConversationalAssistantManager(NoteManagerMixin):
         self.camera_snapshot_schedules: dict[str, CameraSnapshotSchedule] = {}
         self.learned_commands: dict[str, LearnedCommand] = {}
         self._initialize_note_state()
+        self._initialize_youtube_state()
         self._pending: dict[str, PendingReminder] = {}
         self._pending_deletions: dict[str, PendingDeletion] = {}
         self._pending_voice_cameras: dict[str, PendingVoiceCamera] = {}
@@ -3059,6 +3069,7 @@ class ConversationalAssistantManager(NoteManagerMixin):
             self._zalo_pending_notes.get(owner_key),
             self._zalo_pending_sends.get(owner_key),
             self._zalo_pending_speaker_announcements.get(owner_key),
+            self._youtube_zalo_pending(owner_key),
             self._zalo_pending_creations.get(owner_key),
             self._zalo_pending_deletions.get(owner_key),
             self._zalo_pending_camera_schedule_deletions.get(owner_key),
@@ -3716,6 +3727,9 @@ class ConversationalAssistantManager(NoteManagerMixin):
                     WEATHER_SENTENCES, self._async_weather_from_voice
                 ),
                 agent_manager.register_trigger(
+                    YOUTUBE_SENTENCES, self._async_youtube_from_voice
+                ),
+                agent_manager.register_trigger(
                     SEARCH_SENTENCES, self._async_search_from_voice
                 ),
                 agent_manager.register_trigger(
@@ -3889,6 +3903,7 @@ class ConversationalAssistantManager(NoteManagerMixin):
         self._speaker_announcement_tasks_by_owner.clear()
         self._speaker_announcement_tasks_by_source.clear()
         self._speaker_locks.clear()
+        await self._async_unload_youtube_state()
         if self._storage_loaded:
             try:
                 async with asyncio.timeout(STORAGE_LOAD_TIMEOUT_SECONDS):
@@ -3910,6 +3925,8 @@ class ConversationalAssistantManager(NoteManagerMixin):
         self._mobile_targets_cache_until = 0.0
         self._speaker_targets_cache = None
         self._speaker_targets_cache_until = 0.0
+        self._youtube_targets_cache = None
+        self._youtube_targets_cache_until = 0.0
         self._camera_targets_cache = None
         self._camera_targets_cache_until = 0.0
         self._tts_entity_id_cache = None
@@ -4050,6 +4067,8 @@ class ConversationalAssistantManager(NoteManagerMixin):
         if explicit is not None:
             return explicit
 
+        if has_youtube_cue(text):
+            return ACTION_YOUTUBE
         if _speaker_announcement_request(text) is not None:
             return ACTION_SPEAKER_ANNOUNCE
         ha_kind = explicit_home_assistant_request_kind(text)
@@ -4074,6 +4093,7 @@ class ConversationalAssistantManager(NoteManagerMixin):
             ACTION_HELP,
             ACTION_SEARCH,
             ACTION_WEATHER,
+            ACTION_YOUTUBE,
             ACTION_IMAGE_GENERATION,
             ACTION_LUNAR_DATE_CONVERT,
         }:
@@ -5222,6 +5242,8 @@ class ConversationalAssistantManager(NoteManagerMixin):
             or is_lunar_date_lookup_request(text)
         ):
             return ACTION_LUNAR_DATE_CONVERT
+        if has_youtube_cue(text):
+            return ACTION_YOUTUBE
         if _speaker_announcement_request(text) is not None:
             return ACTION_SPEAKER_ANNOUNCE
         if _zalo_send_request(text) is not None:
@@ -5438,6 +5460,8 @@ class ConversationalAssistantManager(NoteManagerMixin):
             " bao nhiet doi ", " con bao ", " ap thap ", " uv ",
         ):
             features.append("weather")
+        if has_any(" youtube ", " you tube ", " youtu be "):
+            features.append("youtube")
         if has_any(
             " loa ", " tts ", " doc loa ", " bao ra loa ", " thong bao loa ",
         ):
@@ -5450,7 +5474,10 @@ class ConversationalAssistantManager(NoteManagerMixin):
             features.append("calendar")
         if has_any(" am lich ", " duong lich ", " lich am ", " lich duong "):
             features.append("lunar")
-        if has_any(" tim kiem ", " tim tren mang ", " tra cuu ", " internet "):
+        if (
+            "youtube" not in features
+            and has_any(" tim kiem ", " tim tren mang ", " tra cuu ", " internet ")
+        ):
             features.append("search")
         if has_any(" tao anh ", " tao buc anh ", " generate image ", " draw image "):
             features.append("image_generation")
@@ -5523,6 +5550,11 @@ class ConversationalAssistantManager(NoteManagerMixin):
             "speaker": (
                 "🔊 Thông báo loa",
                 "`Báo loa Phòng Ngủ xuống ăn cơm`",
+            ),
+            "youtube": (
+                "🎬 YouTube",
+                "`Tìm YouTube nhạc bolero phát loa Phòng Ngủ` · "
+                "`Tìm YouTube dạy tiếng Anh phát TV Phòng Ngủ`",
             ),
             "zalo_send": (
                 "📨 Gửi Zalo",
@@ -5612,6 +5644,13 @@ class ConversationalAssistantManager(NoteManagerMixin):
             "thái `idle`, `off` hoặc `paused`; kiểm tra lại 10 lần, mỗi lần "
             "15 giây, rồi hủy.\n"
             "VD: `Báo loa Phòng Ngủ xuống ăn cơm`\n\n"
+            "🎬 **YouTube → loa/TV/media player** — tìm YouTube, tìm trên "
+            "YouTube, mở YouTube, phát YouTube, xem YouTube. Có thể nói tự "
+            "nhiên nội dung + nơi phát. Trả tối đa 10 video để chọn; nếu "
+            "không trả lời sau 20 giây sẽ chọn video số 1. Loa đang bận sẽ "
+            "hỏi Phát đè và chờ rảnh tối đa 10 phút; TV phát ngay.\n"
+            "VD: `Tìm YouTube nhạc bolero phát loa Phòng Ngủ`\n"
+            "VD TV: `Tìm YouTube dạy tiếng Anh phát TV Phòng Ngủ`\n\n"
             "📨 **Gửi Zalo** — gửi Zalo, thông báo Zalo, báo Zalo.\n"
             "VD: `Thông báo Zalo Khải xuống ăn cơm`\n\n"
             "📸 **Chụp camera → Zalo** — chụp/lấy/gửi ảnh từ camera, máy "
@@ -5657,7 +5696,7 @@ class ConversationalAssistantManager(NoteManagerMixin):
             "thực hiện ngay; yêu cầu còn mơ hồ nhưng có liên quan tính năng sẽ "
             "hỏi lại kèm ví dụ đúng tính năng và chờ 120 giây. Mỗi tài khoản "
             "Zalo, nhóm, người gửi và nguồn Voice có phiên riêng.\n\n"
-            "💡 Tên Mobile, Zalo, loa và camera là tên đã đặt trong Settings."
+            "💡 Tên Mobile, Zalo, loa, TV/media player và camera là tên đã đặt trong Settings."
         )
 
     def _integration_help_text(self) -> str:
@@ -5721,6 +5760,18 @@ class ConversationalAssistantManager(NoteManagerMixin):
             "15 giây; quá số lần "
             "sẽ hủy và báo đúng luồng đã yêu cầu.\n"
             "• Ví dụ: `Báo loa Phòng Ngủ xuống ăn cơm`.\n\n"
+            "🎬 **YouTube → loa/TV/media player**\n"
+            "• Ví dụ: `Tìm YouTube nhạc bolero phát loa Phòng Ngủ` hoặc "
+            "`Tìm YouTube dạy tiếng Anh phát TV Phòng Ngủ`.\n"
+            "• Tích hợp ưu tiên `media_player.search_media` khi thiết bị hỗ trợ "
+            "và kết quả thực sự là YouTube; nếu không, dùng "
+            "`pyscript.youtube_search_tool` để lấy tối đa 10 video.\n"
+            "• Sau danh sách, chọn số/tên video; không phản hồi trong 20 giây "
+            "thì tự chọn video đầu tiên. Loa `playing/buffering` sẽ hỏi có phát "
+            "đè không và đồng thời chờ rảnh tối đa 10 phút; TV phát video ngay.\n"
+            "• Phát loa ưu tiên `media_extractor.extract_media_url` lấy audio "
+            "rồi `media_player.play_media`; TV ưu tiên cách phát native theo "
+            "Cast/Android TV/Apple TV và fallback Media Extractor.\n\n"
             "📸 **Camera**\n"
             "• Chụp hoặc phân tích trực tiếp bằng tên camera đã đặt.\n"
             "• Có thể chụp rồi gửi thẳng đến Zalo: `Chụp Cam Bếp gửi Zalo Khải`.\n"
@@ -5754,7 +5805,7 @@ class ConversationalAssistantManager(NoteManagerMixin):
             "• Ví dụ: `Đổi 30/11/1984 sang âm lịch`.\n\n"
             "⚙️ **Cấu hình**\n"
             "• Vào **Settings > Devices & services > Conversational Assistant "
-            "> Configure** để đặt tên Mobile, Zalo, loa, camera và cấu hình "
+            "> Configure** để đặt tên Mobile, Zalo, loa, TV/media player, camera và cấu hình "
             "AI, lịch, thời tiết, TTS cùng Zalo invocation keyword."
         )
 
@@ -9889,6 +9940,8 @@ class ConversationalAssistantManager(NoteManagerMixin):
             )
         if self._zalo_pending_sends.pop(owner_key, None) is not None:
             labels.append("gửi Zalo")
+        if self._clear_zalo_youtube_pending(owner_key):
+            labels.append("YouTube")
         if (
             self._zalo_pending_speaker_announcements.pop(owner_key, None)
             is not None
@@ -9975,6 +10028,8 @@ class ConversationalAssistantManager(NoteManagerMixin):
         self._purge_expired_pending()
         source_keys = self._source_keys(user_input)
         labels: list[str] = []
+        if self._clear_voice_youtube_pending_for_source(source_keys):
+            labels.append("YouTube")
 
         for pending_id, pending in list(self._pending_notes.items()):
             if source_keys & pending.source_keys:
@@ -10120,6 +10175,7 @@ class ConversationalAssistantManager(NoteManagerMixin):
         self._zalo_pending_notes.pop(owner_key, None)
         self._zalo_pending_sends.pop(owner_key, None)
         self._zalo_pending_speaker_announcements.pop(owner_key, None)
+        self._clear_zalo_youtube_pending(owner_key)
         self._zalo_pending_creations.pop(owner_key, None)
         self._zalo_pending_deletions.pop(owner_key, None)
         self._zalo_pending_camera_schedule_deletions.pop(owner_key, None)
@@ -17593,6 +17649,7 @@ class ConversationalAssistantManager(NoteManagerMixin):
         pending_speaker = self._zalo_pending_speaker_announcement(
             context.owner_key
         )
+        pending_youtube = self._youtube_zalo_pending(context.owner_key)
         pending_creation = self._zalo_pending_creation(context.owner_key)
         pending_deletion = self._zalo_pending_deletion(context.owner_key)
         pending_camera_schedule_deletion = (
@@ -17607,6 +17664,21 @@ class ConversationalAssistantManager(NoteManagerMixin):
             context.owner_key
         )
         flow_reply = context.active_flow_reply
+        if (
+            pending_youtube is not None
+            and (
+                flow_reply
+                or (command is None and explicit_ha_kind is None)
+            )
+        ):
+            return await self._async_youtube_pending_reply_from_zalo(
+                context, pending_youtube
+            )
+        if pending_youtube is not None and (
+            command is not None or explicit_ha_kind is not None
+        ):
+            self._clear_zalo_youtube_pending(context.owner_key)
+            self._schedule_pending_expiry()
         if (
             pending_send is not None
             and (
@@ -17762,6 +17834,8 @@ class ConversationalAssistantManager(NoteManagerMixin):
             return await self._async_lunar_date_conversion(
                 context.text, service_context, zalo=True
             )
+        if command == ACTION_YOUTUBE:
+            return await self._async_youtube_from_zalo(context, service_context)
         if command == ACTION_SPEAKER_ANNOUNCE:
             return await self._async_announce_to_speaker_from_zalo(context)
         if command == ACTION_SEARCH:
@@ -17956,6 +18030,19 @@ class ConversationalAssistantManager(NoteManagerMixin):
                     learned_match.command.target_text,
                 )
 
+        if command == ACTION_YOUTUBE:
+            parsed_youtube = parse_youtube_request(effective_text)
+            if parsed_youtube is None or not parsed_youtube.query.strip():
+                return None
+            youtube_targets = self._configured_youtube_targets()
+            target_indexes = find_target_indexes(
+                parsed_youtube.target_text or parsed_youtube.query,
+                youtube_targets,
+            )
+            # Only background a request that can start the external search now.
+            # Missing/unclear destinations are answered synchronously with the
+            # target list so Zalo feels immediate.
+            return ACTION_YOUTUBE if target_indexes else None
         if command == ACTION_SEARCH:
             query = _search_request(effective_text)
             return ACTION_SEARCH if query and query.strip() else None
@@ -18070,6 +18157,8 @@ class ConversationalAssistantManager(NoteManagerMixin):
                 if action == ACTION_CALENDAR
                 else "lunar/solar date parsing"
                 if action == ACTION_LUNAR_DATE_CONVERT
+                else "YouTube search"
+                if action == ACTION_YOUTUBE
                 else "weather lookup"
                 if action == ACTION_WEATHER
                 else "chat response"
@@ -18093,6 +18182,8 @@ class ConversationalAssistantManager(NoteManagerMixin):
             if action == ACTION_CALENDAR
             else "phân tích yêu cầu đổi ngày âm dương"
             if action == ACTION_LUNAR_DATE_CONVERT
+            else "tìm kiếm YouTube"
+            if action == ACTION_YOUTUBE
             else "tra cứu thời tiết"
             if action == ACTION_WEATHER
             else "trò chuyện"
@@ -18136,11 +18227,17 @@ class ConversationalAssistantManager(NoteManagerMixin):
             if action == ACTION_IMAGE_GENERATION
             else CAMERA_ANALYSIS_TIMEOUT_SECONDS
             if action == ACTION_CAMERA_ANALYSIS
+            else YOUTUBE_SEARCH_TIMEOUT_SECONDS
+            if action == ACTION_YOUTUBE
             else AI_SEARCH_AGENT_TIMEOUT_SECONDS
             if action in {ACTION_SEARCH, ACTION_WEATHER, ACTION_CHAT}
             else ZALO_SEARCH_TIMEOUT_SECONDS
         )
-        candidate_count = self._ai_long_running_candidate_count(action)
+        candidate_count = (
+            1
+            if action == ACTION_YOUTUBE
+            else self._ai_long_running_candidate_count(action)
+        )
         camera_count = 1
         if action == ACTION_CAMERA_ANALYSIS:
             pending_camera = self._zalo_pending_camera(context.owner_key)
@@ -20060,6 +20157,7 @@ class ConversationalAssistantManager(NoteManagerMixin):
             *self._pending_voice_device_controls.values(),
             *self._pending_voice_zalo_sends.values(),
             *self._pending_voice_speaker_announcements.values(),
+            *self._youtube_pending_items(),
             *self._note_pending_items(),
             *self._zalo_pending_notes.values(),
             *self._zalo_pending_sends.values(),
@@ -20094,6 +20192,7 @@ class ConversationalAssistantManager(NoteManagerMixin):
             or self._pending_voice_device_controls
             or self._pending_voice_zalo_sends
             or self._pending_voice_speaker_announcements
+            or self._pending_voice_youtube
             or self._has_pending_notes()
         )
         if has_pending and self._unsub_pending_trigger is None:
@@ -20118,6 +20217,7 @@ class ConversationalAssistantManager(NoteManagerMixin):
     def _purge_expired_pending(self) -> None:
         """Remove expired creation, deletion, camera, and note requests."""
         self._purge_expired_note_pending()
+        self._purge_expired_youtube_pending()
         now = dt_util.now()
         for pending_id, pending in list(self._pending.items()):
             if pending.expires_at <= now:
@@ -20191,6 +20291,7 @@ class ConversationalAssistantManager(NoteManagerMixin):
     def _clear_pending_for_source(self, source_keys: set[str]) -> None:
         """Remove older pending actions from the same user or satellite."""
         self._clear_note_pending_for_source(source_keys)
+        self._clear_voice_youtube_pending_for_source(source_keys)
         for pending_id, pending in list(self._pending.items()):
             if source_keys & pending.source_keys:
                 del self._pending[pending_id]
@@ -20874,6 +20975,8 @@ class ConversationalAssistantManager(NoteManagerMixin):
         self, user_input: ConversationInput, result: RecognizeResult
     ) -> str:
         """Search the Internet through the configured AI Search agent."""
+        if has_youtube_cue(user_input.text):
+            return await self._async_youtube_from_voice(user_input, result)
         if weather_search_request(user_input.text) is not None:
             return await self._async_weather_from_voice(user_input, result)
         self._clear_pending_for_source(self._source_keys(user_input))
@@ -21037,6 +21140,10 @@ class ConversationalAssistantManager(NoteManagerMixin):
             return await self._async_send_to_zalo_from_voice(
                 transformed_input, result
             )
+        if command.action == ACTION_YOUTUBE:
+            return await self._async_youtube_from_voice(
+                transformed_input, result
+            )
         if command.action == ACTION_SPEAKER_ANNOUNCE:
             return await self._async_announce_to_speaker_from_voice(
                 transformed_input, result
@@ -21149,6 +21256,8 @@ class ConversationalAssistantManager(NoteManagerMixin):
             is_lunar_date_conversion_request(text)
             or is_lunar_date_lookup_request(text)
         ):
+            return True
+        if has_youtube_cue(text):
             return True
         if _speaker_announcement_request(text) is not None:
             return True
@@ -21400,8 +21509,14 @@ class ConversationalAssistantManager(NoteManagerMixin):
             )
 
         if self._is_primary_voice_command(user_input.text):
-            # Let the dedicated create/list/delete/search/help trigger respond.
+            # Let the dedicated create/list/delete/search/help/YouTube trigger respond.
             return None
+
+        youtube_pending = self._find_pending_voice_youtube(user_input)
+        if youtube_pending is not None:
+            return await self._async_youtube_pending_reply_from_voice(
+                user_input, youtube_pending
+            )
 
         note_pending = self._find_pending_note(user_input)
         zalo_send_pending = self._find_pending_voice_zalo_send(user_input)

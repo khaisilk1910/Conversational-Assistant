@@ -69,14 +69,15 @@
       },
       "general": {
         "title": "General settings",
-        "description": "Manage shared behavior and direct spoken names. Configured: {mobile_count} Mobile devices, {zalo_count} Zalo destinations, {speaker_count} speakers, and {camera_count} cameras.",
+        "description": "Manage shared behavior and direct spoken names. Configured: {mobile_count} Mobile devices, {zalo_count} Zalo destinations, {speaker_count} speakers, {media_count} TV/media playback devices, and {camera_count} cameras.",
         "menu_options": {
           "general_behavior": "Behavior and form of address",
           "mobile_targets": "Mobile devices and spoken names",
           "zalo": "Zalo destinations and spoken names",
           "speaker_targets": "Speakers and spoken names",
           "camera_targets": "Cameras and spoken names",
-          "init": "Back to Conversational Assistant options"
+          "init": "Back to Conversational Assistant options",
+          "media_targets": "TV/media players and spoken names"
         }
       },
       "calendar": {
@@ -409,6 +410,46 @@
         "description": "Remove this link and spoken name from Conversational Assistant.",
         "data": {
           "selected_named_target": "Camera to delete"
+        }
+      },
+      "media_targets": {
+        "title": "TV/media players and spoken names",
+        "description": "Configure TV or media_player entities used for direct YouTube playback. Give them natural names such as Bedroom TV or Projector. Configured: {target_count}.",
+        "menu_options": {
+          "add_media_target": "Add media player",
+          "edit_media_target_select": "Edit media player",
+          "delete_media_target": "Delete media player",
+          "general": "Back to General settings"
+        }
+      },
+      "add_media_target": {
+        "title": "Add TV/media player",
+        "description": "Configure TV or media_player entities used for direct YouTube playback. Give them natural names such as Bedroom TV or Projector.",
+        "data": {
+          "media_entity_id": "Media player",
+          "named_target_name": "Spoken name",
+          "named_target_enabled": "Enabled"
+        }
+      },
+      "edit_media_target_select": {
+        "title": "Select TV/media player to edit",
+        "data": {
+          "selected_named_target": "Device"
+        }
+      },
+      "edit_media_target": {
+        "title": "Edit TV/media player",
+        "description": "Configure TV or media_player entities used for direct YouTube playback. Give them natural names such as Bedroom TV or Projector.",
+        "data": {
+          "media_entity_id": "Media player",
+          "named_target_name": "Spoken name",
+          "named_target_enabled": "Enabled"
+        }
+      },
+      "delete_media_target": {
+        "title": "Delete TV/media player",
+        "data": {
+          "selected_named_target": "Device"
         }
       }
     },

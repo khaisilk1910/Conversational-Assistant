@@ -69,14 +69,15 @@
       },
       "general": {
         "title": "Cài đặt chung",
-        "description": "Quản lý hành vi chung và tên gọi trực tiếp. Hiện có {mobile_count} thiết bị Mobile, {zalo_count} nơi nhận Zalo, {speaker_count} loa và {camera_count} camera.",
+        "description": "Quản lý hành vi chung và tên gọi trực tiếp. Hiện có {mobile_count} thiết bị Mobile, {zalo_count} nơi nhận Zalo, {speaker_count} loa, {media_count} TV/thiết bị phát media và {camera_count} camera.",
         "menu_options": {
           "general_behavior": "Hành vi và xưng hô",
           "mobile_targets": "Thiết bị Mobile và tên gọi",
           "zalo": "Nơi nhận Zalo và tên gọi",
           "speaker_targets": "Loa và tên gọi",
           "camera_targets": "Camera và tên gọi",
-          "init": "Quay lại Tùy chọn Conversational Assistant"
+          "init": "Quay lại Tùy chọn Conversational Assistant",
+          "media_targets": "TV/thiết bị phát media và tên gọi"
         }
       },
       "calendar": {
@@ -409,6 +410,46 @@
         "description": "Xóa liên kết và tên gọi khỏi cấu hình Conversational Assistant.",
         "data": {
           "selected_named_target": "Camera cần xóa"
+        }
+      },
+      "media_targets": {
+        "title": "TV/thiết bị phát media và tên gọi",
+        "description": "Cấu hình TV hoặc media_player dùng để phát YouTube trực tiếp. Có thể đặt tên tự nhiên như TV Phòng Ngủ, Tivi Khách, Máy Chiếu. Configured: {target_count}.",
+        "menu_options": {
+          "add_media_target": "Thêm thiết bị phát media",
+          "edit_media_target_select": "Sửa thiết bị phát media",
+          "delete_media_target": "Xóa thiết bị phát media",
+          "general": "Quay lại Cài đặt chung"
+        }
+      },
+      "add_media_target": {
+        "title": "Thêm TV/thiết bị phát media",
+        "description": "Cấu hình TV hoặc media_player dùng để phát YouTube trực tiếp. Có thể đặt tên tự nhiên như TV Phòng Ngủ, Tivi Khách, Máy Chiếu.",
+        "data": {
+          "media_entity_id": "Media player",
+          "named_target_name": "Tên gọi",
+          "named_target_enabled": "Bật"
+        }
+      },
+      "edit_media_target_select": {
+        "title": "Chọn TV/thiết bị phát media để sửa",
+        "data": {
+          "selected_named_target": "Thiết bị"
+        }
+      },
+      "edit_media_target": {
+        "title": "Sửa TV/thiết bị phát media",
+        "description": "Cấu hình TV hoặc media_player dùng để phát YouTube trực tiếp. Có thể đặt tên tự nhiên như TV Phòng Ngủ, Tivi Khách, Máy Chiếu.",
+        "data": {
+          "media_entity_id": "Media player",
+          "named_target_name": "Tên gọi",
+          "named_target_enabled": "Bật"
+        }
+      },
+      "delete_media_target": {
+        "title": "Xóa TV/thiết bị phát media",
+        "data": {
+          "selected_named_target": "Thiết bị"
         }
       }
     },

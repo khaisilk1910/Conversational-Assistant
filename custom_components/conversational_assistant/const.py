@@ -9,12 +9,14 @@ PLATFORMS = ["sensor"]
 CONF_NOTIFICATION_DEVICES = "notification_devices"
 CONF_MOBILE_TARGETS = "mobile_targets"
 CONF_SPEAKER_TARGETS = "speaker_targets"
+CONF_MEDIA_TARGETS = "media_targets"
 CONF_CAMERA_TARGETS = "camera_targets"
 CONF_NAMED_TARGET_ID = "target_id"
 CONF_NAMED_TARGET_NAME = "name"
 CONF_NAMED_TARGET_ENABLED = "enabled"
 CONF_MOBILE_DEVICE_ID = "mobile_device_id"
 CONF_SPEAKER_ENTITY_ID = "speaker_entity_id"
+CONF_MEDIA_ENTITY_ID = "media_entity_id"
 CONF_CAMERA_ENTITY_ID = "camera_entity_id"
 CONF_DISMISS_ON_CLEAR = "dismiss_on_clear"
 CONF_CONFIRM_TARGETS = "confirm_targets"
@@ -201,6 +203,24 @@ DISCOVERY_CACHE_SECONDS = 60
 TTS_DOMAIN = "tts"
 TTS_SERVICE_SPEAK = "speak"
 MEDIA_PLAYER_DOMAIN = "media_player"
+MEDIA_EXTRACTOR_DOMAIN = "media_extractor"
+MEDIA_EXTRACTOR_SERVICE_EXTRACT_URL = "extract_media_url"
+MEDIA_EXTRACTOR_SERVICE_PLAY_MEDIA = "play_media"
+MEDIA_PLAYER_SERVICE_PLAY_MEDIA = "play_media"
+MEDIA_PLAYER_SERVICE_SEARCH_MEDIA = "search_media"
+MEDIA_PLAYER_SERVICE_TURN_ON = "turn_on"
+
+# YouTube search/play. Search selection is intentionally shorter than the
+# generic 120-second confirmation window: if the user does not choose a result,
+# the first video is automatically played as requested.
+YOUTUBE_SEARCH_SERVICE_DOMAIN = "pyscript"
+YOUTUBE_SEARCH_SERVICE_NAME = "youtube_search_tool"
+YOUTUBE_SEARCH_RESULT_COUNT = 10
+YOUTUBE_SEARCH_TIMEOUT_SECONDS = 30
+YOUTUBE_SELECTION_TIMEOUT_SECONDS = 20
+YOUTUBE_SPEAKER_WAIT_SECONDS = 600
+YOUTUBE_SPEAKER_RETRY_DELAY_SECONDS = 10
+YOUTUBE_MEDIA_SERVICE_TIMEOUT_SECONDS = 60
 
 STORAGE_VERSION = 1
 STORAGE_KEY_PREFIX = DOMAIN
@@ -328,6 +348,45 @@ SPEAKER_ANNOUNCE_SENTENCES = [
     "[hãy ]gửi loa {request}",
     "[hãy ]nhắn loa",
     "[hãy ]nhắn loa {request}",
+]
+
+# Explicit YouTube phrases for Voice Assist. Zalo uses the same natural parser
+# and accepts any request containing an unambiguous YouTube cue.
+YOUTUBE_SENTENCES = [
+    "youtube",
+    "youtube {request}",
+    "[hãy ]tìm youtube",
+    "[hãy ]tìm youtube {request}",
+    "[hãy ]tìm trên youtube",
+    "[hãy ]tìm trên youtube {request}",
+    "[hãy ]tìm kiếm youtube",
+    "[hãy ]tìm kiếm youtube {request}",
+    "[hãy ]tìm kiếm trên youtube",
+    "[hãy ]tìm kiếm trên youtube {request}",
+    "[hãy ]mở youtube",
+    "[hãy ]mở youtube {request}",
+    "[hãy ]bật youtube",
+    "[hãy ]bật youtube {request}",
+    "[hãy ]phát youtube",
+    "[hãy ]phát youtube {request}",
+    "[hãy ]xem youtube",
+    "[hãy ]xem youtube {request}",
+    "[please ]search youtube",
+    "[please ]search youtube {request}",
+    "[please ]search youtube for",
+    "[please ]search youtube for {request}",
+    "[please ]play youtube",
+    "[please ]play youtube {request}",
+    "[please ]open youtube",
+    "[please ]open youtube {request}",
+    # Natural forms where YouTube is mentioned after the search subject.
+    # {name} is Home Assistant's native exposed-entity slot; the callback still
+    # parses the complete original text so configured Conversational Assistant
+    # aliases are resolved by the YouTube flow itself.
+    "[hãy ](mở|phát|xem|tìm|tìm kiếm) {request} (trên|từ) youtube",
+    "[hãy ](mở|phát|xem|tìm|tìm kiếm) {request} (trên|từ) youtube (trên|ở|ra|vào) {name}",
+    "[please ](open|play|watch|find|search) {request} (on|from) youtube",
+    "[please ](open|play|watch|find|search) {request} (on|from) youtube (on|to|through) {name}",
 ]
 
 # A speaker may receive TTS while idle, off, or paused. After the initial

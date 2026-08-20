@@ -34,6 +34,7 @@ ACTION_WEATHER = "weather"
 ACTION_IMAGE_GENERATION = "image_generation"
 ACTION_ZALO_SEND = "zalo_send"
 ACTION_SPEAKER_ANNOUNCE = "speaker_announce"
+ACTION_YOUTUBE = "youtube"
 ACTION_LUNAR_DATE_CONVERT = "lunar_date_convert"
 
 SUPPORTED_ACTIONS = {
@@ -56,6 +57,7 @@ SUPPORTED_ACTIONS = {
     ACTION_IMAGE_GENERATION,
     ACTION_ZALO_SEND,
     ACTION_SPEAKER_ANNOUNCE,
+    ACTION_YOUTUBE,
     ACTION_LUNAR_DATE_CONVERT,
 }
 
@@ -73,6 +75,7 @@ REQUEST_ACTIONS = {
     ACTION_IMAGE_GENERATION,
     ACTION_ZALO_SEND,
     ACTION_SPEAKER_ANNOUNCE,
+    ACTION_YOUTUBE,
     ACTION_LUNAR_DATE_CONVERT,
 }
 
@@ -96,6 +99,7 @@ ACTION_LABELS = {
     ACTION_IMAGE_GENERATION: "tạo ảnh bằng AI và gửi về Zalo",
     ACTION_ZALO_SEND: "gửi nội dung đến Zalo đã cấu hình",
     ACTION_SPEAKER_ANNOUNCE: "phát nội dung thông báo ra loa TTS",
+    ACTION_YOUTUBE: "tìm YouTube và phát trên loa, TV hoặc media player",
     ACTION_LUNAR_DATE_CONVERT: "chuyển đổi ngày âm lịch và dương lịch",
 }
 
@@ -154,6 +158,10 @@ _TARGET_LABELS = {
     "notify zalo": ACTION_ZALO_SEND,
     "announce on speaker": ACTION_SPEAKER_ANNOUNCE,
     "speaker announcement": ACTION_SPEAKER_ANNOUNCE,
+    "youtube": ACTION_YOUTUBE,
+    "search youtube": ACTION_YOUTUBE,
+    "play youtube": ACTION_YOUTUBE,
+    "youtube search": ACTION_YOUTUBE,
     "convert lunar date": ACTION_LUNAR_DATE_CONVERT,
     "convert solar date": ACTION_LUNAR_DATE_CONVERT,
     "lunar solar conversion": ACTION_LUNAR_DATE_CONVERT,
@@ -232,6 +240,11 @@ _TARGET_LABELS = {
     "thong bao ra loa": ACTION_SPEAKER_ANNOUNCE,
     "gui loa": ACTION_SPEAKER_ANNOUNCE,
     "nhan loa": ACTION_SPEAKER_ANNOUNCE,
+    "tim youtube": ACTION_YOUTUBE,
+    "tim tren youtube": ACTION_YOUTUBE,
+    "tim kiem youtube": ACTION_YOUTUBE,
+    "mo youtube": ACTION_YOUTUBE,
+    "phat youtube": ACTION_YOUTUBE,
     "doi ngay am duong": ACTION_LUNAR_DATE_CONVERT,
     "chuyen doi ngay am duong": ACTION_LUNAR_DATE_CONVERT,
     "quy doi ngay am duong": ACTION_LUNAR_DATE_CONVERT,
@@ -665,6 +678,7 @@ def canonical_text(
         ACTION_IMAGE_GENERATION: "tạo ảnh",
         ACTION_ZALO_SEND: "gửi zalo",
         ACTION_SPEAKER_ANNOUNCE: "thông báo loa",
+        ACTION_YOUTUBE: "tìm youtube",
         ACTION_CAMERA_ANALYSIS: "phân tích camera",
         ACTION_CAMERA_VIDEO: "gửi video camera",
         ACTION_LUNAR_DATE_CONVERT: "đổi ngày âm dương",
