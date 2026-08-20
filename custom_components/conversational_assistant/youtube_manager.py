@@ -41,6 +41,7 @@ from .const import (
     MEDIA_PLAYER_SERVICE_SEARCH_MEDIA,
     MEDIA_PLAYER_SERVICE_TURN_ON,
     PENDING_CONFIRMATION_TIMEOUT_SECONDS,
+    YOUTUBE_AUDIO_FORMAT_QUERY,
     YOUTUBE_DATA_API_SEARCH_URL,
     YOUTUBE_MEDIA_SERVICE_TIMEOUT_SECONDS,
     YOUTUBE_SEARCH_RESULT_COUNT,
@@ -48,6 +49,8 @@ from .const import (
     YOUTUBE_SEARCH_SERVICE_NAME,
     YOUTUBE_SEARCH_TIMEOUT_SECONDS,
     YOUTUBE_SELECTION_TIMEOUT_SECONDS,
+    YOUTUBE_SHELL_COMMAND_DOMAIN,
+    YOUTUBE_SHELL_COMMAND_SERVICE,
     YOUTUBE_SPEAKER_RETRY_DELAY_SECONDS,
     YOUTUBE_SPEAKER_WAIT_SECONDS,
 )
@@ -852,13 +855,16 @@ class YouTubeManagerMixin:
     async def _async_extract_youtube_audio_stream(
         self, video_url: str
     ) -> tuple[str, str] | None:
-        """Extract a true audio-only YouTube stream without blocking HA.
+        """Resolve a direct audio-only YouTube URL using yt-dlp in HA Core.
 
-        Home Assistant 2026.8 Media Extractor's extract_media_url helper applies
-        special YouTube handling that prefers a muxed audio+video stream.  That is
-        useful for displays but can be rejected silently by audio-only speakers.
-        This fallback uses the same yt-dlp dependency lazily and only after a
-        playback request, so it adds no startup work.
+        Do not use media_extractor.extract_media_url for an audio-only speaker.
+        Home Assistant's current YouTube special-case intentionally selects a
+        format that has *both* audio and video codecs.  That commonly becomes
+        an MP4/itag-18 style stream and is rejected by older audio players.
+
+        Format 140 (M4A/AAC) is tried first because it is widely accepted by
+        audio-only/legacy players such as the Phicomm R1.  The import stays lazy
+        so no extraction work is done during Home Assistant startup.
         """
         config_dir = self.hass.config.config_dir
 
@@ -872,7 +878,10 @@ class YouTubeManagerMixin:
                 "quiet": True,
                 "no_warnings": True,
                 "noplaylist": True,
-                "format": "bestaudio[ext=m4a]/bestaudio[ext=webm]/bestaudio",
+                "format": YOUTUBE_AUDIO_FORMAT_QUERY,
+                "socket_timeout": 20,
+                "retries": 2,
+                "fragment_retries": 1,
             }
             cookies_file = Path(config_dir, "media_extractor", "cookies.txt")
             if cookies_file.exists():
@@ -887,7 +896,7 @@ class YouTubeManagerMixin:
                 if isinstance(first, dict):
                     info = first
             stream_url = str(info.get("url", "") or "").strip()
-            if not stream_url:
+            if not stream_url.startswith(("http://", "https://")):
                 return None
             return stream_url, self._youtube_audio_mime(info)
 
@@ -895,15 +904,126 @@ class YouTubeManagerMixin:
             async with asyncio.timeout(YOUTUBE_MEDIA_SERVICE_TIMEOUT_SECONDS):
                 return await self.hass.async_add_executor_job(extract)
         except TimeoutError:
-            _LOGGER.warning("Timed out extracting an audio-only YouTube stream")
-        except Exception:  # noqa: BLE001 - continue to HA fallbacks
-            _LOGGER.debug("Audio-only YouTube extraction failed", exc_info=True)
+            _LOGGER.warning("Timed out resolving a YouTube audio-only stream")
+        except Exception:  # noqa: BLE001 - continue to compatibility fallbacks
+            _LOGGER.debug("Direct yt-dlp YouTube audio extraction failed", exc_info=True)
+        return None
+
+    async def _async_extract_youtube_audio_stream_shell(
+        self, video_id: str
+    ) -> tuple[str, str] | None:
+        """Use an optional user-defined shell_command.youtube_stream fallback.
+
+        This directly supports the user's proven YAML pattern:
+        ``yt-dlp -f 140 -g https://www.youtube.com/watch?v={{ video_id }}``.
+        The command is optional; the integration does not require configuration
+        YAML when the bundled Python yt-dlp path works.
+        """
+        if not self.hass.services.has_service(
+            YOUTUBE_SHELL_COMMAND_DOMAIN, YOUTUBE_SHELL_COMMAND_SERVICE
+        ):
+            return None
+        try:
+            response = await self._async_call_service(
+                YOUTUBE_SHELL_COMMAND_DOMAIN,
+                YOUTUBE_SHELL_COMMAND_SERVICE,
+                {"video_id": video_id},
+                blocking=True,
+                return_response=True,
+                timeout_seconds=min(55, YOUTUBE_MEDIA_SERVICE_TIMEOUT_SECONDS),
+            )
+        except Exception:  # noqa: BLE001
+            _LOGGER.debug("shell_command.youtube_stream failed", exc_info=True)
+            return None
+        if not isinstance(response, dict):
+            return None
+        try:
+            returncode = int(response.get("returncode", 1))
+        except (TypeError, ValueError):
+            returncode = 1
+        if returncode != 0:
+            _LOGGER.debug(
+                "shell_command.youtube_stream returned code %s", returncode
+            )
+            return None
+        stdout = str(response.get("stdout", "") or "")
+        for line in stdout.splitlines():
+            candidate = line.strip()
+            if candidate.startswith(("http://", "https://")):
+                # The documented/example command forces YouTube itag 140, which
+                # is M4A/AAC.  Keep the semantic media type as ``music`` when
+                # sending it to the player; the MIME is only a fallback.
+                return candidate, "audio/mp4"
+        return None
+
+    async def _async_play_youtube_audio_url(
+        self,
+        target: YouTubeTarget,
+        stream_url: str,
+        mime_type: str,
+        *,
+        label: str,
+        attempts: list[str],
+    ) -> str | None:
+        """Send a direct audio URL to a speaker using compatible content types.
+
+        Many legacy/custom media_player integrations branch on the semantic
+        Home Assistant type ``music`` and do not accept ``audio/mp4`` even when
+        the URL itself is an M4A stream.  Therefore ``music`` is deliberately
+        tried first, matching the working Home Assistant YAML supplied by the
+        user, and the concrete MIME type is used only as a second attempt.
+        """
+        if not self.hass.services.has_service(
+            MEDIA_PLAYER_DOMAIN, MEDIA_PLAYER_SERVICE_PLAY_MEDIA
+        ):
+            attempts.append(f"{label}:play_media_unavailable")
+            return None
+
+        content_types = ["music"]
+        normalized_mime = str(mime_type or "").strip().casefold()
+        if normalized_mime and normalized_mime != "music":
+            content_types.append(normalized_mime)
+
+        for content_type in content_types:
+            before = self._youtube_playback_signature(target.entity_id)
+            try:
+                await self._async_call_service(
+                    MEDIA_PLAYER_DOMAIN,
+                    MEDIA_PLAYER_SERVICE_PLAY_MEDIA,
+                    {
+                        "media_content_id": stream_url,
+                        "media_content_type": content_type,
+                    },
+                    blocking=True,
+                    target={"entity_id": target.entity_id},
+                    timeout_seconds=YOUTUBE_MEDIA_SERVICE_TIMEOUT_SECONDS,
+                )
+                if await self._async_wait_youtube_speaker_started(
+                    target, before, timeout_seconds=12.0
+                ):
+                    return f"{label}:{content_type}"
+                attempts.append(f"{label}:{content_type}:no_state_change")
+            except Exception as err:  # noqa: BLE001
+                attempts.append(f"{label}:{content_type}:{type(err).__name__}")
+                _LOGGER.debug(
+                    "Direct YouTube audio playback failed for %s via %s/%s",
+                    target.entity_id,
+                    label,
+                    content_type,
+                    exc_info=True,
+                )
         return None
 
     async def _async_play_youtube_speaker(
         self, target: YouTubeTarget, video: YouTubeVideo
     ) -> str:
-        """Play YouTube on an audio target and verify sound really starts."""
+        """Play YouTube on an audio-only target and verify real playback.
+
+        The primary path mirrors the user's working manual recipe:
+        YouTube ID -> yt-dlp format 140/M4A -> media_player.play_media with
+        ``media_content_type: music``.  Media Extractor is only a late fallback
+        because its YouTube helper intentionally prefers muxed audio+video.
+        """
         attempts: list[str] = []
 
         state = self.hass.states.get(target.entity_id)
@@ -925,15 +1045,54 @@ class YouTubeManagerMixin:
                 )
                 await asyncio.sleep(0.5)
             except Exception:
-                # Many audio integrations wake automatically on play_media.
                 _LOGGER.debug(
                     "Could not explicitly turn on YouTube speaker %s",
                     target.entity_id,
                     exc_info=True,
                 )
 
-        # First use the Home Assistant action designed for entity-specific
-        # extraction.  media_content_type is REQUIRED by the action schema.
+        # 1) Preferred: use yt-dlp from the Home Assistant Core Python runtime.
+        # The integration now declares media_extractor as a dependency, which
+        # guarantees the same maintained yt-dlp package is available in HA Core.
+        audio_stream = await self._async_extract_youtube_audio_stream(video.url)
+        if audio_stream:
+            stream_url, mime_type = audio_stream
+            method = await self._async_play_youtube_audio_url(
+                target,
+                stream_url,
+                mime_type,
+                label="yt_dlp_audio",
+                attempts=attempts,
+            )
+            if method:
+                return method
+        else:
+            attempts.append("yt_dlp_audio:no_url")
+
+        # 2) Exact compatibility fallback for users who already configured the
+        # shell_command recipe with ``yt-dlp -f 140 -g``.
+        shell_stream = await self._async_extract_youtube_audio_stream_shell(
+            video.video_id
+        )
+        if shell_stream:
+            stream_url, mime_type = shell_stream
+            method = await self._async_play_youtube_audio_url(
+                target,
+                stream_url,
+                mime_type,
+                label="shell_yt_dlp_audio",
+                attempts=attempts,
+            )
+            if method:
+                return method
+        elif self.hass.services.has_service(
+            YOUTUBE_SHELL_COMMAND_DOMAIN, YOUTUBE_SHELL_COMMAND_SERVICE
+        ):
+            attempts.append("shell_yt_dlp_audio:no_url")
+
+        # 3) Late Home Assistant fallback.  For YouTube this may resolve to a
+        # muxed audio+video stream, so it is intentionally *not* the first path
+        # for a speaker.  Verify player state before claiming success.
         if self.hass.services.has_service(
             MEDIA_EXTRACTOR_DOMAIN, MEDIA_EXTRACTOR_SERVICE_PLAY_MEDIA
         ):
@@ -955,51 +1114,10 @@ class YouTubeManagerMixin:
                 ):
                     return "media_extractor.play_media"
                 attempts.append("media_extractor.play_media:no_state_change")
-            except Exception as err:  # noqa: BLE001 - try a safer audio stream
+            except Exception as err:  # noqa: BLE001
                 attempts.append(f"media_extractor.play_media:{type(err).__name__}")
-                _LOGGER.debug(
-                    "Media Extractor direct speaker playback failed for %s",
-                    target.entity_id,
-                    exc_info=True,
-                )
 
-        # For audio-only devices, extract a true audio stream.  This avoids the
-        # YouTube muxed MP4 returned by HA extract_media_url (often itag 18),
-        # which many speakers will accept as an action but never actually play.
-        audio_stream = await self._async_extract_youtube_audio_stream(video.url)
-        if audio_stream and self.hass.services.has_service(
-            MEDIA_PLAYER_DOMAIN, MEDIA_PLAYER_SERVICE_PLAY_MEDIA
-        ):
-            stream_url, mime_type = audio_stream
-            before = self._youtube_playback_signature(target.entity_id)
-            try:
-                await self._async_call_service(
-                    MEDIA_PLAYER_DOMAIN,
-                    MEDIA_PLAYER_SERVICE_PLAY_MEDIA,
-                    {
-                        "media_content_id": stream_url,
-                        "media_content_type": mime_type,
-                    },
-                    blocking=True,
-                    target={"entity_id": target.entity_id},
-                    timeout_seconds=YOUTUBE_MEDIA_SERVICE_TIMEOUT_SECONDS,
-                )
-                if await self._async_wait_youtube_speaker_started(
-                    target, before, timeout_seconds=10.0
-                ):
-                    return f"audio_only:{mime_type}"
-                attempts.append(f"audio_only:{mime_type}:no_state_change")
-            except Exception as err:  # noqa: BLE001 - try generic final fallback
-                attempts.append(f"audio_only:{type(err).__name__}")
-                _LOGGER.debug(
-                    "Audio-only media_player playback failed for %s",
-                    target.entity_id,
-                    exc_info=True,
-                )
-
-        # Last generic fallback for integrations that understand YouTube page
-        # URLs themselves.  Still verify the entity instead of reporting success
-        # only because the service call returned.
+        # 4) A few integrations understand a YouTube page URL directly.
         if self.hass.services.has_service(
             MEDIA_PLAYER_DOMAIN, MEDIA_PLAYER_SERVICE_PLAY_MEDIA
         ):
@@ -1019,15 +1137,15 @@ class YouTubeManagerMixin:
                 if await self._async_wait_youtube_speaker_started(
                     target, before, timeout_seconds=8.0
                 ):
-                    return "media_player.play_media"
-                attempts.append("media_player.play_media:no_state_change")
+                    return "media_player.youtube_url"
+                attempts.append("media_player.youtube_url:no_state_change")
             except Exception as err:  # noqa: BLE001
-                attempts.append(f"media_player.play_media:{type(err).__name__}")
+                attempts.append(f"media_player.youtube_url:{type(err).__name__}")
 
-        detail = ", ".join(attempts[-3:]) or "no supported playback action"
+        detail = ", ".join(attempts[-6:]) or "no supported playback action"
         raise RuntimeError(
-            "không xác nhận được loa đã bắt đầu phát "
-            f"(loa không chuyển sang playing/buffering; {detail})"
+            "không xác nhận được loa đã bắt đầu phát; đã thử audio M4A/itag 140 "
+            f"và các fallback Home Assistant ({detail})"
         )
 
     async def _async_play_youtube_video(self, target: YouTubeTarget, video: YouTubeVideo) -> str:
