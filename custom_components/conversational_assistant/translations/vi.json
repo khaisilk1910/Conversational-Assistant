@@ -62,6 +62,7 @@
           "calendar": "Cài đặt lịch",
           "weather": "Cài đặt thời tiết",
           "zalo": "Cài đặt Zalo",
+          "youtube": "Cài đặt YouTube",
           "ai": "Cài đặt AI",
           "tts": "Cài đặt TTS",
           "finish": "Lưu và hoàn tất"
@@ -450,6 +451,16 @@
         "title": "Xóa TV/thiết bị phát media",
         "data": {
           "selected_named_target": "Thiết bị"
+        }
+      },
+      "youtube": {
+        "title": "Cài đặt YouTube",
+        "description": "Nhập YouTube Data API v3 key để Conversational Assistant tìm tối đa 10 video trực tiếp mà không cần cấu hình key trong Pyscript. Key hiển thị dạng mật khẩu và không được ghi vào log. Khi để trống, tích hợp chỉ có thể dùng tìm kiếm native của media player hoặc Pyscript đã tự cấu hình key.",
+        "data": {
+          "youtube_api_key": "YouTube API key"
+        },
+        "data_description": {
+          "youtube_api_key": "API key của Google Cloud project đã bật YouTube Data API v3. Để trống nếu chỉ muốn dùng nguồn native/Pyscript. Sau khi thay đổi, chọn Lưu và Hoàn tất để áp dụng."
         }
       }
     },

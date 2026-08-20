@@ -11,6 +11,8 @@ from time import monotonic
 from typing import Any
 import uuid
 
+from aiohttp import ClientError
+
 from hassil.recognize import RecognizeResult
 
 from homeassistant.components import persistent_notification
@@ -18,6 +20,7 @@ from homeassistant.components.media_player.const import MediaPlayerEntityFeature
 from homeassistant.const import ATTR_SUPPORTED_FEATURES, STATE_UNAVAILABLE, STATE_UNKNOWN
 from homeassistant.core import Context
 from homeassistant.helpers import entity_registry as er
+from homeassistant.helpers.aiohttp_client import async_get_clientsession
 from homeassistant.util import dt as dt_util
 
 from .const import (
@@ -28,6 +31,7 @@ from .const import (
     CONF_NAMED_TARGET_NAME,
     CONF_SPEAKER_ENTITY_ID,
     CONF_SPEAKER_TARGETS,
+    CONF_YOUTUBE_API_KEY,
     DISCOVERY_CACHE_SECONDS,
     MEDIA_EXTRACTOR_DOMAIN,
     MEDIA_EXTRACTOR_SERVICE_EXTRACT_URL,
@@ -37,6 +41,7 @@ from .const import (
     MEDIA_PLAYER_SERVICE_SEARCH_MEDIA,
     MEDIA_PLAYER_SERVICE_TURN_ON,
     PENDING_CONFIRMATION_TIMEOUT_SECONDS,
+    YOUTUBE_DATA_API_SEARCH_URL,
     YOUTUBE_MEDIA_SERVICE_TIMEOUT_SECONDS,
     YOUTUBE_SEARCH_RESULT_COUNT,
     YOUTUBE_SEARCH_SERVICE_DOMAIN,
@@ -371,14 +376,129 @@ class YouTubeManagerMixin:
             return []
         return normalize_native_search_response(response, limit=YOUTUBE_SEARCH_RESULT_COUNT)
 
-    async def _async_youtube_search(self, query: str, target: YouTubeTarget) -> list[YouTubeVideo]:
+    def _youtube_api_key(self) -> str:
+        """Return the API key configured in Conversational Assistant options."""
+        return str(self._option(CONF_YOUTUBE_API_KEY, "") or "").strip()
+
+    async def _async_youtube_data_api_search(
+        self, query: str
+    ) -> tuple[list[YouTubeVideo], str]:
+        """Search YouTube Data API directly without blocking Home Assistant.
+
+        The key is kept in the config entry options and is never written to logs.
+        A compact error code is returned so concurrent flows keep their own state.
+        """
+        api_key = self._youtube_api_key()
+        if not api_key:
+            return [], "missing_api_key"
+
+        session = async_get_clientsession(self.hass)
+        params = {
+            "part": "snippet",
+            "q": query,
+            "type": "video",
+            "maxResults": str(YOUTUBE_SEARCH_RESULT_COUNT),
+            "order": "relevance",
+            "key": api_key,
+        }
+        try:
+            async with asyncio.timeout(YOUTUBE_SEARCH_TIMEOUT_SECONDS):
+                async with session.get(
+                    YOUTUBE_DATA_API_SEARCH_URL, params=params
+                ) as response:
+                    try:
+                        payload = await response.json(content_type=None)
+                    except (ValueError, TypeError):
+                        payload = {}
+                    if response.status >= 400:
+                        reason = ""
+                        message = ""
+                        if isinstance(payload, dict):
+                            error = payload.get("error")
+                            if isinstance(error, dict):
+                                message = str(
+                                    error.get("message", "") or ""
+                                )
+                                error_items = error.get("errors")
+                                if (
+                                    isinstance(error_items, list)
+                                    and error_items
+                                    and isinstance(error_items[0], dict)
+                                ):
+                                    reason = str(
+                                        error_items[0].get("reason", "")
+                                        or ""
+                                    )
+                        normalized_reason = reason.casefold()
+                        normalized_message = message.casefold()
+                        combined = normalized_reason + " " + normalized_message
+                        if response.status == 403 and (
+                            "quota" in combined
+                            or "dailylimit" in combined
+                        ):
+                            return [], "api_quota"
+                        if response.status in {400, 401, 403} and any(
+                            marker in combined
+                            for marker in (
+                                "keyinvalid",
+                                "api key",
+                                "accessnotconfigured",
+                                "iprefererblocked",
+                                "forbidden",
+                            )
+                        ):
+                            return [], "api_key_rejected"
+                        _LOGGER.warning(
+                            "YouTube Data API search failed with HTTP %s",
+                            response.status,
+                        )
+                        return [], f"api_http_{response.status}"
+        except TimeoutError:
+            _LOGGER.warning("YouTube Data API search timed out")
+            return [], "api_timeout"
+        except ClientError as err:
+            _LOGGER.warning(
+                "YouTube Data API network error: %s", type(err).__name__
+            )
+            return [], "api_network"
+        except Exception:  # noqa: BLE001 - preserve legacy fallback
+            _LOGGER.exception("Unexpected YouTube Data API search error")
+            return [], "api_error"
+
+        videos = normalize_youtube_api_response(
+            payload, limit=YOUTUBE_SEARCH_RESULT_COUNT
+        )
+        return videos, "" if videos else "api_empty"
+
+    async def _async_youtube_search(
+        self, query: str, target: YouTubeTarget
+    ) -> tuple[list[YouTubeVideo], list[str]]:
+        """Search native media, integration API key, then legacy Pyscript."""
         native = await self._async_native_youtube_search(query, target)
         videos = list(native)
         seen = {item.video_id for item in videos}
+        errors: list[str] = []
         if len(videos) >= YOUTUBE_SEARCH_RESULT_COUNT:
-            return videos[:YOUTUBE_SEARCH_RESULT_COUNT]
-        if not self.hass.services.has_service(YOUTUBE_SEARCH_SERVICE_DOMAIN, YOUTUBE_SEARCH_SERVICE_NAME):
-            return videos
+            return videos[:YOUTUBE_SEARCH_RESULT_COUNT], errors
+
+        api_videos, api_error = await self._async_youtube_data_api_search(query)
+        if api_error:
+            errors.append(api_error)
+        for item in api_videos:
+            if item.video_id in seen:
+                continue
+            videos.append(item)
+            seen.add(item.video_id)
+            if len(videos) >= YOUTUBE_SEARCH_RESULT_COUNT:
+                return videos[:YOUTUBE_SEARCH_RESULT_COUNT], errors
+
+        # Backward compatibility: an existing Pyscript helper may still have
+        # its own youtube_api_key in pyscript.config. It is no longer required
+        # when the key is configured in Conversational Assistant options.
+        if not self.hass.services.has_service(
+            YOUTUBE_SEARCH_SERVICE_DOMAIN, YOUTUBE_SEARCH_SERVICE_NAME
+        ):
+            return videos, errors
         try:
             response = await self._async_call_service(
                 YOUTUBE_SEARCH_SERVICE_DOMAIN,
@@ -393,16 +513,53 @@ class YouTubeManagerMixin:
                 timeout_seconds=YOUTUBE_SEARCH_TIMEOUT_SECONDS,
             )
         except Exception:
-            _LOGGER.exception("YouTube search service failed")
-            return videos
-        for item in normalize_youtube_api_response(response, limit=YOUTUBE_SEARCH_RESULT_COUNT):
+            _LOGGER.exception("Legacy Pyscript YouTube search service failed")
+            errors.append("pyscript_error")
+            return videos, errors
+        if isinstance(response, dict) and response.get("error"):
+            errors.append("pyscript_error")
+        for item in normalize_youtube_api_response(
+            response, limit=YOUTUBE_SEARCH_RESULT_COUNT
+        ):
             if item.video_id in seen:
                 continue
             videos.append(item)
             seen.add(item.video_id)
             if len(videos) >= YOUTUBE_SEARCH_RESULT_COUNT:
                 break
-        return videos
+        return videos, errors
+
+    @staticmethod
+    def _youtube_search_failure_message(errors: list[str]) -> str:
+        """Return an actionable failure without exposing credentials."""
+        if "api_quota" in errors:
+            return (
+                "Không lấy được kết quả YouTube vì quota YouTube Data API đã hết "
+                "hoặc đang bị giới hạn. Hãy kiểm tra quota Google Cloud rồi thử lại."
+            )
+        if "api_key_rejected" in errors:
+            return (
+                "YouTube Data API đã từ chối API key. Hãy vào **Conversational "
+                "Assistant → Configure → YouTube Settings** để kiểm tra "
+                "`youtube_api_key`, đồng thời bảo đảm YouTube Data API v3 đã được "
+                "bật cho project."
+            )
+        if "missing_api_key" in errors:
+            return (
+                "Không có nguồn tìm kiếm YouTube đủ tin cậy. Hãy vào "
+                "**Conversational Assistant → Configure → YouTube Settings** và nhập "
+                "`youtube_api_key`. Nếu media player tự hỗ trợ tìm YouTube hoặc "
+                "Pyscript đã có key riêng thì integration vẫn có thể dùng nguồn đó."
+            )
+        if "api_timeout" in errors or "api_network" in errors:
+            return (
+                "Không kết nối được YouTube Data API lúc này. Hãy kiểm tra Internet/DNS "
+                "của Home Assistant rồi thử lại."
+            )
+        return (
+            "Không lấy được kết quả YouTube. Hãy kiểm tra **YouTube Settings**, "
+            "kết nối Internet và quyền truy cập YouTube Data API v3."
+        )
 
     def _new_youtube_pending(
         self,
@@ -430,14 +587,12 @@ class YouTubeManagerMixin:
         if not pending.query:
             pending.phase = "clarify"
             return self._youtube_clarify_prompt(pending.query, target)
-        videos = await self._async_youtube_search(pending.query, target)
+        videos, search_errors = await self._async_youtube_search(
+            pending.query, target
+        )
         if not videos:
             pending.phase = "clarify"
-            return (
-                "Không lấy được kết quả YouTube. Hãy kiểm tra `pyscript.youtube_search_tool` "
-                "và YouTube API key; nếu media player hỗ trợ `search_media`, integration "
-                "cũng đã thử action native trước."
-            )
+            return self._youtube_search_failure_message(search_errors)
         pending.videos = videos
         pending.phase = "video"
         pending.expires_at = dt_util.now() + timedelta(seconds=PENDING_CONFIRMATION_TIMEOUT_SECONDS)

@@ -62,6 +62,7 @@
           "calendar": "Calendar settings",
           "weather": "Weather settings",
           "zalo": "Zalo settings",
+          "youtube": "YouTube Settings",
           "ai": "AI settings",
           "tts": "TTS settings",
           "finish": "Save and Finish"
@@ -450,6 +451,16 @@
         "title": "Delete TV/media player",
         "data": {
           "selected_named_target": "Device"
+        }
+      },
+      "youtube": {
+        "title": "YouTube Settings",
+        "description": "Enter a YouTube Data API v3 key so Conversational Assistant can search up to 10 videos directly without requiring a Pyscript API-key setting. The field is masked and the key is never written to logs. When empty, only native media-player search or an independently configured Pyscript search service can be used.",
+        "data": {
+          "youtube_api_key": "YouTube API key"
+        },
+        "data_description": {
+          "youtube_api_key": "API key from a Google Cloud project with YouTube Data API v3 enabled. Leave blank to use only native/Pyscript search sources. Choose Save and Finish after changing this setting."
         }
       }
     },

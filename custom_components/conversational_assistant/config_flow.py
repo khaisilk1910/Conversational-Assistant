@@ -60,6 +60,7 @@ from .const import (
     CONF_TTS_ENTITY_ID,
     CONF_TTS_LANGUAGE,
     CONF_TTS_VOICE,
+    CONF_YOUTUBE_API_KEY,
     CONF_USER_ADDRESS,
     CONF_ZALO_INVOCATION_KEYWORD,
     CONF_ZALO_INVOCATION_KEYWORD_ENABLED,
@@ -96,6 +97,7 @@ from .const import (
     DEFAULT_SPEAKER_ENABLED,
     DEFAULT_TTS_LANGUAGE,
     DEFAULT_TTS_VOICE,
+    DEFAULT_YOUTUBE_API_KEY,
     DEFAULT_USER_ADDRESS,
     DEFAULT_ZALO_INVOCATION_KEYWORD,
     DEFAULT_ZALO_INVOCATION_KEYWORD_ENABLED,
@@ -332,6 +334,24 @@ def _tts_settings_schema(
         selector.TextSelectorConfig(type=selector.TextSelectorType.TEXT)
     )
     return vol.Schema(fields)
+
+
+def _youtube_settings_schema(
+    youtube_api_key: str,
+) -> vol.Schema:
+    """Build YouTube search settings."""
+    return vol.Schema(
+        {
+            vol.Optional(
+                CONF_YOUTUBE_API_KEY,
+                default=youtube_api_key,
+            ): selector.TextSelector(
+                selector.TextSelectorConfig(
+                    type=selector.TextSelectorType.PASSWORD,
+                )
+            ),
+        }
+    )
 
 
 def _select_multiple_schema(
@@ -1596,6 +1616,12 @@ class ConversationalAssistantOptionsFlow(config_entries.OptionsFlow):
             self.config_entry.data.get(CONF_TTS_VOICE, DEFAULT_TTS_VOICE),
         )
         options.setdefault(
+            CONF_YOUTUBE_API_KEY,
+            self.config_entry.data.get(
+                CONF_YOUTUBE_API_KEY, DEFAULT_YOUTUBE_API_KEY
+            ),
+        )
+        options.setdefault(
             CONF_ZALO_WEBHOOK_ENABLED,
             self.config_entry.data.get(
                 CONF_ZALO_WEBHOOK_ENABLED, DEFAULT_ZALO_WEBHOOK_ENABLED
@@ -1879,6 +1905,7 @@ class ConversationalAssistantOptionsFlow(config_entries.OptionsFlow):
                 "calendar",
                 "weather",
                 "zalo",
+                "youtube",
                 "ai",
                 "tts",
                 "finish",
@@ -2190,6 +2217,33 @@ class ConversationalAssistantOptionsFlow(config_entries.OptionsFlow):
                 ).strip(),
             ),
             errors=errors,
+        )
+
+    async def async_step_youtube(
+        self, user_input: dict[str, Any] | None = None
+    ) -> ConfigFlowResult:
+        """Edit YouTube Data API search settings."""
+        options = self._ensure_options()
+        if user_input is not None:
+            api_key = str(
+                user_input.get(CONF_YOUTUBE_API_KEY, "") or ""
+            ).strip()
+            if api_key:
+                options[CONF_YOUTUBE_API_KEY] = api_key
+            else:
+                options.pop(CONF_YOUTUBE_API_KEY, None)
+            return await self.async_step_init()
+
+        return self.async_show_form(
+            step_id="youtube",
+            data_schema=_youtube_settings_schema(
+                str(
+                    options.get(
+                        CONF_YOUTUBE_API_KEY, DEFAULT_YOUTUBE_API_KEY
+                    )
+                    or ""
+                ).strip()
+            ),
         )
 
     async def async_step_ai(

@@ -299,13 +299,30 @@ def normalize_native_search_response(response: Any, *, limit: int = 10) -> list[
         if len(videos) >= limit or not isinstance(node, dict):
             return
         media_id = str(node.get("media_content_id", "") or "").strip()
+        media_type = str(node.get("media_content_type", "") or "").strip()
+        thumbnail = str(
+            node.get("thumbnail") or node.get("thumbnail_url") or ""
+        ).strip()
         title = html.unescape(str(node.get("title", "") or "").strip())
         video_id = ""
-        match = re.search(r"(?:v=|youtu\.be/)([A-Za-z0-9_-]{11})", media_id)
+        match = re.search(
+            r"(?:[?&]v=|youtu\.be/|youtube\.com/(?:shorts|embed)/)"
+            r"([A-Za-z0-9_-]{11})",
+            media_id,
+            flags=re.I,
+        )
         if match:
             video_id = match.group(1)
-        elif re.fullmatch(r"[A-Za-z0-9_-]{11}", media_id):
-            video_id = media_id
+        else:
+            # A bare 11-character ID is ambiguous: many local/media-server
+            # integrations use similar IDs. Accept it only when the search
+            # result itself contains a clear YouTube hint.
+            youtube_hint = any(
+                hint in (media_id + " " + media_type + " " + thumbnail).casefold()
+                for hint in ("youtube", "youtu.be", "ytimg.com")
+            )
+            if youtube_hint and re.fullmatch(r"[A-Za-z0-9_-]{11}", media_id):
+                video_id = media_id
         if video_id and video_id not in seen:
             videos.append(
                 YouTubeVideo(
