@@ -7,6 +7,7 @@ from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 import json
 import logging
+from pathlib import Path
 from time import monotonic
 from typing import Any
 import uuid
@@ -34,7 +35,6 @@ from .const import (
     CONF_YOUTUBE_API_KEY,
     DISCOVERY_CACHE_SECONDS,
     MEDIA_EXTRACTOR_DOMAIN,
-    MEDIA_EXTRACTOR_SERVICE_EXTRACT_URL,
     MEDIA_EXTRACTOR_SERVICE_PLAY_MEDIA,
     MEDIA_PLAYER_DOMAIN,
     MEDIA_PLAYER_SERVICE_PLAY_MEDIA,
@@ -670,7 +670,12 @@ class YouTubeManagerMixin:
                     "chờ loa rảnh tối đa 10 phút rồi tự phát."
                 )
             try:
-                await self._async_play_youtube_video(target, video)
+                play_method = await self._async_play_youtube_video(target, video)
+                _LOGGER.debug(
+                    "YouTube playback confirmed on %s via %s",
+                    target.entity_id,
+                    play_method,
+                )
             except Exception as err:  # noqa: BLE001 - user needs a clear failure
                 _LOGGER.exception("Failed playing YouTube on %s", target.entity_id)
                 self._remove_youtube_pending(pending)
@@ -727,7 +732,12 @@ class YouTubeManagerMixin:
                     return
                 if not self._youtube_is_busy(target, state):
                     try:
-                        await self._async_play_youtube_video(target, video)
+                        play_method = await self._async_play_youtube_video(target, video)
+                        _LOGGER.debug(
+                            "Waited YouTube playback confirmed on %s via %s",
+                            target.entity_id,
+                            play_method,
+                        )
                     except Exception as err:  # noqa: BLE001
                         _LOGGER.exception(
                             "Failed playing waited YouTube request on %s",
@@ -771,8 +781,257 @@ class YouTubeManagerMixin:
                 notification_id=f"conversational_assistant_youtube_{pending.pending_id}",
             )
 
-    async def _async_play_youtube_video(self, target: YouTubeTarget, video: YouTubeVideo) -> None:
-        """Play using native TV methods when known, then HA Media Extractor."""
+    def _youtube_playback_signature(self, entity_id: str) -> tuple[str, str, str, str, str]:
+        """Return a compact state signature used to verify real playback."""
+        state = self.hass.states.get(entity_id)
+        if state is None:
+            return ("", "", "", "", "")
+        attrs = state.attributes
+        return (
+            str(state.state or "").casefold(),
+            str(attrs.get("media_content_id", "") or ""),
+            str(attrs.get("media_title", "") or ""),
+            str(attrs.get("app_id", "") or ""),
+            str(attrs.get("app_name", "") or ""),
+        )
+
+    async def _async_wait_youtube_speaker_started(
+        self,
+        target: YouTubeTarget,
+        before: tuple[str, str, str, str, str],
+        *,
+        timeout_seconds: float = 10.0,
+    ) -> bool:
+        """Verify that a speaker actually entered playback after an action.
+
+        Home Assistant service calls can return successfully before a media player
+        has accepted the stream.  Media Extractor also schedules the underlying
+        media_player.play_media call asynchronously, so a successful service call
+        alone is not proof that sound started.
+        """
+        deadline = monotonic() + max(1.0, timeout_seconds)
+        before_was_active = before[0] in {"playing", "buffering"}
+        while monotonic() < deadline:
+            state = self.hass.states.get(target.entity_id)
+            if state is None or state.state in {STATE_UNAVAILABLE, STATE_UNKNOWN}:
+                return False
+            current = self._youtube_playback_signature(target.entity_id)
+            if current[0] in {"playing", "buffering"}:
+                if not before_was_active:
+                    return True
+                if current[1:] != before[1:]:
+                    return True
+                # A force/overwrite request can remain in PLAYING throughout and
+                # some integrations do not expose media title/content id.  If the
+                # player is still active after a short settling period, accept it.
+                if monotonic() + 7.0 >= deadline:
+                    return True
+            await asyncio.sleep(0.5)
+        return False
+
+    @staticmethod
+    def _youtube_audio_mime(info: dict[str, Any]) -> str:
+        """Choose a concrete MIME type for a yt-dlp audio-only stream."""
+        mime = str(info.get("mime_type", "") or "").strip().casefold()
+        if mime.startswith("audio/"):
+            return mime
+        ext = str(info.get("ext", "") or "").strip().casefold()
+        acodec = str(info.get("acodec", "") or "").strip().casefold()
+        if ext in {"m4a", "mp4"} or acodec.startswith("mp4a"):
+            return "audio/mp4"
+        if ext == "webm" or "opus" in acodec:
+            return "audio/webm"
+        if ext == "mp3" or "mp3" in acodec:
+            return "audio/mpeg"
+        if ext in {"ogg", "oga", "opus"}:
+            return "audio/ogg"
+        if ext == "aac" or "aac" in acodec:
+            return "audio/aac"
+        return "audio/mp4"
+
+    async def _async_extract_youtube_audio_stream(
+        self, video_url: str
+    ) -> tuple[str, str] | None:
+        """Extract a true audio-only YouTube stream without blocking HA.
+
+        Home Assistant 2026.8 Media Extractor's extract_media_url helper applies
+        special YouTube handling that prefers a muxed audio+video stream.  That is
+        useful for displays but can be rejected silently by audio-only speakers.
+        This fallback uses the same yt-dlp dependency lazily and only after a
+        playback request, so it adds no startup work.
+        """
+        config_dir = self.hass.config.config_dir
+
+        def extract() -> tuple[str, str] | None:
+            try:
+                from yt_dlp import YoutubeDL
+            except ImportError:
+                return None
+
+            options: dict[str, Any] = {
+                "quiet": True,
+                "no_warnings": True,
+                "noplaylist": True,
+                "format": "bestaudio[ext=m4a]/bestaudio[ext=webm]/bestaudio",
+            }
+            cookies_file = Path(config_dir, "media_extractor", "cookies.txt")
+            if cookies_file.exists():
+                options["cookiefile"] = str(cookies_file)
+            with YoutubeDL(options) as ydl:
+                info = ydl.extract_info(video_url, download=False)
+            if not isinstance(info, dict):
+                return None
+            entries = info.get("entries")
+            if isinstance(entries, list) and entries:
+                first = entries[0]
+                if isinstance(first, dict):
+                    info = first
+            stream_url = str(info.get("url", "") or "").strip()
+            if not stream_url:
+                return None
+            return stream_url, self._youtube_audio_mime(info)
+
+        try:
+            async with asyncio.timeout(YOUTUBE_MEDIA_SERVICE_TIMEOUT_SECONDS):
+                return await self.hass.async_add_executor_job(extract)
+        except TimeoutError:
+            _LOGGER.warning("Timed out extracting an audio-only YouTube stream")
+        except Exception:  # noqa: BLE001 - continue to HA fallbacks
+            _LOGGER.debug("Audio-only YouTube extraction failed", exc_info=True)
+        return None
+
+    async def _async_play_youtube_speaker(
+        self, target: YouTubeTarget, video: YouTubeVideo
+    ) -> str:
+        """Play YouTube on an audio target and verify sound really starts."""
+        attempts: list[str] = []
+
+        state = self.hass.states.get(target.entity_id)
+        if (
+            state is not None
+            and str(state.state or "").casefold() == "off"
+            and self.hass.services.has_service(
+                MEDIA_PLAYER_DOMAIN, MEDIA_PLAYER_SERVICE_TURN_ON
+            )
+        ):
+            try:
+                await self._async_call_service(
+                    MEDIA_PLAYER_DOMAIN,
+                    MEDIA_PLAYER_SERVICE_TURN_ON,
+                    {},
+                    blocking=True,
+                    target={"entity_id": target.entity_id},
+                    timeout_seconds=min(15, YOUTUBE_MEDIA_SERVICE_TIMEOUT_SECONDS),
+                )
+                await asyncio.sleep(0.5)
+            except Exception:
+                # Many audio integrations wake automatically on play_media.
+                _LOGGER.debug(
+                    "Could not explicitly turn on YouTube speaker %s",
+                    target.entity_id,
+                    exc_info=True,
+                )
+
+        # First use the Home Assistant action designed for entity-specific
+        # extraction.  media_content_type is REQUIRED by the action schema.
+        if self.hass.services.has_service(
+            MEDIA_EXTRACTOR_DOMAIN, MEDIA_EXTRACTOR_SERVICE_PLAY_MEDIA
+        ):
+            before = self._youtube_playback_signature(target.entity_id)
+            try:
+                await self._async_call_service(
+                    MEDIA_EXTRACTOR_DOMAIN,
+                    MEDIA_EXTRACTOR_SERVICE_PLAY_MEDIA,
+                    {
+                        "media_content_id": video.url,
+                        "media_content_type": "music",
+                    },
+                    blocking=True,
+                    target={"entity_id": target.entity_id},
+                    timeout_seconds=YOUTUBE_MEDIA_SERVICE_TIMEOUT_SECONDS,
+                )
+                if await self._async_wait_youtube_speaker_started(
+                    target, before, timeout_seconds=10.0
+                ):
+                    return "media_extractor.play_media"
+                attempts.append("media_extractor.play_media:no_state_change")
+            except Exception as err:  # noqa: BLE001 - try a safer audio stream
+                attempts.append(f"media_extractor.play_media:{type(err).__name__}")
+                _LOGGER.debug(
+                    "Media Extractor direct speaker playback failed for %s",
+                    target.entity_id,
+                    exc_info=True,
+                )
+
+        # For audio-only devices, extract a true audio stream.  This avoids the
+        # YouTube muxed MP4 returned by HA extract_media_url (often itag 18),
+        # which many speakers will accept as an action but never actually play.
+        audio_stream = await self._async_extract_youtube_audio_stream(video.url)
+        if audio_stream and self.hass.services.has_service(
+            MEDIA_PLAYER_DOMAIN, MEDIA_PLAYER_SERVICE_PLAY_MEDIA
+        ):
+            stream_url, mime_type = audio_stream
+            before = self._youtube_playback_signature(target.entity_id)
+            try:
+                await self._async_call_service(
+                    MEDIA_PLAYER_DOMAIN,
+                    MEDIA_PLAYER_SERVICE_PLAY_MEDIA,
+                    {
+                        "media_content_id": stream_url,
+                        "media_content_type": mime_type,
+                    },
+                    blocking=True,
+                    target={"entity_id": target.entity_id},
+                    timeout_seconds=YOUTUBE_MEDIA_SERVICE_TIMEOUT_SECONDS,
+                )
+                if await self._async_wait_youtube_speaker_started(
+                    target, before, timeout_seconds=10.0
+                ):
+                    return f"audio_only:{mime_type}"
+                attempts.append(f"audio_only:{mime_type}:no_state_change")
+            except Exception as err:  # noqa: BLE001 - try generic final fallback
+                attempts.append(f"audio_only:{type(err).__name__}")
+                _LOGGER.debug(
+                    "Audio-only media_player playback failed for %s",
+                    target.entity_id,
+                    exc_info=True,
+                )
+
+        # Last generic fallback for integrations that understand YouTube page
+        # URLs themselves.  Still verify the entity instead of reporting success
+        # only because the service call returned.
+        if self.hass.services.has_service(
+            MEDIA_PLAYER_DOMAIN, MEDIA_PLAYER_SERVICE_PLAY_MEDIA
+        ):
+            before = self._youtube_playback_signature(target.entity_id)
+            try:
+                await self._async_call_service(
+                    MEDIA_PLAYER_DOMAIN,
+                    MEDIA_PLAYER_SERVICE_PLAY_MEDIA,
+                    {
+                        "media_content_id": video.url,
+                        "media_content_type": "music",
+                    },
+                    blocking=True,
+                    target={"entity_id": target.entity_id},
+                    timeout_seconds=YOUTUBE_MEDIA_SERVICE_TIMEOUT_SECONDS,
+                )
+                if await self._async_wait_youtube_speaker_started(
+                    target, before, timeout_seconds=8.0
+                ):
+                    return "media_player.play_media"
+                attempts.append("media_player.play_media:no_state_change")
+            except Exception as err:  # noqa: BLE001
+                attempts.append(f"media_player.play_media:{type(err).__name__}")
+
+        detail = ", ".join(attempts[-3:]) or "no supported playback action"
+        raise RuntimeError(
+            "không xác nhận được loa đã bắt đầu phát "
+            f"(loa không chuyển sang playing/buffering; {detail})"
+        )
+
+    async def _async_play_youtube_video(self, target: YouTubeTarget, video: YouTubeVideo) -> str:
+        """Play using native TV methods; speakers use verified audio playback."""
         lock = self._youtube_player_locks.setdefault(target.entity_id, asyncio.Lock())
         async with lock:
             platform = normalize_text(target.platform)
@@ -815,7 +1074,7 @@ class YouTubeManagerMixin:
                             target={"entity_id": target.entity_id},
                             timeout_seconds=YOUTUBE_MEDIA_SERVICE_TIMEOUT_SECONDS,
                         )
-                        return
+                        return "tv_cast_youtube"
                     if platform == "androidtv remote" or platform == "androidtv_remote":
                         await self._async_call_service(
                             MEDIA_PLAYER_DOMAIN,
@@ -825,7 +1084,7 @@ class YouTubeManagerMixin:
                             target={"entity_id": target.entity_id},
                             timeout_seconds=YOUTUBE_MEDIA_SERVICE_TIMEOUT_SECONDS,
                         )
-                        return
+                        return "tv_android_youtube"
                     if platform == "apple tv" or platform == "apple_tv":
                         await self._async_call_service(
                             MEDIA_PLAYER_DOMAIN,
@@ -838,42 +1097,12 @@ class YouTubeManagerMixin:
                             target={"entity_id": target.entity_id},
                             timeout_seconds=YOUTUBE_MEDIA_SERVICE_TIMEOUT_SECONDS,
                         )
-                        return
+                        return "tv_apple_youtube"
                 except Exception:
                     _LOGGER.debug("Native YouTube app playback failed; falling back", exc_info=True)
 
-            if target.kind == "speaker" and self.hass.services.has_service(
-                MEDIA_EXTRACTOR_DOMAIN, MEDIA_EXTRACTOR_SERVICE_EXTRACT_URL
-            ):
-                try:
-                    response = await self._async_call_service(
-                        MEDIA_EXTRACTOR_DOMAIN,
-                        MEDIA_EXTRACTOR_SERVICE_EXTRACT_URL,
-                        {
-                            "url": video.url,
-                            "format_query": "bestaudio[ext=m4a]/bestaudio[ext=ogg]/bestaudio",
-                        },
-                        blocking=True,
-                        return_response=True,
-                        timeout_seconds=YOUTUBE_MEDIA_SERVICE_TIMEOUT_SECONDS,
-                    )
-                    media_url = ""
-                    if isinstance(response, dict):
-                        media_url = str(response.get("url", "") or "").strip()
-                        if not media_url and isinstance(response.get("response"), dict):
-                            media_url = str(response["response"].get("url", "") or "").strip()
-                    if media_url:
-                        await self._async_call_service(
-                            MEDIA_PLAYER_DOMAIN,
-                            MEDIA_PLAYER_SERVICE_PLAY_MEDIA,
-                            {"media_content_type": "music", "media_content_id": media_url},
-                            blocking=True,
-                            target={"entity_id": target.entity_id},
-                            timeout_seconds=YOUTUBE_MEDIA_SERVICE_TIMEOUT_SECONDS,
-                        )
-                        return
-                except Exception:
-                    _LOGGER.debug("YouTube audio extraction failed; falling back", exc_info=True)
+            if target.kind == "speaker":
+                return await self._async_play_youtube_speaker(target, video)
 
             if self.hass.services.has_service(MEDIA_EXTRACTOR_DOMAIN, MEDIA_EXTRACTOR_SERVICE_PLAY_MEDIA):
                 await self._async_call_service(
@@ -887,7 +1116,7 @@ class YouTubeManagerMixin:
                     target={"entity_id": target.entity_id},
                     timeout_seconds=YOUTUBE_MEDIA_SERVICE_TIMEOUT_SECONDS,
                 )
-                return
+                return "media_extractor.play_media"
 
             await self._async_call_service(
                 MEDIA_PLAYER_DOMAIN,
@@ -900,6 +1129,7 @@ class YouTubeManagerMixin:
                 target={"entity_id": target.entity_id},
                 timeout_seconds=YOUTUBE_MEDIA_SERVICE_TIMEOUT_SECONDS,
             )
+            return "media_player.play_media"
 
     async def _async_begin_youtube(self, text: str, *, source_keys: set[str] | None = None, zalo_context: Any | None = None) -> tuple[PendingYouTubeFlow, str]:
         parsed = parse_youtube_request(text)
