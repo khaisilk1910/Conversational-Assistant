@@ -58,6 +58,9 @@ from .const import (
     YOUTUBE_SELECTION_TIMEOUT_SECONDS,
     YOUTUBE_SHELL_COMMAND_DOMAIN,
     YOUTUBE_SHELL_COMMAND_SERVICE,
+    YT_DLP_DOMAIN,
+    YT_DLP_SERVICE_PLAY,
+    YT_DLP_PLAY_VERIFY_TIMEOUT_SECONDS,
     YOUTUBE_SPEAKER_RETRY_DELAY_SECONDS,
     YOUTUBE_SPEAKER_WAIT_SECONDS,
 )
@@ -394,12 +397,22 @@ class YouTubeManagerMixin:
         for index, video in enumerate(videos, start=1):
             suffix = f" — {video.channel}" if video.channel else ""
             lines.append(f"{index}. {video.title}{suffix}")
+        if target.kind == "speaker":
+            selection_note = (
+                f"\n\nChọn 1-{len(videos)} hoặc nói tên video. Với loa/audio-only, "
+                "tôi chỉ gọi `yt_dlp.play` sau khi bài nhạc và loa đã được "
+                "xác định từ lựa chọn của bạn. Gửi **Hủy** để dừng."
+            )
+        else:
+            selection_note = (
+                f"\n\nChọn 1-{len(videos)} hoặc nói tên video. Nếu không trả lời trong "
+                f"{YOUTUBE_SELECTION_TIMEOUT_SECONDS} giây, tôi sẽ tự phát video số 1. "
+                "Gửi **Hủy** để dừng."
+            )
         return (
             f"🔎 **{len(videos)} kết quả YouTube** · phát trên **{target.display_name}**\n"
             + "\n".join(lines)
-            + f"\n\nChọn 1-{len(videos)} hoặc nói tên video. Nếu không trả lời trong "
-            f"{YOUTUBE_SELECTION_TIMEOUT_SECONDS} giây, tôi sẽ tự phát video số 1. "
-            "Gửi **Hủy** để dừng."
+            + selection_note
         )
 
     async def _async_native_youtube_search(self, query: str, target: YouTubeTarget) -> list[YouTubeVideo]:
@@ -650,7 +663,12 @@ class YouTubeManagerMixin:
         pending.videos = videos
         pending.phase = "video"
         pending.expires_at = dt_util.now() + timedelta(seconds=PENDING_CONFIRMATION_TIMEOUT_SECONDS)
-        self._schedule_youtube_auto_first(pending)
+        # Audio-only playback must never start before the user has selected a
+        # result.  This guarantees yt_dlp.play receives an explicitly selected
+        # YouTube URL and speaker entity.  Keep the legacy 20-second default
+        # only for TV/video targets.
+        if target.kind != "speaker":
+            self._schedule_youtube_auto_first(pending)
         return self._youtube_video_prompt(videos, target)
 
     def _schedule_youtube_auto_first(self, pending: PendingYouTubeFlow) -> None:
@@ -1089,6 +1107,58 @@ class YouTubeManagerMixin:
             ):
                 return True
         return False
+
+    async def _async_play_youtube_via_yt_dlp_action(
+        self,
+        target: YouTubeTarget,
+        video: YouTubeVideo,
+        attempts: list[str],
+    ) -> str | None:
+        """Play one selected YouTube URL on one selected audio-only speaker.
+
+        The installed ``yt_dlp.play`` action already owns stream resolution and
+        player handoff.  Conversational Assistant therefore passes exactly the
+        selected result URL and selected ``media_player`` entity instead of
+        reimplementing yt-dlp/FFmpeg/Cast details.  This path is speaker-only
+        and is called only after the multi-turn flow has a selected target and
+        a selected video.
+        """
+        if target.kind != "speaker":
+            return None
+        if not self.hass.services.has_service(YT_DLP_DOMAIN, YT_DLP_SERVICE_PLAY):
+            attempts.append("yt_dlp.play:unavailable")
+            return None
+
+        before = self._youtube_playback_signature(target.entity_id)
+        try:
+            await self._async_call_service(
+                YT_DLP_DOMAIN,
+                YT_DLP_SERVICE_PLAY,
+                {
+                    "url": video.url,
+                    "media_player": target.entity_id,
+                },
+                blocking=True,
+                timeout_seconds=YOUTUBE_MEDIA_SERVICE_TIMEOUT_SECONDS,
+            )
+        except Exception as err:  # noqa: BLE001
+            attempts.append(f"yt_dlp.play:{type(err).__name__}")
+            _LOGGER.exception(
+                "yt_dlp.play failed for %s with YouTube URL %s",
+                target.entity_id,
+                video.url,
+            )
+            return None
+
+        if await self._async_wait_youtube_speaker_started(
+            target,
+            before,
+            timeout_seconds=YT_DLP_PLAY_VERIFY_TIMEOUT_SECONDS,
+        ):
+            return "yt_dlp.play"
+
+        attempts.append("yt_dlp.play:no_state_change")
+        return None
 
     async def _async_play_youtube_platform_native(
         self,
@@ -1626,16 +1696,15 @@ class YouTubeManagerMixin:
     async def _async_play_youtube_speaker(
         self, target: YouTubeTarget, video: YouTubeVideo
     ) -> str:
-        """Play YouTube audio without mixing incompatible player fallbacks."""
-        attempts: list[str] = []
-        is_cast = self._youtube_is_cast_target(target)
+        """Play a selected YouTube result on an audio-only speaker.
 
-        # 0) Platform-native action first (notably Phicomm R1).
-        native_method = await self._async_play_youtube_platform_native(
-            target, video, attempts
-        )
-        if native_method:
-            return native_method
+        ``yt_dlp.play`` is the canonical path when that Home Assistant action
+        is installed.  It receives only the selected YouTube URL and selected
+        speaker entity.  The older platform/proxy/extractor implementations are
+        retained strictly as compatibility fallbacks for installations where
+        the action does not exist.
+        """
+        attempts: list[str] = []
 
         state = self.hass.states.get(target.entity_id)
         if (
@@ -1662,8 +1731,40 @@ class YouTubeManagerMixin:
                     exc_info=True,
                 )
 
-        # 1) Python yt-dlp: accept only a genuine audio-only format and retain
-        # its request headers/container/codec metadata.
+        # 1) Preferred Home Assistant action supplied by the installed yt_dlp
+        # integration.  Do not send target= here: the action schema takes the
+        # speaker entity in data.media_player exactly as shown in Developer
+        # Tools.
+        yt_dlp_available = self.hass.services.has_service(
+            YT_DLP_DOMAIN, YT_DLP_SERVICE_PLAY
+        )
+        if yt_dlp_available:
+            method = await self._async_play_youtube_via_yt_dlp_action(
+                target, video, attempts
+            )
+            if method:
+                return method
+            # If the requested canonical action exists but cannot start the
+            # speaker, stop here.  Running the old Cast/Media Extractor chain
+            # would only duplicate playback attempts and hide the real failure.
+            raise RuntimeError(
+                "action yt_dlp.play đã được gọi với URL bài đã chọn và loa "
+                f"{target.entity_id}, nhưng chưa xác nhận được phát audio "
+                "(" + ", ".join(attempts) + ")"
+            )
+
+        # 2) Compatibility only: installations without yt_dlp.play may still
+        # have a platform-native YouTube action (notably Phicomm R1).
+        native_method = await self._async_play_youtube_platform_native(
+            target, video, attempts
+        )
+        if native_method:
+            return native_method
+
+        is_cast = self._youtube_is_cast_target(target)
+
+        # 3) Legacy compatibility path from versions <= 1800.  This code is
+        # intentionally unreachable on systems that expose yt_dlp.play.
         audio_stream = await self._async_extract_youtube_audio_stream(video.url)
         if audio_stream:
             attempts.append(
@@ -1718,7 +1819,6 @@ class YouTubeManagerMixin:
         else:
             attempts.append("yt_dlp_audio:no_url")
 
-        # 2) Compatibility with an existing shell_command.youtube_stream.
         shell_stream = await self._async_extract_youtube_audio_stream_shell(
             video.video_id
         )
@@ -1731,28 +1831,6 @@ class YouTubeManagerMixin:
                 if cast_method:
                     return cast_method
             else:
-                try:
-                    from .youtube_proxy import async_register_youtube_audio_proxy
-
-                    proxy_url = async_register_youtube_audio_proxy(
-                        self.hass,
-                        stream_url=shell_stream.stream_url,
-                        mime_type=shell_stream.mime_type,
-                        headers=shell_stream.headers,
-                        extension=shell_stream.extension,
-                    )
-                except Exception as err:  # noqa: BLE001
-                    attempts.append(f"shell_audio_proxy:create:{type(err).__name__}")
-                else:
-                    method = await self._async_play_youtube_audio_url(
-                        target,
-                        proxy_url,
-                        shell_stream.mime_type,
-                        label="shell_audio_proxy",
-                        attempts=attempts,
-                    )
-                    if method:
-                        return method
                 method = await self._async_play_youtube_audio_url(
                     target,
                     shell_stream.stream_url,
@@ -1762,23 +1840,13 @@ class YouTubeManagerMixin:
                 )
                 if method:
                     return method
-        elif self.hass.services.has_service(
-            YOUTUBE_SHELL_COMMAND_DOMAIN, YOUTUBE_SHELL_COMMAND_SERVICE
-        ):
-            attempts.append("shell_yt_dlp_audio:no_url")
 
-        # For Cast, M4A/Googlevideo/Media Extractor all still require the
-        # receiver to fetch an upstream URL and were already proven to fail in
-        # this environment.  Stop here instead of generating repeated Cast
-        # errors and JavaScript-runtime warnings.
         if is_cast:
             raise RuntimeError(
-                "Google Cast chưa xác nhận phát audio MP3 từ Home Assistant; "
-                "đã dùng Default Media Receiver quick-play và không dùng lại "
-                "M4A/Googlevideo/Media Extractor (" + ", ".join(attempts) + ")"
+                "Không có action yt_dlp.play và Google Cast chưa xác nhận phát "
+                "audio qua đường tương thích cũ (" + ", ".join(attempts) + ")"
             )
 
-        # 3) Late Home Assistant fallback for non-Cast players only.
         if self.hass.services.has_service(
             MEDIA_EXTRACTOR_DOMAIN, MEDIA_EXTRACTOR_SERVICE_PLAY_MEDIA
         ):
@@ -1803,7 +1871,6 @@ class YouTubeManagerMixin:
             except Exception as err:  # noqa: BLE001
                 attempts.append(f"media_extractor.play_media:{type(err).__name__}")
 
-        # 4) Some non-Cast integrations accept a YouTube page URL directly.
         if self.hass.services.has_service(
             MEDIA_PLAYER_DOMAIN, MEDIA_PLAYER_SERVICE_PLAY_MEDIA
         ):
@@ -1829,8 +1896,8 @@ class YouTubeManagerMixin:
                 attempts.append(f"media_player.youtube_url:{type(err).__name__}")
 
         raise RuntimeError(
-            "không xác nhận được loa đã bắt đầu phát; đã thử native YouTube, "
-            "audio-only qua Home Assistant và fallback phù hợp ("
+            "không xác nhận được loa đã bắt đầu phát; không có action "
+            "yt_dlp.play và các fallback tương thích đều thất bại ("
             + ", ".join(attempts)
             + ")"
         )

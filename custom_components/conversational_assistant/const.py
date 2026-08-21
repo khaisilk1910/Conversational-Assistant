@@ -228,6 +228,9 @@ YOUTUBE_CAST_FILE_TTL_SECONDS = 8 * 60 * 60
 YOUTUBE_AUDIO_FORMAT_QUERY = "140/bestaudio[ext=m4a]/bestaudio[ext=webm]/bestaudio"
 YOUTUBE_SHELL_COMMAND_DOMAIN = "shell_command"
 YOUTUBE_SHELL_COMMAND_SERVICE = "youtube_stream"
+YT_DLP_DOMAIN = "yt_dlp"
+YT_DLP_SERVICE_PLAY = "play"
+YT_DLP_PLAY_VERIFY_TIMEOUT_SECONDS = 25
 PHICOMM_R1_DOMAIN = "phicomm_r1"
 PHICOMM_R1_SERVICE_PLAY_YOUTUBE = "play_youtube"
 YOUTUBE_DATA_API_SEARCH_URL = "https://www.googleapis.com/youtube/v3/search"
