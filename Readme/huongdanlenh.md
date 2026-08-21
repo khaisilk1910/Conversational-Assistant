@@ -126,10 +126,11 @@ Luồng xử lý:
 1. Tách **nội dung cần tìm** và **thiết bị cần phát** bằng parser nội bộ trước; nếu thiếu một trong hai, bot hỏi lại đúng phần còn thiếu và giữ phiên 120 giây.
 2. Ưu tiên `media_player.search_media` nếu media player hỗ trợ tìm kiếm và kết quả trả về là video YouTube.
 3. Nếu chưa đủ kết quả, gọi trực tiếp **YouTube Data API v3** bằng `youtube_api_key` trong **Conversational Assistant options > YouTube Settings**. Nếu chưa cấu hình key hoặc API lỗi, `pyscript.youtube_search_tool` đã có sẵn vẫn được thử như fallback tương thích cũ.
-4. Trả danh sách tối đa **10 video**, người dùng chọn bằng số hoặc tên. Nếu không trả lời trong **20 giây**, tích hợp tự chọn video số 1.
-5. Với **loa**: nếu trạng thái `playing` hoặc `buffering`, bot hỏi **Phát đè** hay tiếp tục chờ. Nếu không phát đè, tích hợp kiểm tra lại mỗi 10 giây, tối đa **10 phút**; loa rảnh thì tự phát, quá 10 phút thì hủy và báo đúng luồng.
-6. Với **TV/video player**: phát ngay, không hỏi phát đè. Ưu tiên phương thức native phù hợp Cast/Android TV/Apple TV; sau đó fallback Media Extractor/`media_player.play_media`.
-7. Với **loa**, gọi `media_extractor.play_media` trước với `media_content_type: music` đúng schema Home Assistant và **kiểm tra thật** entity đã chuyển sang `playing`/`buffering`. Nếu loa không phát do URL YouTube dạng audio+video, tích hợp tự lấy stream **audio-only** rồi gọi `media_player.play_media` với MIME thực (`audio/mp4`, `audio/webm`, ...). Chỉ báo “Đã phát” sau khi xác nhận trạng thái phát; nếu các phương thức đều thất bại sẽ báo lỗi thay vì báo thành công giả.
+4. Trả danh sách tối đa **10 video**, người dùng chọn bằng số hoặc tên. Với **loa/audio-only**, tích hợp **không tự phát** khi chưa có lựa chọn bài rõ ràng. Với **TV/video**, nếu không trả lời trong 20 giây vẫn có thể tự chọn video số 1 theo hành vi cũ.
+5. Với **loa**: sau khi bài và loa đã được xác định, ưu tiên action `yt_dlp.play` đúng dạng `url: <link video đã chọn>` + `media_player: <entity loa đã chọn>`. Action này chỉ dùng cho audio-only, không dùng cho TV. Nếu loa `playing` hoặc `buffering`, bot hỏi **Phát đè** hay tiếp tục chờ; nếu không phát đè, kiểm tra lại mỗi 10 giây tối đa **10 phút**.
+6. Sau `yt_dlp.play`, tích hợp chờ tối đa **25 giây** để xác nhận loa bắt đầu `playing/buffering`. Nếu action có tồn tại nhưng lỗi hoặc không làm loa chạy, bot báo đúng lỗi đó và không tiếp tục bắn chuỗi Cast/Media Extractor cũ.
+7. Với **TV/video player**: phát ngay, không hỏi phát đè. Ưu tiên phương thức native phù hợp Cast/Android TV/Apple TV; sau đó mới fallback media player phù hợp. `yt_dlp.play` không được gọi cho nhánh này.
+8. Các đường Phicomm native, yt-dlp Python/proxy, `shell_command.youtube_stream`, Media Extractor và URL trực tiếp chỉ còn là **fallback tương thích khi Home Assistant không có action `yt_dlp.play`**.
 
 Nếu chưa cấu hình danh sách TV/media riêng, tích hợp chỉ quét `media_player` **khi có yêu cầu YouTube**, không quét lúc khởi động. Có thể đặt tên TV/media player trong **General settings > TV/thiết bị phát media và tên gọi** để câu lệnh tự nhiên chính xác hơn.
 
@@ -260,3 +261,31 @@ Mở **Settings > Devices & services > Conversational Assistant > Configure** đ
 - Ví dụ: `Thêm sự kiện 13h30 thứ 4 tuần sau dương lịch Họp test sản phẩm`.
 - Parser và công cụ Home Assistant luôn chạy trước. Nếu chưa tách đủ thiết bị, nội dung hoặc thời gian, AI chỉ được dùng để chuẩn hóa yêu cầu; AI Search không dùng để đoán ý định mà chỉ tra dữ liệu Internet.
 - Quy tắc trên áp dụng cho lịch, nhắc hẹn, gửi Zalo có thời gian, TTS hẹn giờ, thời tiết và hẹn điều khiển thiết bị. Nếu vẫn mơ hồ, tích hợp hỏi lại và không thực hiện ngay.
+
+
+## 8. Ma trận cách nói tự nhiên mở rộng
+
+Các mẫu dưới đây **không phải câu lệnh cứng**. Parser chuẩn hóa chữ hoa/thường, dấu câu và so khớp tên đã đặt trong Settings. Nếu hành động + đối tượng đã rõ thì thực hiện ngay. Nếu chỉ nhận ra chủ đề, bot hỏi lại đúng chủ đề và chờ tối đa 120 giây trên Zalo.
+
+- **Thiết bị:** `bật đèn bếp`, `tắt hết đèn tầng một`, `cho quạt phòng ngủ quay`, `tăng quạt lên mức 3`, `giảm điều hòa 1 độ`, `đặt điều hòa 26 độ`, `chuyển sang làm lạnh`, `đổi tốc độ quạt`, `bật đảo gió`, `30 phút nữa tắt quạt`, `8 giờ tối bật bình nóng lạnh`, `trạng thái cửa cổng`.
+- **Thời tiết:** `mai có mưa không`, `chiều nay nóng bao nhiêu`, `độ ẩm ngoài trời`, `gió hôm nay thế nào`, `UV hôm nay`, `3 ngày tới có mưa không`, `tuần này thời tiết thế nào`, `có bão hay áp thấp không`.
+- **Nhắc hẹn:** `5 phút nữa nhắc tôi uống thuốc`, `7 giờ mai nhắc Zalo Khải họp`, `nhớ nhắc tôi gọi khách hàng`, `mỗi thứ hai 8 giờ nhắc họp`, `tôi có những nhắc việc nào`, `liệt kê nhắc hẹn`, `xóa nhắc hẹn uống thuốc`.
+- **Lịch/sự kiện:** `lịch ngày mai có gì`, `xem lịch tuần này`, `tôi có cuộc họp nào chiều nay`, `thêm lịch họp 15 giờ mai`, `tạo cuộc hẹn thứ tư tuần sau`, `thêm sự kiện ngày 12 tháng 8 âm lịch`.
+- **Loa/TTS:** `báo loa Phòng Ngủ xuống ăn cơm`, `nói qua loa Phòng Khách là có khách`, `nhắn loa Bếp cơm chín rồi`, `đọc ở loa Phòng Ngủ nội dung này`.
+- **YouTube:** `tìm YouTube nhạc bolero phát loa Phòng Ngủ`, `mở YouTube nhạc vàng ở loa Phòng Khách`, `phát nhạc bolero từ YouTube ra loa Phòng Ngủ`, `tìm bài Mưa Đêm Tỉnh Nhỏ trên YouTube rồi phát loa Phòng Ngủ`, `tìm trên YouTube dạy tiếng Anh phát TV Phòng Ngủ`, `phát YouTube hoạt hình trên tivi`, `YouTube nhạc AI ở loa Bếp`. Với loa, sau danh sách phải chọn bài trước khi `yt_dlp.play` chạy.
+- **Gửi Zalo:** `gửi Zalo Khải xuống ăn cơm`, `nhắn Zalo Gia đình cửa cổng đang mở`, `báo Zalo Hass 1080 hệ thống đã xong`, `thông báo Zalo Khải 8 giờ mai họp`.
+- **Chụp camera:** `chụp Cam Bếp`, `lấy ảnh Camera Cổng`, `lấy hình Cam Sân`, `chụp Cam Bếp gửi Zalo Khải`, `chụp Cam Bếp và Cam Cổng gửi Zalo Khải`.
+- **Video camera:** `xem Cam Bếp`, `coi Camera Cổng`, `ghi Cam Sân`, `quay Camera Bếp`, `gửi video Cam Cổng đến Zalo Khải`.
+- **Phân tích camera:** `phân tích Cam Cổng`, `kiểm tra Camera Bếp`, `xem Cam Sân có gì`, `camera cổng có ai không`.
+- **Lịch camera:** `5 phút nữa chụp Cam Bếp gửi Zalo Khải`, `mỗi 10 phút chụp Camera Cổng`, `15 giờ 30 hàng ngày chụp Cam Sân`, `xem lịch chụp camera`, `xóa lịch chụp camera`.
+- **Ghi chú:** `ghi chú mua sữa`, `note lại số điện thoại này`, `lưu ghi chú họp sale`, `xem ghi chú`, `sửa ghi chú`, `xóa ghi chú mua sữa`.
+- **Internet/AI Search:** `tìm thông tin giá vàng hôm nay`, `tra mạng Home Assistant mới nhất`, `tìm trên web thông tin ...`, `search giúp tôi ...`.
+- **Tạo ảnh:** `tạo ảnh ngôi nhà bên hồ`, `vẽ ảnh robot trong vườn`, `tạo hình minh họa ...`.
+- **Âm/dương lịch:** `hôm nay âm lịch ngày mấy`, `đổi ngày 30/11/1984 sang âm lịch`, `mùng 1 tháng 8 âm là ngày dương nào`, `ngày mai thứ mấy`.
+- **Trò chuyện AI:** `trò chuyện đi`, `nói chuyện với tôi`, `tám một chút`, `hỏi AI ...`; `Kết thúc` hoặc `Hủy` để đóng phiên.
+- **Bộ nhớ câu lệnh:** `học câu lệnh xem cổng để chụp Cam Cổng`, `thêm cách nói coi cổng`, `xem câu lệnh đã học`, `quên câu lệnh xem cổng`.
+- **Trợ giúp:** `hướng dẫn tích hợp`, `các lệnh tích hợp`, `xem lệnh của tích hợp`, `hủy`.
+
+### Khi Home Assistant Conversation trả `no_intent_match`
+
+Đây là trạng thái **không khớp intent**, không phải lỗi hệ thống. Conversational Assistant sẽ tiếp tục agent dự phòng nếu có; nếu vẫn không có câu trả lời, tích hợp tự so sánh nội dung với các nhóm tính năng ở trên. Nếu tìm thấy nhóm liên quan, bot hỏi lại kèm ví dụ và giữ đúng luồng. Nếu không nhận ra nhóm nào, bot hướng dẫn dùng `Các lệnh tích hợp` thay vì ghi warning như một lỗi nghiêm trọng.

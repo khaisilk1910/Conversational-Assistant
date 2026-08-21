@@ -1005,3 +1005,8 @@ This repository should include a dedicated `LICENSE` file before public distribu
 ## Disclaimer
 
 Conversational Assistant can control real devices in Home Assistant. Users are responsible for configuring entity exposure, securing webhooks, protecting Zalo accounts, and evaluating the risks before allowing control of locks, doors, alarms, heating equipment, or other safety-critical systems.
+
+
+## YouTube audio speakers (2026.08.20.1900)
+
+When Home Assistant exposes `yt_dlp.play`, Conversational Assistant uses it as the primary audio-only speaker path after both the YouTube result and speaker have been selected. It passes `url` and `media_player` exactly to that action. TV/video playback keeps its native platform flow. The action is discovered lazily and is not a hard startup dependency.

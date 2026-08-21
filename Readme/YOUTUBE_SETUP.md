@@ -1,48 +1,84 @@
 # YouTube search & playback setup
 
-Conversational Assistant 2026.08.20.1200 can search YouTube and play to Home Assistant `media_player` entities.
+Conversational Assistant 2026.08.20.1900 tìm YouTube, trả tối đa 10 kết quả và phát tới loa/TV/media player đã đặt tên trong Home Assistant.
 
-## Recommended setup
+## Cấu hình khuyến nghị
 
-1. Add **Media extractor** in Home Assistant. For speakers, the integration now calls `media_extractor.play_media` first with the required `media_content_type: music`, then verifies that the entity actually enters `playing`/`buffering`. If a speaker rejects the muxed YouTube stream, the integration lazily extracts a true audio-only stream and retries `media_player.play_media` with a concrete audio MIME type such as `audio/mp4` or `audio/webm`.
-2. Open **Settings > Devices & services > Conversational Assistant > Configure > YouTube Settings**.
-3. Enter `youtube_api_key` from a Google Cloud project with **YouTube Data API v3** enabled, then choose **Save and Finish**. The field is masked in the Home Assistant UI and the integration never writes the key to its logs.
-4. In **Conversational Assistant > Configure > General settings**, add spoken names for speakers and optionally **TV/media players**. If the TV/media list has never been configured, compatible `media_player` entities are discovered lazily only when a YouTube request arrives.
+1. Mở **Settings > Devices & services > Conversational Assistant > Configure > YouTube Settings**.
+2. Nhập `youtube_api_key` của YouTube Data API v3 để tìm kiếm ổn định.
+3. Trong **General settings**, đặt tên cho loa và TV/media player.
+4. Với loa audio-only, cài integration đang cung cấp action **`yt_dlp.play`**. Conversational Assistant chỉ kiểm tra action này lúc có lệnh phát; không thêm hard dependency nên startup Home Assistant không bị chặn nếu integration đó không có.
 
-You no longer need to put the API key in `configuration.yaml`, `secrets.yaml`, or Pyscript for the normal Conversational Assistant YouTube flow. The supplied Pyscript helper remains an optional backward-compatible fallback.
+## Action loa audio-only được ưu tiên
 
-## What happens without an API key?
+Sau khi người dùng đã chọn bài và loa, Conversational Assistant gọi đúng dạng:
 
-The integration first tries `media_player.search_media` only when the selected media player advertises native search support. A native result is accepted as YouTube only when it contains a real YouTube URL/identifier hint. If that does not return YouTube results, the integration uses the API key from **YouTube Settings**. If no key is configured, an already configured `pyscript.youtube_search_tool` may still be used. When none of those sources can search YouTube, the user gets a clear prompt to configure `youtube_api_key`.
+```yaml
+action: yt_dlp.play
+data:
+  url: https://www.youtube.com/watch?v=VIDEO_ID
+  media_player: media_player.phong_ngu_speaker
+```
 
-## Natural requests
+Quy tắc:
+
+- chỉ dùng `yt_dlp.play` khi đích là **loa/speaker/audio-only**;
+- `url` lấy trực tiếp từ video người dùng đã chọn trong danh sách tìm kiếm;
+- `media_player` lấy trực tiếp từ loa người dùng đã chọn/đã gọi đúng tên;
+- không gọi action trước khi cả bài và loa đã được xác định;
+- nếu loa đang `playing`/`buffering`, bot vẫn hỏi **Phát đè** hay chờ rảnh tối đa 10 phút; action chỉ chạy sau quyết định đó;
+- sau action, tích hợp theo dõi trạng thái loa tối đa 25 giây để tránh báo thành công khi loa chưa thực sự bắt đầu phát;
+- nếu `yt_dlp.play` có tồn tại nhưng lỗi, bot trả lỗi action đó và **không** chạy tiếp chuỗi Cast/Media Extractor cũ gây nhiều lần gọi lặp;
+- các đường cũ chỉ là compatibility fallback cho hệ thống không có `yt_dlp.play`.
+
+## TV / thiết bị có hình
+
+`yt_dlp.play` **không áp dụng cho TV/video**. TV tiếp tục ưu tiên cách native của Home Assistant:
+
+- Google Cast/Chromecast: mở YouTube app bằng video ID;
+- Android TV/Google TV: phát URL YouTube;
+- Apple TV: dùng URL scheme YouTube khi platform hỗ trợ;
+- sau đó mới dùng fallback media player phù hợp.
+
+## Luồng tìm kiếm và chọn
+
+Ví dụ:
 
 - `Tìm YouTube nhạc bolero phát loa Phòng Ngủ`
-- `Tìm trên YouTube nhạc AI phát loa Phòng Khách`
-- `Mở YouTube dạy tiếng Anh trên TV Phòng Ngủ`
-- `Phát YouTube hoạt hình thiếu nhi ở Tivi Phòng Khách`
+- `Mở nhạc vàng trên YouTube ở loa Phòng Khách`
+- `Tìm YouTube dạy tiếng Anh phát TV Phòng Ngủ`
+- `YouTube nhạc AI ở loa Bếp`
 
-The integration returns up to 10 results. Reply with a number/name. If there is no selection after 20 seconds, result 1 is selected automatically. A busy speaker asks whether to override and otherwise waits up to 10 minutes; TV playback starts immediately.
+Xử lý:
 
-## Search order
+1. Nếu thiếu nội dung cần tìm → hỏi lại bài/video cần tìm.
+2. Nếu thiếu nơi phát → liệt kê loa/TV để chọn.
+3. Tìm tối đa 10 kết quả.
+4. **Loa/audio-only:** chờ người dùng chọn số hoặc tên video; không tự gọi `yt_dlp.play` khi chưa có lựa chọn video.
+5. **TV/video:** vẫn giữ hành vi tương thích cũ: nếu không chọn sau 20 giây có thể lấy video số 1.
+6. Sau khi bài + thiết bị rõ ràng mới thực hiện playback.
 
-1. Native `media_player.search_media` when supported and when the response can be positively identified as YouTube.
-2. Direct asynchronous YouTube Data API v3 search using the API key stored in Conversational Assistant options.
-3. Legacy `pyscript.youtube_search_tool` fallback when that service exists.
+## Thứ tự tìm kiếm
 
-The direct API path uses Home Assistant's shared asynchronous HTTP session and performs no network access during integration startup.
+1. `media_player.search_media` khi entity thực sự hỗ trợ và trả nội dung nhận diện được là YouTube.
+2. YouTube Data API v3 với API key trong **YouTube Settings**.
+3. `pyscript.youtube_search_tool` làm fallback tương thích cũ.
 
+Không có truy cập YouTube, yt-dlp, FFmpeg hay quét media player nặng nào chạy trong lúc Conversational Assistant khởi động.
 
-## Speaker playback verification (2026.08.20.1200)
+## Kiểm thử action `yt_dlp.play`
 
-Home Assistant's `media_extractor.extract_media_url` has special YouTube handling and may return a muxed audio+video MP4 stream (for example YouTube itag 18) even when the caller asks for an audio-oriented format. Audio-only speakers can silently reject that URL. Conversational Assistant therefore no longer treats a successful service call as proof that music started.
+Trong **Developer Tools > Actions** hãy thử chính entity loa:
 
-Speaker order is now:
+```yaml
+action: yt_dlp.play
+data:
+  url: https://youtu.be/z8DLkLnemFY
+  media_player: media_player.phong_ngu_speaker
+```
 
-1. `media_extractor.play_media` with `media_content_type: music`.
-2. Wait for the selected `media_player` to report `playing` or `buffering`.
-3. If it does not start, lazily use yt-dlp (the same extractor family used by Media Extractor) to obtain an audio-only stream, then call `media_player.play_media` with the detected MIME type.
-4. Final generic URL fallback for integrations that understand YouTube URLs themselves.
-5. If the speaker still never enters playback, report a failure instead of sending a false “Đã phát” response.
+Nếu action này phát được, Conversational Assistant 1900 sẽ dùng đúng action đó sau bước chọn video/loa.
 
-The audio-only extractor is imported and executed only when a YouTube speaker request needs the fallback, so it does not add work to Home Assistant startup. If `config/media_extractor/cookies.txt` exists, the fallback reuses it.
+## Fallback tương thích
+
+Chỉ khi Home Assistant không đăng ký `yt_dlp.play`, integration mới thử các đường cũ như platform-native, yt-dlp Python/audio proxy, `shell_command.youtube_stream`, Media Extractor hoặc `media_player.play_media` tùy loại thiết bị. Những fallback này không phải đường chính trên hệ thống đã có `yt_dlp.play`.
