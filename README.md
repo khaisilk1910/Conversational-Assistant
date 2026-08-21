@@ -164,7 +164,7 @@ Tất cả Zalo
 - Hiểu câu tự nhiên như `Tìm YouTube nhạc bolero phát loa Phòng Ngủ` hoặc `Tìm YouTube dạy tiếng Anh phát TV Phòng Ngủ`.
 - Trả tối đa 10 video để chọn; nếu không có phản hồi sau 20 giây sẽ tự chọn video đầu tiên.
 - Loa đang `playing/buffering` sẽ hỏi có **phát đè** hay không và có thể chờ rảnh tối đa 10 phút; TV phát video ngay.
-- Ưu tiên action Home Assistant: `media_player.search_media`, `media_extractor.play_media`, `media_player.play_media`; YouTube Data API v3 được gọi bất đồng bộ trực tiếp bằng key trong **YouTube Settings**, còn `pyscript.youtube_search_tool` chỉ là fallback tương thích cũ. Riêng loa, tích hợp kiểm tra entity thật sự vào `playing/buffering`; nếu Media Extractor trả stream YouTube dạng video+audio mà loa không nhận, tích hợp mới lấy audio-only và phát lại với MIME audio cụ thể.
+- Tìm kiếm ưu tiên `media_player.search_media` khi thiết bị hỗ trợ, sau đó YouTube Data API v3 bằng key trong **YouTube Settings**, rồi `pyscript.youtube_search_tool` làm fallback. Khi phát **loa**, tích hợp ưu tiên action YouTube native của chính platform nếu có; riêng Phicomm R1 sẽ gọi `phicomm_r1.play_youtube` bằng `video_id`. Với loa generic, yt-dlp chọn stream audio-only và tích hợp tạo URL proxy có chữ ký của Home Assistant (`.m4a`/`.webm`) để giữ HTTP headers + Range trước khi gọi `media_player.play_media` với `media_content_type: music`. URL Googlevideo trực tiếp và `media_extractor.play_media` chỉ là fallback.
 - Thêm **Conversational Assistant options > YouTube Settings** để nhập `youtube_api_key`; không cần khai báo key trong `configuration.yaml`/Pyscript. Danh sách media player và kết nối YouTube chỉ được dùng lazily khi có yêu cầu, không làm nặng quá trình khởi động integration.
 
 ### Camera, lịch chụp và video gửi Zalo
@@ -1027,7 +1027,7 @@ python -m json.tool custom_components/conversational_assistant/translations/en.j
 
 ## Phiên bản
 
-Phiên bản hiện tại: **2026.07.30**
+Phiên bản hiện tại: **2026.08.20.1900**
 
 Domain:
 
@@ -1058,3 +1058,30 @@ Repository hiện cần có file `LICENSE` riêng trước khi phân phối côn
 ## Tuyên bố miễn trừ trách nhiệm
 
 Conversational Assistant có thể điều khiển thiết bị thật trong Home Assistant. Người dùng chịu trách nhiệm cấu hình quyền expose, bảo vệ webhook, kiểm soát tài khoản Zalo và đánh giá rủi ro trước khi cho phép điều khiển khóa, cửa, báo động, thiết bị nhiệt hoặc các hệ thống quan trọng khác.
+
+### 2026.08.20.1600 - Google Cast YouTube audio
+Google Cast speakers now receive a short Home Assistant MP3 transcode stream (`audio/mpeg`) instead of a raw YouTube M4A/Googlevideo URL. This path is lazy and uses FFmpeg only while playback is requested.
+
+
+### 2026.08.20.1700 - Cast quick-play, no-intent fallback, natural commands
+- Cast YouTube audio now uses Home Assistant's Cast `media_content_type: cast` quick-play branch with the Default Media Receiver, avoiding URL re-signing of the custom MP3 capability endpoint.
+- FFmpeg proxy does not answer HTTP 200 until MP3 bytes exist and logs a redacted diagnostic if transcoding cannot start.
+- `conversation.home_assistant` `no_intent_match` is handled as an expected no-match: related features receive a clarification with examples rather than an error warning.
+- Natural-language feature hints and the full command guide were expanded; YouTube/Cast failures remain isolated from integration startup.
+
+
+### 2026.08.20.1900 - Ưu tiên action yt_dlp.play cho loa audio-only
+
+- Khi người dùng đã chọn **loa** và **video YouTube**, Conversational Assistant gọi trực tiếp `yt_dlp.play` với `url` của video và `media_player` của loa.
+- `yt_dlp.play` chỉ dùng cho mục tiêu loại **speaker/audio-only**. TV vẫn dùng đường phát video native của Cast/Android TV/Apple TV.
+- Với loa, không còn tự phát video số 1 sau 20 giây; phải có lựa chọn video rõ ràng trước khi gọi `yt_dlp.play`.
+- Nếu `yt_dlp.play` tồn tại nhưng thất bại, tích hợp báo đúng lỗi của action và không chạy tiếp chuỗi Cast/Media Extractor cũ gây nhiều lần phát lặp.
+- Các đường yt-dlp Python/proxy/Media Extractor cũ chỉ còn fallback khi Home Assistant **không có** action `yt_dlp.play`.
+- Không thêm hard dependency `yt_dlp` vào manifest; action được phát hiện lazily bằng service registry nên thiếu integration này không làm chậm hoặc chặn Home Assistant startup.
+
+### 2026.08.20.1800 - Cast tải file trước khi phát
+- Sửa lỗi HTTP route `get() got an unexpected keyword argument 'token'` ở cả proxy audio generic và Cast.
+- Google Cast/Google Home/Nest không còn phụ thuộc vào transcoder realtime làm đường chính: audio-only được tải/remux hoàn chỉnh thành file M4A/AAC trước, phục vụ như media tĩnh có HTTP Range và phát ở chế độ `BUFFERED`.
+- Nếu Cast vẫn từ chối M4A, file local được chuyển sang MP3 rồi thử lại mà không phải tải YouTube lần nữa.
+- File tạm được tự xóa sau khi loa kết thúc phát; TTL 8 giờ và dọn file bỏ dở cũ hơn 12 giờ để tránh rác sau crash/restart.
+- Tất cả tải/remux/transcode vẫn lazy khi có lệnh YouTube, không chạy lúc Home Assistant khởi động.
