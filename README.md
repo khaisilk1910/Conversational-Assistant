@@ -17,31 +17,60 @@ Tích hợp kết hợp quản lý nhắc hẹn, ghi chú bảo mật, thông b�
 ```
 alias: Zalo - Bot Conversational Assistant
 description: ""
+
 triggers:
   - trigger: webhook
     allowed_methods:
       - POST
+      - PUT
+      - GET
+      - HEAD
     local_only: false
-    webhook_id: "webhook_zalo_bot_dang_co"
+    webhook_id: zalo_bot_conversational_assistant
+
 conditions:
   - condition: template
     value_template: |-
-      {% set content = trigger.json.data.content
+      {% set data = trigger.json.data | default({}, true) %}
+
+      {% set content = data.content
         | default('', true)
         | string
         | lower
-        | trim 
+        | trim
       %}
+
+      {% set sender_id = data.uidFrom
+        | default('', true)
+        | string
+      %}
+
+      {% set account_id = trigger.json._accountId
+        | default('781454039143291053', true)
+        | string
+      %}
+
+      {% set is_self =
+        (trigger.json.isSelf
+          | default(false)
+          | string
+          | lower)
+        in ['true', '1']
+      %}
+
       {% set blocked = ['@bot'] %}
+
       {{
-        trigger.json.data.uidFrom | string != 'uid_cua_bot_de_tranh_tu_tra_loi_tin_cua_chinh_bot'
+        not is_self
+        and sender_id != account_id
         and not (blocked | select('in', content) | list | count > 0)
       }}
-    enabled: true
+
 actions:
   - action: conversational_assistant.process_zalo_webhook
     data:
       payload: "{{ trigger.json | to_json }}"
+
 mode: parallel
 max: 50
 ```
