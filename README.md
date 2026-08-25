@@ -40,11 +40,6 @@ conditions:
         | trim
       %}
 
-      {% set sender_id = data.uidFrom
-        | default('', true)
-        | string
-      %}
-
       {% set is_self =
         (trigger.json.isSelf
           | default(false)
