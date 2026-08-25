@@ -121,6 +121,11 @@ WEATHER_NATIVE_CACHE_SECONDS = 60
 # Assistant service calls do not impose one automatically, so this prevents a
 # stalled custom action/device from holding an integration task indefinitely.
 SERVICE_CALL_TIMEOUT_SECONDS = 60
+# Keep config-entry setup responsive even when the storage backend is busy.
+# A timed-out startup read is retried in the background with the normal load
+# timeout so persisted reminders/notes/schedules are restored without holding
+# up Home Assistant startup.
+STORAGE_STARTUP_TIMEOUT_SECONDS = 2
 STORAGE_LOAD_TIMEOUT_SECONDS = 10
 TTS_SERVICE_TIMEOUT_SECONDS = 30
 CALENDAR_SERVICE_TIMEOUT_SECONDS = 30
@@ -169,6 +174,11 @@ ZALO_TEXT_CHUNK_MAX_CHARS = 1800
 # so Zalo markdown/style conversion cannot silently reject one large payload.
 ZALO_GUIDE_CHUNK_MAX_CHARS = 850
 ZALO_TEXT_CHUNK_SEND_DELAY_SECONDS = 0.15
+# Zalo typing is cosmetic and must never delay command execution. Dispatch it
+# non-blocking with a very short caller timeout. Final text delivery remains a
+# blocking action, but uses a tighter timeout than generic Home Assistant calls.
+ZALO_TYPING_TIMEOUT_SECONDS = 1.5
+ZALO_SEND_TIMEOUT_SECONDS = 15
 
 # Refresh the native Zalo typing indicator while a command is still being
 # processed. The task is created only for an active webhook request and is
@@ -336,6 +346,14 @@ LUNAR_DATE_CONVERSION_SENTENCES = [
 ZALO_SEND_SENTENCES = [
     "[hãy ]gửi zalo",
     "[hãy ]gửi zalo {request}",
+    "[hãy ]nhắn zalo",
+    "[hãy ]nhắn zalo {request}",
+    "[hãy ]gửi tin zalo",
+    "[hãy ]gửi tin zalo {request}",
+    "[hãy ]nhắn tin zalo",
+    "[hãy ]nhắn tin zalo {request}",
+    "[hãy ]gửi tin nhắn zalo",
+    "[hãy ]gửi tin nhắn zalo {request}",
     "[hãy ]thông báo zalo",
     "[hãy ]thông báo zalo {request}",
     "[hãy ]báo zalo",
@@ -351,6 +369,16 @@ ZALO_SEND_SENTENCES = [
 SPEAKER_ANNOUNCE_SENTENCES = [
     "[hãy ]thông báo loa",
     "[hãy ]thông báo loa {request}",
+    "[hãy ]phát thông báo loa",
+    "[hãy ]phát thông báo loa {request}",
+    "[hãy ]phát thông báo qua loa",
+    "[hãy ]phát thông báo qua loa {request}",
+    "[hãy ]nói qua loa",
+    "[hãy ]nói qua loa {request}",
+    "[hãy ]đọc qua loa",
+    "[hãy ]đọc qua loa {request}",
+    "[hãy ]đọc ở loa",
+    "[hãy ]đọc ở loa {request}",
     "[hãy ]báo loa",
     "[hãy ]báo loa {request}",
     "[hãy ]báo ra loa",
@@ -463,6 +491,16 @@ SEARCH_SENTENCES = [
     "[hãy ]tìm trên mạng {request}",
     "[hãy ]tra cứu",
     "[hãy ]tra cứu {request}",
+    "[hãy ]tra mạng",
+    "[hãy ]tra mạng {request}",
+    "[hãy ]tra internet",
+    "[hãy ]tra internet {request}",
+    "[hãy ]tìm web",
+    "[hãy ]tìm web {request}",
+    "[hãy ]tìm trên web",
+    "[hãy ]tìm trên web {request}",
+    "[hãy ]search giúp tôi",
+    "[hãy ]search giúp tôi {request}",
     "[please ]search for",
     "[please ]search for {request}",
     "[please ]search the internet for",
@@ -560,6 +598,12 @@ CAMERA_ANALYSIS_SENTENCES = [
     "[hãy ]xem và phân tích cam {request}",
     "[hãy ]xem và phân tích camera",
     "[hãy ]xem và phân tích camera {request}",
+    "[hãy ](xem|coi) (cam|camera) {request} có gì",
+    "[hãy ](xem|coi) (cam|camera) {request} có ai không",
+    "[hãy ](xem|coi) (cam|camera) {request} có người không",
+    "[hãy ](cam|camera) {request} có gì",
+    "[hãy ](cam|camera) {request} có ai không",
+    "[hãy ](cam|camera) {request} có người không",
     "[please ]analyze camera",
     "[please ]analyze camera {request}",
     "[please ]analyse camera",
@@ -577,6 +621,12 @@ IMAGE_GENERATION_PREFIXES = (
     "tạo bức ảnh",
     "tạo một ảnh",
     "tạo ảnh",
+    "tạo hình ảnh",
+    "tạo hình",
+    "vẽ một bức ảnh",
+    "vẽ bức ảnh",
+    "vẽ ảnh",
+    "vẽ hình",
     "generate an image",
     "generate image",
     "create an image",

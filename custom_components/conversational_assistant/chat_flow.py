@@ -11,7 +11,11 @@ from .targeting import normalize_text
 # "buôn" inside another sentence do not unexpectedly capture the Zalo router.
 _CHAT_START_PHRASES: tuple[tuple[str, ...], ...] = (
     ("tro", "chuyen", "di"),
+    ("noi", "chuyen", "di"),
+    ("noi", "chuyen", "voi", "toi"),
+    ("chat", "voi", "toi"),
     ("tam", "di"),
+    ("tam", "mot", "chut"),
     ("buon", "di"),
 )
 

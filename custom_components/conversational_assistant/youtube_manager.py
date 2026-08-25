@@ -20,11 +20,13 @@ from aiohttp import ClientError
 from hassil.recognize import RecognizeResult
 
 from homeassistant.components import persistent_notification
+from homeassistant.components.ffmpeg import get_ffmpeg_manager
 from homeassistant.components.media_player.const import MediaPlayerEntityFeature
 from homeassistant.const import ATTR_SUPPORTED_FEATURES, STATE_UNAVAILABLE, STATE_UNKNOWN
 from homeassistant.core import Context
 from homeassistant.helpers import entity_registry as er
 from homeassistant.helpers.aiohttp_client import async_get_clientsession
+from homeassistant.setup import async_setup_component
 from homeassistant.util import dt as dt_util
 
 from .const import (
@@ -1354,9 +1356,6 @@ class YouTubeManagerMixin:
     async def _async_youtube_ffmpeg_binary(self) -> str:
         """Resolve Home Assistant's FFmpeg binary only when playback needs it."""
         try:
-            from homeassistant.components.ffmpeg import get_ffmpeg_manager
-            from homeassistant.setup import async_setup_component
-
             try:
                 return str(get_ffmpeg_manager(self.hass).binary)
             except ValueError:

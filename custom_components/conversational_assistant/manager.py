@@ -196,6 +196,11 @@ from .const import (
     HELP_SENTENCES,
     IMAGE_GENERATION_PREFIXES,
     LIST_SENTENCES,
+    NOTE_CREATE_SENTENCES,
+    NOTE_DELETE_SENTENCES,
+    NOTE_EDIT_SENTENCES,
+    NOTE_LIST_SENTENCES,
+    NOTE_VIEW_SENTENCES,
     LUNAR_CALENDAR_DOMAIN,
     LUNAR_CALENDAR_SERVICE_CONVERT_DATE,
     LUNAR_DATE_CONVERSION_SENTENCES,
@@ -221,6 +226,7 @@ from .const import (
     STORAGE_KEY_PREFIX,
     STORAGE_VERSION,
     STORAGE_LOAD_TIMEOUT_SECONDS,
+    STORAGE_STARTUP_TIMEOUT_SECONDS,
     TTS_DOMAIN,
     TTS_SERVICE_SPEAK,
     TTS_SERVICE_TIMEOUT_SECONDS,
@@ -241,7 +247,9 @@ from .const import (
     ZALO_CHAT_REENGAGE_TIMEOUT_SECONDS,
     ZALO_IMAGE_TIMEOUT_SECONDS,
     ZALO_SEARCH_TIMEOUT_SECONDS,
+    ZALO_SEND_TIMEOUT_SECONDS,
     ZALO_TYPING_REFRESH_SECONDS,
+    ZALO_TYPING_TIMEOUT_SECONDS,
     ZALO_TYPE_GROUP,
     ZALO_TYPE_USER,
     ZALO_WEBHOOK_SEEN_MESSAGE_LIMIT,
@@ -605,11 +613,17 @@ def _search_request(text: str) -> str | None:
 
     prefixes = (
         ("tim", "kiem", "tren", "mang"),
+        ("tim", "kiem", "tren", "web"),
+        ("tim", "tren", "web"),
+        ("tim", "web"),
         ("tim", "kiem", "thong", "tin"),
         ("tim", "thong", "tin"),
         ("tim", "tren", "mang"),
         ("tra", "cuu", "thong", "tin"),
         ("tra", "thong", "tin"),
+        ("tra", "mang"),
+        ("tra", "internet"),
+        ("search", "giup", "toi"),
         ("tim", "kiem"),
         ("tra", "cuu"),
         ("search", "the", "internet", "for"),
@@ -652,6 +666,11 @@ def _speaker_announcement_request(text: str) -> str | None:
     start = 1 if normalized_words[0] in {"hay", "please"} else 0
     prefixes = (
         ("thong", "bao", "loa"),
+        ("phat", "thong", "bao", "loa"),
+        ("phat", "thong", "bao", "qua", "loa"),
+        ("noi", "qua", "loa"),
+        ("doc", "qua", "loa"),
+        ("doc", "o", "loa"),
         ("bao", "loa"),
         ("bao", "ra", "loa"),
         ("thong", "bao", "ra", "loa"),
@@ -679,6 +698,10 @@ def _zalo_send_request(text: str) -> str | None:
     start = 1 if normalized_words[0] in {"hay", "please"} else 0
     prefixes = (
         ("gui", "zalo"),
+        ("nhan", "zalo"),
+        ("gui", "tin", "zalo"),
+        ("nhan", "tin", "zalo"),
+        ("gui", "tin", "nhan", "zalo"),
         ("thong", "bao", "zalo"),
         ("bao", "zalo"),
         ("send", "zalo"),
@@ -1480,6 +1503,14 @@ class _ConversationInputTextProxy:
         return getattr(self._original, name)
 
 
+def _device_config_entry_ids(device: Any) -> tuple[str, ...]:
+    """Return device config-entry IDs without 2026.8 deprecated access."""
+    if hasattr(device, "config_entry_id"):
+        entry_id = getattr(device, "config_entry_id", None)
+        return (str(entry_id),) if entry_id else ()
+    return tuple(str(item) for item in getattr(device, "config_entries", ()))
+
+
 class ConversationalAssistantManager(NoteManagerMixin, YouTubeManagerMixin):
     """Store, schedule, send, and manage reminders."""
 
@@ -1573,6 +1604,7 @@ class ConversationalAssistantManager(NoteManagerMixin, YouTubeManagerMixin):
             f"{STORAGE_KEY_PREFIX}.{entry.entry_id}",
         )
         self._storage_loaded = False
+        self._storage_load_task: asyncio.Task[Any] | None = None
         self._unsub_timer: Callable[[], None] | None = None
         self._unsub_pending_trigger: Callable[[], None] | None = None
         self._unsub_pending_expiry_timer: Callable[[], None] | None = None
@@ -3620,35 +3652,15 @@ class ConversationalAssistantManager(NoteManagerMixin, YouTubeManagerMixin):
             "confirm delete", "yes delete", "delete them", "yes",
         }
 
-    async def async_setup(self) -> None:
-        """Load data and register listeners."""
-        try:
-            async with asyncio.timeout(STORAGE_LOAD_TIMEOUT_SECONDS):
-                stored = await self._store.async_load() or {}
-            self._storage_loaded = True
-        except TimeoutError:
-            stored = {}
-            self._storage_loaded = False
-            _LOGGER.error(
-                "Timed out loading Conversational Assistant storage after %s "
-                "seconds; continuing without persisted data so Home Assistant "
-                "startup is not blocked",
-                STORAGE_LOAD_TIMEOUT_SECONDS,
-            )
-        except Exception:  # noqa: BLE001 - startup must remain available
-            stored = {}
-            self._storage_loaded = False
-            _LOGGER.exception(
-                "Failed loading Conversational Assistant storage; continuing "
-                "without persisted data"
-            )
+    def _apply_stored_data(self, stored: dict[str, Any]) -> None:
+        """Merge persistent data into live state without clobbering new work."""
         for item in stored.get("reminders", []):
             try:
                 reminder = Reminder.from_dict(item)
             except (KeyError, TypeError, ValueError):
                 _LOGGER.warning("Skipping invalid stored reminder: %s", item)
                 continue
-            self.reminders[reminder.reminder_id] = reminder
+            self.reminders.setdefault(reminder.reminder_id, reminder)
         for item in stored.get("camera_snapshot_schedules", []):
             try:
                 schedule = CameraSnapshotSchedule.from_dict(item)
@@ -3658,7 +3670,9 @@ class ConversationalAssistantManager(NoteManagerMixin, YouTubeManagerMixin):
                 )
                 continue
             if schedule.next_run is not None:
-                self.camera_snapshot_schedules[schedule.schedule_id] = schedule
+                self.camera_snapshot_schedules.setdefault(
+                    schedule.schedule_id, schedule
+                )
         self._load_notes(stored)
         for item in stored.get("learned_commands", []):
             try:
@@ -3666,7 +3680,7 @@ class ConversationalAssistantManager(NoteManagerMixin, YouTubeManagerMixin):
             except (CommandMemoryError, KeyError, TypeError, ValueError):
                 _LOGGER.warning("Skipping invalid learned command: %s", item)
                 continue
-            self.learned_commands[command.command_id] = command
+            self.learned_commands.setdefault(command.command_id, command)
         for item in stored.get("scheduled_device_actions", []):
             try:
                 scheduled = ScheduledDeviceAction.from_dict(item)
@@ -3675,89 +3689,220 @@ class ConversationalAssistantManager(NoteManagerMixin, YouTubeManagerMixin):
                     "Skipping invalid scheduled device action: %s", item
                 )
                 continue
-            self._scheduled_device_actions[scheduled.action_id] = scheduled
+            self._scheduled_device_actions.setdefault(
+                scheduled.action_id, scheduled
+            )
+
+    async def _async_load_storage_payload(self) -> dict[str, Any]:
+        """Load persistent Store with one bounded background-safe read."""
+        async with asyncio.timeout(STORAGE_LOAD_TIMEOUT_SECONDS):
+            stored = await self._store.async_load() or {}
+        if not isinstance(stored, dict):
+            raise TypeError(
+                "Conversational Assistant storage root must be a mapping"
+            )
+        return stored
+
+    def _finish_storage_load_task(
+        self, done_task: asyncio.Task[dict[str, Any]]
+    ) -> None:
+        """Apply a completed Store read once and keep integration available."""
+        if self._storage_load_task is not done_task:
+            return
+        self._storage_load_task = None
+        if done_task.cancelled():
+            return
+        try:
+            stored = done_task.result()
+        except TimeoutError:
+            _LOGGER.error(
+                "Timed out loading Conversational Assistant storage after %s "
+                "seconds; integration remains available",
+                STORAGE_LOAD_TIMEOUT_SECONDS,
+            )
+            return
+        except Exception:  # noqa: BLE001 - Store failure must not kill entry
+            _LOGGER.exception(
+                "Failed loading Conversational Assistant storage; integration "
+                "remains available"
+            )
+            return
+
+        self._apply_stored_data(stored)
+        self._storage_loaded = True
+        self._sync_learned_command_triggers()
+        if self.hass.state is CoreState.running:
+            self._schedule_next()
+            self._schedule_next_camera_snapshot()
+            self._schedule_all_device_actions()
+        self._notify_update()
+        # Persist a merged snapshot so requests created while the Store read was
+        # in flight are not lost.
+        self._save_later()
+
+    def _start_background_storage_restore(
+        self,
+    ) -> asyncio.Task[dict[str, Any]]:
+        """Start at most one Store read owned by the config entry."""
+        existing = self._storage_load_task
+        if existing is not None:
+            return existing
+        task = self.entry.async_create_background_task(
+            self.hass,
+            self._async_load_storage_payload(),
+            "conversational_assistant_storage_restore",
+        )
+        self._storage_load_task = task
+        task.add_done_callback(self._finish_storage_load_task)
+        return task
+
+    def _register_static_trigger(
+        self,
+        agent_manager: Any,
+        sentences: list[str],
+        handler: Callable[..., Any],
+        label: str,
+    ) -> None:
+        """Register one Assist trigger without making the entry all-or-nothing."""
+        try:
+            unsub = agent_manager.register_trigger(sentences, handler)
+        except Exception:  # noqa: BLE001 - one grammar must not break startup
+            _LOGGER.exception(
+                "Failed registering Conversational Assistant trigger group %s; "
+                "continuing with the remaining features",
+                label,
+            )
+            return
+        self._unsubs.append(unsub)
+
+    async def async_setup(self) -> None:
+        """Load data and register listeners without blocking HA startup."""
+        storage_task = self._start_background_storage_restore()
+        done, _pending = await asyncio.wait(
+            {storage_task}, timeout=STORAGE_STARTUP_TIMEOUT_SECONDS
+        )
+        if storage_task in done:
+            # Apply immediately on the fast path. The registered completion
+            # callback becomes a no-op because this clears the tracked task.
+            self._finish_storage_load_task(storage_task)
+        else:
+            _LOGGER.warning(
+                "Conversational Assistant storage did not load within %s "
+                "seconds; continuing startup while the same read finishes in "
+                "background",
+                STORAGE_STARTUP_TIMEOUT_SECONDS,
+            )
 
         agent_manager = get_agent_manager(self.hass)
+        trigger_specs = (
+            (
+                COMMAND_LEARN_SENTENCES,
+                self._async_learn_command_from_voice,
+                "command_learn",
+            ),
+            (
+                COMMAND_LIST_SENTENCES,
+                self._async_list_learned_commands_from_voice,
+                "command_list",
+            ),
+            (
+                COMMAND_DELETE_SENTENCES,
+                self._async_delete_learned_command_from_voice,
+                "command_delete",
+            ),
+            (
+                CANCEL_PENDING_SENTENCES,
+                self._async_cancel_pending_from_voice,
+                "cancel_pending",
+            ),
+            (CREATE_SENTENCES, self._async_create_from_voice, "reminder_create"),
+            (LIST_SENTENCES, self._async_list_from_voice, "reminder_list"),
+            (CANCEL_SENTENCES, self._async_cancel_from_voice, "reminder_delete"),
+            (
+                CAMERA_ANALYSIS_SENTENCES,
+                self._async_camera_analysis_from_voice,
+                "camera_analysis",
+            ),
+            (
+                CAMERA_VIDEO_SENTENCES,
+                self._async_camera_video_from_voice,
+                "camera_video",
+            ),
+            (
+                CAMERA_SCHEDULE_LIST_SENTENCES,
+                self._async_list_camera_schedules_from_voice,
+                "camera_schedule_list",
+            ),
+            (
+                CAMERA_SCHEDULE_DELETE_SENTENCES,
+                self._async_delete_camera_schedules_from_voice,
+                "camera_schedule_delete",
+            ),
+            (CAMERA_SENTENCES, self._async_camera_from_voice, "camera_capture"),
+            (WEATHER_SENTENCES, self._async_weather_from_voice, "weather"),
+            (YOUTUBE_SENTENCES, self._async_youtube_from_voice, "youtube"),
+            (SEARCH_SENTENCES, self._async_search_from_voice, "search"),
+            (
+                LUNAR_DATE_CONVERSION_SENTENCES,
+                self._async_lunar_date_conversion_from_voice,
+                "lunar",
+            ),
+            (
+                ZALO_SEND_SENTENCES,
+                self._async_send_to_zalo_from_voice,
+                "zalo_send",
+            ),
+            (
+                SPEAKER_ANNOUNCE_SENTENCES,
+                self._async_announce_to_speaker_from_voice,
+                "speaker",
+            ),
+            (HELP_SENTENCES, self._async_help_from_voice, "help"),
+            (
+                DEVICE_CONTROL_SENTENCES,
+                self._async_device_control_from_voice,
+                "device",
+            ),
+            (
+                NOTE_CREATE_SENTENCES,
+                self._async_create_note_from_voice,
+                "note_create",
+            ),
+            (
+                NOTE_LIST_SENTENCES,
+                self._async_list_notes_from_voice,
+                "note_list",
+            ),
+            (
+                NOTE_EDIT_SENTENCES,
+                self._async_edit_note_from_voice,
+                "note_edit",
+            ),
+            (
+                NOTE_DELETE_SENTENCES,
+                self._async_delete_note_from_voice,
+                "note_delete",
+            ),
+            (
+                NOTE_VIEW_SENTENCES,
+                self._async_view_note_from_voice,
+                "note_view",
+            ),
+        )
+        for sentences, handler, label in trigger_specs:
+            self._register_static_trigger(
+                agent_manager, sentences, handler, label
+            )
+
         self._unsubs.extend(
-            [
-                agent_manager.register_trigger(
-                    COMMAND_LEARN_SENTENCES,
-                    self._async_learn_command_from_voice,
-                ),
-                agent_manager.register_trigger(
-                    COMMAND_LIST_SENTENCES,
-                    self._async_list_learned_commands_from_voice,
-                ),
-                agent_manager.register_trigger(
-                    COMMAND_DELETE_SENTENCES,
-                    self._async_delete_learned_command_from_voice,
-                ),
-                agent_manager.register_trigger(
-                    CANCEL_PENDING_SENTENCES,
-                    self._async_cancel_pending_from_voice,
-                ),
-                agent_manager.register_trigger(
-                    CREATE_SENTENCES, self._async_create_from_voice
-                ),
-                agent_manager.register_trigger(
-                    LIST_SENTENCES, self._async_list_from_voice
-                ),
-                agent_manager.register_trigger(
-                    CANCEL_SENTENCES, self._async_cancel_from_voice
-                ),
-                agent_manager.register_trigger(
-                    CAMERA_ANALYSIS_SENTENCES,
-                    self._async_camera_analysis_from_voice,
-                ),
-                agent_manager.register_trigger(
-                    CAMERA_VIDEO_SENTENCES, self._async_camera_video_from_voice
-                ),
-                agent_manager.register_trigger(
-                    CAMERA_SCHEDULE_LIST_SENTENCES,
-                    self._async_list_camera_schedules_from_voice,
-                ),
-                agent_manager.register_trigger(
-                    CAMERA_SCHEDULE_DELETE_SENTENCES,
-                    self._async_delete_camera_schedules_from_voice,
-                ),
-                agent_manager.register_trigger(
-                    CAMERA_SENTENCES, self._async_camera_from_voice
-                ),
-                agent_manager.register_trigger(
-                    WEATHER_SENTENCES, self._async_weather_from_voice
-                ),
-                agent_manager.register_trigger(
-                    YOUTUBE_SENTENCES, self._async_youtube_from_voice
-                ),
-                agent_manager.register_trigger(
-                    SEARCH_SENTENCES, self._async_search_from_voice
-                ),
-                agent_manager.register_trigger(
-                    LUNAR_DATE_CONVERSION_SENTENCES,
-                    self._async_lunar_date_conversion_from_voice,
-                ),
-                agent_manager.register_trigger(
-                    ZALO_SEND_SENTENCES, self._async_send_to_zalo_from_voice
-                ),
-                agent_manager.register_trigger(
-                    SPEAKER_ANNOUNCE_SENTENCES,
-                    self._async_announce_to_speaker_from_voice,
-                ),
-                agent_manager.register_trigger(
-                    HELP_SENTENCES, self._async_help_from_voice
-                ),
-                agent_manager.register_trigger(
-                    DEVICE_CONTROL_SENTENCES,
-                    self._async_device_control_from_voice,
-                ),
-                *self._register_note_triggers(agent_manager),
+            (
                 self.hass.bus.async_listen(
                     EVENT_NOTIFICATION_ACTION, self._async_notification_action
                 ),
                 self.hass.bus.async_listen(
                     EVENT_NOTIFICATION_CLEARED, self._async_notification_cleared
                 ),
-            ]
+            )
         )
         self._sync_learned_command_triggers(agent_manager)
         self._unsubs.append(
@@ -3779,6 +3924,11 @@ class ConversationalAssistantManager(NoteManagerMixin, YouTubeManagerMixin):
 
     async def async_unload(self) -> None:
         """Unload listeners and timer."""
+        storage_load_task = self._storage_load_task
+        if storage_load_task is not None:
+            storage_load_task.cancel()
+            await asyncio.gather(storage_load_task, return_exceptions=True)
+            self._storage_load_task = None
         if self._unsub_timer is not None:
             self._unsub_timer()
             self._unsub_timer = None
@@ -5489,8 +5639,9 @@ class ConversationalAssistantManager(NoteManagerMixin, YouTubeManagerMixin):
             features.append("note")
         if has_any(
             " su kien ", " cuoc hop ", " cuoc hen ", " calendar ",
-            " lich lam viec ", " lich hom nay ", " lich ngay mai ",
-            " lich tuan ", " dat lich ", " them lich ",
+            " lich lam viec ", " lich cua toi ", " xem lich ",
+            " kiem tra lich ", " toi co lich gi ", " lich hom nay ",
+            " lich ngay mai ", " lich tuan ", " dat lich ", " them lich ",
         ):
             features.append("calendar")
         if has_any(
@@ -5513,21 +5664,31 @@ class ConversationalAssistantManager(NoteManagerMixin, YouTubeManagerMixin):
             features.append("image_generation")
         if has_any(
             " tro chuyen ", " tam di ", " buon di ", " chat ",
-            " noi chuyen ", " hoi ai ",
+            " noi chuyen ",
         ):
             features.append("chat")
 
         device_words = (
             " thiet bi ", " den ", " quat ", " dieu hoa ", " climate ",
-            " fan ", " switch ", " cua ", " khoa ", " robot ",
-            " rem ", " binh nong lanh ", " may loc ", " may hut ",
+            " fan ", " switch ", " cong tac ", " o cam ", " robot ",
+            " rem ", " manh rem ", " binh nong lanh ", " may loc ",
+            " may hut ", " may hut bui ", " tivi ", " tv ",
+            " media player ", " scene ", " script ", " kich ban ",
         )
         device_actions = (
             " bat ", " tat ", " mo ", " dong ", " tang ", " giam ",
             " chinh ", " dat ", " chuyen ", " doi ", " trang thai ",
-            " hen gio ", " sau ", " quay ", " dao gio ",
+            " hen gio ", " sau ", " quay ", " dao gio ", " dung ",
+            " tam dung ", " tiep tuc ", " phat ", " kich hoat ", " chay ",
         )
-        if has_any(*device_words) and has_any(*device_actions):
+        # Strong device/domain nouns are enough to offer device-specific help
+        # when the user only says e.g. "đèn phòng khách". Ambiguous Vietnamese
+        # words such as "cửa"/"khóa" still require an action to avoid matching
+        # ordinary phrases like "lịch của tôi".
+        if has_any(*device_words) or (
+            has_any(" cua ", " khoa ", " door ", " lock ")
+            and has_any(*device_actions)
+        ):
             features.append("device")
 
         if not camera and "youtube" not in features and has_any(
@@ -5604,10 +5765,13 @@ class ConversationalAssistantManager(NoteManagerMixin, YouTubeManagerMixin):
             "⌨️ **Xem lệnh** — lệnh tích hợp, các lệnh tích hợp, "
             "xem lệnh tích hợp, xem lệnh của tích hợp.\n"
             "VD: `Các lệnh tích hợp`\n\n"
-            "🏠 **Thiết bị** — bật, tắt, mở, đóng, khóa, mở khóa, tăng, "
-            "giảm, đặt, chỉnh, chuyển, đổi, dừng, tạm dừng, tiếp tục, phát, "
-            "quét, dọn dẹp, làm sạch, xem trạng thái, hẹn giờ, lên lịch.\n"
-            "VD: `Tắt quạt phòng ngủ sau 30 phút`\n\n"
+            "🏠 **Thiết bị/Home Assistant** — bật, tắt, mở, đóng, khóa, "
+            "mở khóa, tăng, giảm, đặt, chỉnh, chuyển, đổi, dừng, tạm dừng, "
+            "tiếp tục, phát, quét, dọn dẹp, làm sạch, xem trạng thái, hẹn giờ, "
+            "lên lịch; hỗ trợ đèn, công tắc, ổ cắm, rèm/cover, khóa, quạt, "
+            "điều hòa, robot hút bụi, media player và scene/script khi Home "
+            "Assistant đã expose cho Assist.\n"
+            "VD: `Tắt quạt phòng ngủ sau 30 phút` · `Kích hoạt scene Buổi tối`\n\n"
             "🌦️ **Thời tiết và bão** — thời tiết, dự báo thời tiết, có mưa "
             "không, khả năng mưa, nhiệt độ, độ ẩm, UV, kiểm tra bão, áp thấp.\n"
             "VD: `Thời tiết ngày mai`\n\n"
@@ -5622,7 +5786,8 @@ class ConversationalAssistantManager(NoteManagerMixin, YouTubeManagerMixin):
             "Dương lịch hoặc Âm lịch; nếu chưa nói, bot sẽ hỏi và liệt kê lịch.\n"
             "VD: `Thêm sự kiện 13h30 thứ 4 tuần sau dương lịch Họp test sản phẩm`\n\n"
             "🔊 **Thông báo loa** — thông báo loa, báo loa, báo ra loa, "
-            "thông báo ra loa, gửi loa, nhắn loa. Chỉ phát khi loa ở trạng "
+            "thông báo ra loa, phát thông báo loa, nói qua loa, đọc qua loa, "
+            "đọc ở loa, gửi loa, nhắn loa. Chỉ phát khi loa ở trạng "
             "thái `idle`, `off` hoặc `paused`; kiểm tra lại 10 lần, mỗi lần "
             "15 giây, rồi hủy.\n"
             "VD: `Báo loa Phòng Ngủ xuống ăn cơm`\n\n"
@@ -5636,8 +5801,9 @@ class ConversationalAssistantManager(NoteManagerMixin, YouTubeManagerMixin):
             "VD: `Tìm YouTube nhạc bolero phát loa Phòng Ngủ`\n"
             "VD: `Tìm bài Mưa Đêm Tỉnh Nhỏ trên YouTube rồi phát loa Phòng Ngủ`\n"
             "VD TV: `Tìm YouTube dạy tiếng Anh phát TV Phòng Ngủ`\n\n"
-            "📨 **Gửi Zalo** — gửi Zalo, thông báo Zalo, báo Zalo.\n"
-            "VD: `Thông báo Zalo Khải xuống ăn cơm`\n\n"
+            "📨 **Gửi Zalo** — gửi Zalo, nhắn Zalo, gửi tin Zalo, nhắn tin "
+            "Zalo, gửi tin nhắn Zalo, thông báo Zalo, báo Zalo.\n"
+            "VD: `Nhắn Zalo Khải xuống ăn cơm`\n\n"
             "📸 **Chụp camera → Zalo** — chụp/lấy/gửi ảnh từ camera, máy "
             "quay hoặc cam. Có thể nói thẳng camera và Zalo; nếu chưa rõ sẽ "
             "liệt kê để chọn. Nhiều camera được gửi thành một gói nhiều ảnh "
@@ -5655,18 +5821,21 @@ class ConversationalAssistantManager(NoteManagerMixin, YouTubeManagerMixin):
             "giây được gửi về chính cuộc trò chuyện đang yêu cầu; nếu nêu Zalo "
             "đích thì gửi đúng tên đã đặt. Chưa rõ camera/Zalo sẽ hỏi lại.\n"
             "VD: `Xem Cam Bếp` hoặc `Gửi video Cam Bếp đến Zalo Khải`\n\n"
-            "🔎 **Phân tích camera** — phân tích cam/camera, kiểm tra "
-            "cam/camera, xem và phân tích cam/camera.\n"
-            "VD: `Phân tích Cam Cổng`\n\n"
+            "🔎 **Phân tích camera** — phân tích/kiểm tra cam, xem và phân "
+            "tích camera; hiểu câu quan sát như `Camera Cổng có ai không`, "
+            "`Xem Cam Sân có gì`.\n"
+            "VD: `Camera Cổng có ai không`\n\n"
             "📝 **Ghi chú** — thêm/tạo/lưu/viết, xem/liệt kê/đọc, "
             "sửa/cập nhật/đổi, xóa/hủy ghi chú.\n"
             "VD: `Ghi chú mua sữa`\n\n"
-            "💬 **Trò chuyện AI** — trò chuyện đi, tám đi, buôn đi; "
-            "kết thúc để đóng phiên.\nVD: `Trò chuyện đi`\n\n"
+            "💬 **Trò chuyện AI** — trò chuyện đi, nói chuyện đi, nói chuyện "
+            "với tôi, chat với tôi, tám đi, tám một chút, buôn đi; kết thúc "
+            "hoặc hủy để đóng phiên.\nVD: `Nói chuyện với tôi`\n\n"
             "🔍 **Tìm kiếm Internet** — tìm thông tin, tìm kiếm, tìm trên mạng, "
-            "tra cứu.\nVD: `Tìm thông tin giá vàng hôm nay`\n\n"
-            "🎨 **Tạo ảnh AI** — tạo một bức ảnh, tạo bức ảnh, tạo một ảnh, "
-            "tạo ảnh.\nVD: `Tạo ảnh ngôi nhà bên hồ`\n\n"
+            "tìm web, tìm trên web, tra cứu, tra mạng, tra Internet, search "
+            "giúp tôi.\nVD: `Tra mạng Home Assistant mới nhất`\n\n"
+            "🎨 **Tạo ảnh AI** — tạo một bức ảnh, tạo bức ảnh, tạo ảnh, tạo "
+            "hình, tạo hình ảnh, vẽ ảnh, vẽ hình.\nVD: `Vẽ ảnh ngôi nhà bên hồ`\n\n"
             "🌙 **Âm dương lịch** — âm lịch, lịch âm, dương lịch, lịch dương, "
             "thứ mấy, đổi/chuyển/quy đổi, tra/xem ngày.\n"
             "VD: `Đổi 30/11/1984 sang âm lịch`\n\n"
@@ -5717,8 +5886,10 @@ class ConversationalAssistantManager(NoteManagerMixin, YouTubeManagerMixin):
             "gửi Zalo, thông báo loa, trò chuyện và tác vụ AI đang xử lý.\n"
             "• Thời gian chờ chọn hoặc xác nhận là 120 giây.\n\n"
             "🏠 **Thiết bị**\n"
-            "• Điều khiển, xem trạng thái, đổi chế độ điều hòa/quạt và hẹn giờ.\n"
-            "• Ví dụ: `Tắt quạt phòng ngủ sau 30 phút`.\n\n"
+            "• Điều khiển, xem trạng thái, đổi chế độ điều hòa/quạt, hẹn giờ; "
+            "ưu tiên Home Assistant Conversation/Assist cho đèn, switch, cover, "
+            "lock, fan, climate, vacuum, media player, scene và script.\n"
+            "• Ví dụ: `Tắt quạt phòng ngủ sau 30 phút`, `Kích hoạt scene Buổi tối`.\n\n"
             "🌦️ **Thời tiết và bão**\n"
             "• Hỏi tự nhiên như hôm nay, ngày mai, 2 ngày tiếp theo hoặc tuần này; "
             "tối đa 7 ngày.\n"
@@ -5744,6 +5915,8 @@ class ConversationalAssistantManager(NoteManagerMixin, YouTubeManagerMixin):
             "Nếu chưa sẵn sàng, tích hợp kiểm tra lại tối đa 10 lần, cách nhau "
             "15 giây; quá số lần "
             "sẽ hủy và báo đúng luồng đã yêu cầu.\n"
+            "• Cũng hiểu `Nói qua loa ...`, `Đọc ở loa ...`, `Nhắn Zalo ...` "
+            "và `Gửi tin nhắn Zalo ...`.\n"
             "• Ví dụ: `Báo loa Phòng Ngủ xuống ăn cơm`.\n\n"
             "🎬 **YouTube → loa/TV/media player**\n"
             "• Ví dụ: `Tìm YouTube nhạc bolero phát loa Phòng Ngủ` hoặc "
@@ -6172,6 +6345,7 @@ class ConversationalAssistantManager(NoteManagerMixin, YouTubeManagerMixin):
                         "account_selection": account_selection,
                     },
                     blocking=True,
+                    timeout_seconds=ZALO_SEND_TIMEOUT_SECONDS,
                 )
             except Exception:  # noqa: BLE001 - webhook must still return HTTP 200
                 _LOGGER.exception(
@@ -8469,7 +8643,7 @@ class ConversationalAssistantManager(NoteManagerMixin, YouTubeManagerMixin):
         account_selection: str,
         service_context: Context | None = None,
     ) -> bool:
-        """Dispatch Zalo typing and confirm the service action completed."""
+        """Dispatch cosmetic Zalo typing without delaying command execution."""
         if not thread_id or not account_selection:
             _LOGGER.warning(
                 "Skipped Zalo typing event because thread_id or "
@@ -8479,40 +8653,37 @@ class ConversationalAssistantManager(NoteManagerMixin, YouTubeManagerMixin):
         if not self.hass.services.has_service(
             ZALO_DOMAIN, ZALO_SERVICE_SEND_TYPING_EVENT
         ):
-            _LOGGER.warning(
-                "Cannot send Zalo typing event because %s.%s is unavailable",
+            _LOGGER.debug(
+                "Zalo typing action %s.%s is unavailable",
                 ZALO_DOMAIN,
                 ZALO_SERVICE_SEND_TYPING_EVENT,
             )
             return False
 
-        for attempt in range(1, 3):
-            try:
-                await self._async_call_service(
-                    ZALO_DOMAIN,
-                    ZALO_SERVICE_SEND_TYPING_EVENT,
-                    {
-                        "thread_id": thread_id,
-                        "account_selection": account_selection,
-                    },
-                    blocking=True,
-                    context=service_context,
-                )
-            except Exception:  # noqa: BLE001 - typing must not fail a feature
-                if attempt == 1:
-                    await asyncio.sleep(0.2)
-                    continue
-                _LOGGER.warning(
-                    "Failed sending Zalo typing event to thread %s with "
-                    "account %s after %s attempts",
-                    thread_id,
-                    account_selection,
-                    attempt,
-                    exc_info=True,
-                )
-                return False
-            return True
-        return False
+        try:
+            # Typing is only UX feedback. Do not wait for the Zalo integration
+            # to complete its network request before handling the real command.
+            await self._async_call_service(
+                ZALO_DOMAIN,
+                ZALO_SERVICE_SEND_TYPING_EVENT,
+                {
+                    "thread_id": thread_id,
+                    "account_selection": account_selection,
+                },
+                blocking=False,
+                context=service_context,
+                timeout_seconds=ZALO_TYPING_TIMEOUT_SECONDS,
+            )
+        except Exception:  # noqa: BLE001 - typing must never fail a feature
+            _LOGGER.debug(
+                "Failed dispatching Zalo typing event to thread %s with "
+                "account %s",
+                thread_id,
+                account_selection,
+                exc_info=True,
+            )
+            return False
+        return True
 
     async def _async_send_zalo_typing_event(
         self,
@@ -18702,7 +18873,9 @@ class ConversationalAssistantManager(NoteManagerMixin, YouTubeManagerMixin):
             ),
         )
         for device in devices:
-            if not usable_mobile_entry_ids.intersection(device.config_entries):
+            if not usable_mobile_entry_ids.intersection(
+                _device_config_entry_ids(device)
+            ):
                 continue
             name = str(device.name_by_user or device.name or device.id)
             targets.append(
@@ -19764,7 +19937,7 @@ class ConversationalAssistantManager(NoteManagerMixin, YouTubeManagerMixin):
             device = device_registry.async_get(device_id)
             if device is None:
                 continue
-            for config_entry_id in device.config_entries:
+            for config_entry_id in _device_config_entry_ids(device):
                 config_entry = self.hass.config_entries.async_get_entry(
                     config_entry_id
                 )

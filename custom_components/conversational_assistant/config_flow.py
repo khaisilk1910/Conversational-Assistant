@@ -370,6 +370,16 @@ def _select_multiple_schema(
     )
 
 
+def _device_config_entry_ids(device: Any) -> tuple[str, ...]:
+    """Return device config-entry IDs without 2026.8 deprecated access."""
+    if hasattr(device, "config_entry_id"):
+        entry_id = getattr(device, "config_entry_id", None)
+        return (str(entry_id),) if entry_id else ()
+    # Home Assistant 2026.7 compatibility fallback. This property is deprecated
+    # in 2026.8, but is accessed only when the new API does not exist.
+    return tuple(str(item) for item in getattr(device, "config_entries", ()))
+
+
 def _mobile_device_choices(hass: HomeAssistant) -> dict[str, str]:
     """Return Mobile App devices that can be selected for calendar alerts."""
     mobile_entry_ids: set[str] = set()
@@ -390,7 +400,7 @@ def _mobile_device_choices(hass: HomeAssistant) -> dict[str, str]:
         (
             device
             for device in registry.devices.values()
-            if mobile_entry_ids.intersection(device.config_entries)
+            if mobile_entry_ids.intersection(_device_config_entry_ids(device))
         ),
         key=lambda device: (
             str(device.name_by_user or device.name or device.id).casefold(),

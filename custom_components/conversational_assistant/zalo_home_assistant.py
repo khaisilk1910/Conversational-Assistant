@@ -351,6 +351,14 @@ def explicit_home_assistant_request_kind(text: str) -> str | None:
         "bao cao ",
         "thoi tiet ",
         "du bao ",
+        "kich hoat canh ",
+        "bat canh ",
+        "chay canh ",
+        "chay scene ",
+        "kich hoat scene ",
+        "goi script ",
+        "chay script ",
+        "chay kich ban ",
     )
     exact_queries = {
         "weather",
@@ -410,6 +418,16 @@ def explicit_home_assistant_request_kind(text: str) -> str | None:
         "khu vuc nao",
         "tang nao",
         "thiet bi nao",
+        "den nao",
+        "quat nao",
+        "dieu hoa nao",
+        "rem nao",
+        "cua nao",
+        "khoa nao",
+        "robot nao",
+        "may hut bui nao",
+        "dang mo",
+        "dang dong",
     )
     if any(term in normalized for term in query_terms):
         return "conversation"
@@ -1437,6 +1455,9 @@ def _is_camera_video_request(normalized: str) -> bool:
         "xem cam",
         "xem camera",
         "xem may quay",
+        "coi cam",
+        "coi camera",
+        "coi may quay",
         "ghi cam",
         "ghi camera",
         "ghi may quay",
@@ -1579,7 +1600,26 @@ def _is_camera_analysis_request(normalized: str) -> bool:
         "xem va phan tich camera",
     }
     prefixes = tuple(f"{phrase} " for phrase in phrases)
-    return normalized in phrases or normalized.startswith(prefixes)
+    if normalized in phrases or normalized.startswith(prefixes):
+        return True
+
+    # Natural observation questions such as "camera cổng có ai không" or
+    # "xem cam sân có gì" are analysis requests, not video playback.
+    camera_terms = (" cam ", " camera ", " may quay ")
+    padded = f" {normalized} "
+    analysis_terms = (
+        " co gi ",
+        " co ai ",
+        " co nguoi ",
+        " co dong vat ",
+        " thay gi ",
+        " thay ai ",
+        " dang co gi ",
+        " dang co ai ",
+    )
+    return any(term in padded for term in camera_terms) and any(
+        term in padded for term in analysis_terms
+    )
 
 
 def _is_calendar_query(normalized: str) -> bool:
