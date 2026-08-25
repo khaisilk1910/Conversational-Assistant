@@ -45,11 +45,6 @@ conditions:
         | string
       %}
 
-      {% set account_id = trigger.json._accountId
-        | default('781454039143291053', true)
-        | string
-      %}
-
       {% set is_self =
         (trigger.json.isSelf
           | default(false)
@@ -62,7 +57,6 @@ conditions:
 
       {{
         not is_self
-        and sender_id != account_id
         and not (blocked | select('in', content) | list | count > 0)
       }}
 
@@ -74,8 +68,6 @@ actions:
 mode: parallel
 max: 50
 ```
-> 
-> Lưu ý lấy `uid_cua_bot_de_tranh_tu_tra_loi_tin_cua_chinh_bot` cho vào điều kiện để tránh bot tự trả lời tin nhắn của chính bot.
 > 
 > `webhook_id` là webhook Zalo_bot bạn đang dùng Automation cho Zalo Bot.
 > 
