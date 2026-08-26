@@ -12,8 +12,6 @@ import uuid
 import voluptuous as vol
 
 from homeassistant import config_entries
-from homeassistant.components.mobile_app.const import ATTR_WEBHOOK_ID
-from homeassistant.components.mobile_app.util import get_notify_service
 from homeassistant.config_entries import ConfigFlowResult
 from homeassistant.core import HomeAssistant, callback
 from homeassistant.helpers import device_registry as dr
@@ -382,6 +380,12 @@ def _device_config_entry_ids(device: Any) -> tuple[str, ...]:
 
 def _mobile_device_choices(hass: HomeAssistant) -> dict[str, str]:
     """Return Mobile App devices that can be selected for calendar alerts."""
+    try:
+        from homeassistant.components.mobile_app.const import ATTR_WEBHOOK_ID
+        from homeassistant.components.mobile_app.util import get_notify_service
+    except ImportError:
+        return {}
+
     mobile_entry_ids: set[str] = set()
     for entry in hass.config_entries.async_entries("mobile_app"):
         webhook_id = entry.data.get(ATTR_WEBHOOK_ID)

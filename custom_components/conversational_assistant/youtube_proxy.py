@@ -226,7 +226,9 @@ def async_register_youtube_cast_file(
         await asyncio.sleep(ttl)
         await async_remove_youtube_cast_file(hass, token)
 
-    hass.async_create_task(_expire_later())
+    hass.async_create_background_task(
+        _expire_later(), "conversational_assistant_youtube_proxy_expiry"
+    )
     return token, urls
 
 
@@ -263,7 +265,10 @@ class YouTubeCastFileView(HomeAssistantView):
         if not isinstance(item, YouTubeCastFileItem):
             raise web.HTTPNotFound()
         if item.expires_at <= monotonic():
-            hass.async_create_task(async_remove_youtube_cast_file(hass, str(token)))
+            hass.async_create_background_task(
+                async_remove_youtube_cast_file(hass, str(token)),
+                "conversational_assistant_youtube_cast_expiry",
+            )
             raise web.HTTPNotFound()
 
         def _stat_file() -> tuple[bool, int]:

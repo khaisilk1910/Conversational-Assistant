@@ -20,7 +20,6 @@ from aiohttp import ClientError
 from hassil.recognize import RecognizeResult
 
 from homeassistant.components import persistent_notification
-from homeassistant.components.ffmpeg import get_ffmpeg_manager
 from homeassistant.components.media_player.const import MediaPlayerEntityFeature
 from homeassistant.const import ATTR_SUPPORTED_FEATURES, STATE_UNAVAILABLE, STATE_UNKNOWN
 from homeassistant.core import Context
@@ -677,7 +676,11 @@ class YouTubeManagerMixin:
         old = self._youtube_auto_tasks.pop(pending.pending_id, None)
         if old is not None and not old.done():
             old.cancel()
-        task = self.hass.async_create_task(self._async_youtube_auto_first(pending))
+        task = self.entry.async_create_background_task(
+            self.hass,
+            self._async_youtube_auto_first(pending),
+            "conversational_assistant_youtube_auto_first",
+        )
         self._youtube_auto_tasks[pending.pending_id] = task
 
         def done(done_task: asyncio.Task[Any]) -> None:
@@ -768,7 +771,11 @@ class YouTubeManagerMixin:
         old = self._youtube_busy_tasks.pop(pending.pending_id, None)
         if old is not None and not old.done():
             old.cancel()
-        task = self.hass.async_create_task(self._async_youtube_wait_for_speaker(pending))
+        task = self.entry.async_create_background_task(
+            self.hass,
+            self._async_youtube_wait_for_speaker(pending),
+            "conversational_assistant_youtube_busy_wait",
+        )
         self._youtube_busy_tasks[pending.pending_id] = task
 
         def done(done_task: asyncio.Task[Any]) -> None:
@@ -1356,13 +1363,19 @@ class YouTubeManagerMixin:
     async def _async_youtube_ffmpeg_binary(self) -> str:
         """Resolve Home Assistant's FFmpeg binary only when playback needs it."""
         try:
-            try:
-                return str(get_ffmpeg_manager(self.hass).binary)
-            except ValueError:
-                if await async_setup_component(self.hass, "ffmpeg", {}):
-                    return str(get_ffmpeg_manager(self.hass).binary)
+            # FFmpeg is optional and pulls an extra Python requirement. Do not
+            # import it at module load time or make Conversational Assistant wait
+            # for it during startup. Let Home Assistant set it up lazily here.
+            if "ffmpeg" not in self.hass.config.components:
+                if not await async_setup_component(self.hass, "ffmpeg", {}):
+                    return "ffmpeg"
+            from homeassistant.components.ffmpeg import get_ffmpeg_manager
+
+            return str(get_ffmpeg_manager(self.hass).binary)
         except Exception:  # noqa: BLE001
-            _LOGGER.debug("Could not resolve Home Assistant FFmpeg manager", exc_info=True)
+            _LOGGER.debug(
+                "Could not resolve Home Assistant FFmpeg manager", exc_info=True
+            )
         return "ffmpeg"
 
     @staticmethod
@@ -1370,6 +1383,24 @@ class YouTubeManagerMixin:
         text = stderr.decode("utf-8", errors="replace").strip()
         text = re.sub(r"https?://\S+", "<url>", text)
         return text[-1800:]
+
+    @staticmethod
+    async def _async_youtube_stop_process(
+        proc: asyncio.subprocess.Process,
+    ) -> None:
+        """Stop one FFmpeg process without leaving an orphan on cancellation."""
+        if proc.returncode is not None:
+            return
+        with contextlib.suppress(ProcessLookupError):
+            proc.terminate()
+        with contextlib.suppress(asyncio.TimeoutError):
+            await asyncio.wait_for(proc.wait(), timeout=3)
+        if proc.returncode is not None:
+            return
+        with contextlib.suppress(ProcessLookupError):
+            proc.kill()
+        with contextlib.suppress(Exception):
+            await proc.wait()
 
     async def _async_youtube_unlink(self, path: Path) -> None:
         """Remove one temporary YouTube file without blocking HA's event loop."""
@@ -1470,20 +1501,15 @@ class YouTubeManagerMixin:
                 proc.communicate(), timeout=YOUTUBE_CAST_DOWNLOAD_TIMEOUT_SECONDS
             )
         except asyncio.TimeoutError as err:
-            if proc.returncode is None:
-                with contextlib.suppress(ProcessLookupError):
-                    proc.terminate()
-                with contextlib.suppress(asyncio.TimeoutError):
-                    await asyncio.wait_for(proc.wait(), timeout=3)
-            if proc.returncode is None:
-                with contextlib.suppress(ProcessLookupError):
-                    proc.kill()
-                with contextlib.suppress(Exception):
-                    await proc.wait()
+            await self._async_youtube_stop_process(proc)
             await self._async_youtube_unlink(output_path)
             raise RuntimeError(
                 "quá thời gian tải audio YouTube về Home Assistant"
             ) from err
+        except asyncio.CancelledError:
+            await self._async_youtube_stop_process(proc)
+            await self._async_youtube_unlink(output_path)
+            raise
 
         if proc.returncode != 0:
             detail = self._youtube_safe_ffmpeg_error(stderr or b"")
@@ -1531,18 +1557,13 @@ class YouTubeManagerMixin:
                 proc.communicate(), timeout=YOUTUBE_CAST_DOWNLOAD_TIMEOUT_SECONDS
             )
         except asyncio.TimeoutError as err:
-            if proc.returncode is None:
-                with contextlib.suppress(ProcessLookupError):
-                    proc.terminate()
-                with contextlib.suppress(asyncio.TimeoutError):
-                    await asyncio.wait_for(proc.wait(), timeout=3)
-            if proc.returncode is None:
-                with contextlib.suppress(ProcessLookupError):
-                    proc.kill()
-                with contextlib.suppress(Exception):
-                    await proc.wait()
+            await self._async_youtube_stop_process(proc)
             await self._async_youtube_unlink(output_path)
             raise RuntimeError("quá thời gian chuyển audio sang MP3") from err
+        except asyncio.CancelledError:
+            await self._async_youtube_stop_process(proc)
+            await self._async_youtube_unlink(output_path)
+            raise
         try:
             output_size = await self._async_youtube_file_size(output_path)
         except OSError:
@@ -1589,7 +1610,11 @@ class YouTubeManagerMixin:
             finally:
                 await async_remove_youtube_cast_file(self.hass, token)
 
-        task = self.hass.async_create_task(_cleanup())
+        task = self.entry.async_create_background_task(
+            self.hass,
+            _cleanup(),
+            "conversational_assistant_youtube_cast_cleanup",
+        )
         self._youtube_cast_cleanup_tasks[token] = task
 
         def _done(done_task: asyncio.Task[Any]) -> None:

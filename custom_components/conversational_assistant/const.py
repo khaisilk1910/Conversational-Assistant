@@ -121,11 +121,9 @@ WEATHER_NATIVE_CACHE_SECONDS = 60
 # Assistant service calls do not impose one automatically, so this prevents a
 # stalled custom action/device from holding an integration task indefinitely.
 SERVICE_CALL_TIMEOUT_SECONDS = 60
-# Keep config-entry setup responsive even when the storage backend is busy.
-# A timed-out startup read is retried in the background with the normal load
-# timeout so persisted reminders/notes/schedules are restored without holding
-# up Home Assistant startup.
-STORAGE_STARTUP_TIMEOUT_SECONDS = 2
+# Persistent Store restoration runs as a config-entry background task so it
+# never holds setup/startup. Bound the read itself so a broken storage backend
+# cannot leave that background task alive indefinitely.
 STORAGE_LOAD_TIMEOUT_SECONDS = 10
 TTS_SERVICE_TIMEOUT_SECONDS = 30
 CALENDAR_SERVICE_TIMEOUT_SECONDS = 30

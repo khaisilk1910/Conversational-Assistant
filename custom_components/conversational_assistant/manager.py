@@ -38,8 +38,6 @@ from homeassistant.components.calendar.const import (
     DATA_COMPONENT as CALENDAR_DATA_COMPONENT,
     CalendarEntityFeature,
 )
-from homeassistant.components.mobile_app.const import ATTR_WEBHOOK_ID
-from homeassistant.components.mobile_app.util import get_notify_service
 from homeassistant.components.media_player.const import MediaPlayerEntityFeature
 from homeassistant.components.conversation.agent_manager import (
     async_converse,
@@ -226,7 +224,6 @@ from .const import (
     STORAGE_KEY_PREFIX,
     STORAGE_VERSION,
     STORAGE_LOAD_TIMEOUT_SECONDS,
-    STORAGE_STARTUP_TIMEOUT_SECONDS,
     TTS_DOMAIN,
     TTS_SERVICE_SPEAK,
     TTS_SERVICE_TIMEOUT_SECONDS,
@@ -1587,6 +1584,9 @@ class ConversationalAssistantManager(NoteManagerMixin, YouTubeManagerMixin):
         self._zalo_background_tasks_by_owner: dict[
             str, set[asyncio.Task[Any]]
         ] = {}
+        # Long AI/media requests from the same Zalo source must finish in order.
+        # Different accounts/threads/senders still execute concurrently.
+        self._zalo_long_running_locks: dict[str, asyncio.Lock] = {}
         self._speaker_announcement_tasks: set[asyncio.Task[Any]] = set()
         self._speaker_announcement_tasks_by_owner: dict[
             str, set[asyncio.Task[Any]]
@@ -2211,7 +2211,11 @@ class ConversationalAssistantManager(NoteManagerMixin, YouTubeManagerMixin):
                 f"Conversation agent {agent_id or '<unknown>'} is still "
                 "finishing a previous timed-out request"
             )
-        task = self.hass.async_create_task(async_converse(**kwargs))
+        task = self.entry.async_create_background_task(
+            self.hass,
+            async_converse(**kwargs),
+            "conversational_assistant_ai_converse",
+        )
         self._ai_converse_tasks.add(task)
         self._ai_converse_task_agents[task] = agent_id
         task.add_done_callback(self._discard_ai_converse_task)
@@ -3242,8 +3246,9 @@ class ConversationalAssistantManager(NoteManagerMixin, YouTubeManagerMixin):
                 f"Mỗi agent được chờ tối đa **{attempt_timeout_seconds} "
                 "giây**; nếu tất cả đều lỗi, tích hợp sẽ báo không thành công."
             )
-        notice_task = self.hass.async_create_task(
-            self._async_send_zalo_webhook_reply(context, message)
+        notice_task = self.entry.async_create_task(
+            self.hass,
+            self._async_send_zalo_webhook_reply(context, message),
         )
         try:
             done, _pending = await asyncio.wait(
@@ -3776,22 +3781,12 @@ class ConversationalAssistantManager(NoteManagerMixin, YouTubeManagerMixin):
         self._unsubs.append(unsub)
 
     async def async_setup(self) -> None:
-        """Load data and register listeners without blocking HA startup."""
-        storage_task = self._start_background_storage_restore()
-        done, _pending = await asyncio.wait(
-            {storage_task}, timeout=STORAGE_STARTUP_TIMEOUT_SECONDS
-        )
-        if storage_task in done:
-            # Apply immediately on the fast path. The registered completion
-            # callback becomes a no-op because this clears the tracked task.
-            self._finish_storage_load_task(storage_task)
-        else:
-            _LOGGER.warning(
-                "Conversational Assistant storage did not load within %s "
-                "seconds; continuing startup while the same read finishes in "
-                "background",
-                STORAGE_STARTUP_TIMEOUT_SECONDS,
-            )
+        """Register listeners immediately and restore Store in background."""
+        # Store I/O is intentionally detached from config-entry setup. A slow or
+        # temporarily unavailable storage backend must never hold Home Assistant
+        # startup in SETUP_IN_PROGRESS/NOT_LOADED. The config-entry-owned
+        # background task applies the data and refreshes sensors when it finishes.
+        self._start_background_storage_restore()
 
         agent_manager = get_agent_manager(self.hass)
         trigger_specs = (
@@ -4044,6 +4039,7 @@ class ConversationalAssistantManager(NoteManagerMixin, YouTubeManagerMixin):
             await asyncio.gather(*background_tasks, return_exceptions=True)
         self._zalo_background_tasks.clear()
         self._zalo_background_tasks_by_owner.clear()
+        self._zalo_long_running_locks.clear()
         speaker_tasks = tuple(self._speaker_announcement_tasks)
         for task in speaker_tasks:
             task.cancel()
@@ -4524,8 +4520,9 @@ class ConversationalAssistantManager(NoteManagerMixin, YouTubeManagerMixin):
         self, schedule: CameraSnapshotSchedule, due_at: datetime
     ) -> None:
         """Run one due camera schedule independently of other due schedules."""
-        task = self.hass.async_create_task(
-            self._async_execute_camera_snapshot_schedule(schedule, due_at)
+        task = self.entry.async_create_task(
+            self.hass,
+            self._async_execute_camera_snapshot_schedule(schedule, due_at),
         )
         self._camera_schedule_tasks.add(task)
 
@@ -10359,8 +10356,10 @@ class ConversationalAssistantManager(NoteManagerMixin, YouTubeManagerMixin):
         owner_key = session.context.owner_key
         self._cancel_zalo_chat_timeout(owner_key)
         generation = session.generation
-        task = self.hass.async_create_task(
-            self._async_zalo_chat_inactivity_sequence(owner_key, generation)
+        task = self.entry.async_create_background_task(
+            self.hass,
+            self._async_zalo_chat_inactivity_sequence(owner_key, generation),
+            "conversational_assistant_zalo_chat_timeout",
         )
         self._zalo_chat_timeout_tasks[owner_key] = task
 
@@ -14290,8 +14289,9 @@ class ConversationalAssistantManager(NoteManagerMixin, YouTubeManagerMixin):
     @callback
     def _start_scheduled_device_action_task(self, action_id: str) -> None:
         """Start, retain, and observe one due device-action task."""
-        task = self.hass.async_create_task(
-            self._async_run_scheduled_device_action(action_id)
+        task = self.entry.async_create_task(
+            self.hass,
+            self._async_run_scheduled_device_action(action_id),
         )
         self._scheduled_device_action_tasks.add(task)
 
@@ -15803,8 +15803,9 @@ class ConversationalAssistantManager(NoteManagerMixin, YouTubeManagerMixin):
             self._calendar_refresh_task is None
             or self._calendar_refresh_task.done()
         ):
-            task = self.hass.async_create_task(
-                self._async_calendar_refresh_interval(dt_util.now())
+            task = self.entry.async_create_task(
+                self.hass,
+                self._async_calendar_refresh_interval(dt_util.now()),
             )
             self._calendar_refresh_task = task
             task.add_done_callback(self._calendar_refresh_task_finished)
@@ -18431,7 +18432,27 @@ class ConversationalAssistantManager(NoteManagerMixin, YouTubeManagerMixin):
         *,
         initial_typing_sent: bool = False,
     ) -> None:
-        """Finish a slow Zalo request after the webhook action has returned."""
+        """Serialize slow requests per Zalo source while preserving concurrency."""
+        lock = self._zalo_long_running_locks.setdefault(
+            context.owner_key, asyncio.Lock()
+        )
+        async with lock:
+            await self._async_process_zalo_long_running_message_ordered(
+                context,
+                service_context,
+                action,
+                initial_typing_sent=initial_typing_sent,
+            )
+
+    async def _async_process_zalo_long_running_message_ordered(
+        self,
+        context: ZaloWebhookContext,
+        service_context: Context | None,
+        action: str,
+        *,
+        initial_typing_sent: bool = False,
+    ) -> None:
+        """Finish one slow Zalo request after earlier source requests complete."""
         language = _request_language(context.text)
         per_agent_timeout_seconds = (
             ZALO_IMAGE_TIMEOUT_SECONDS
@@ -18474,10 +18495,12 @@ class ConversationalAssistantManager(NoteManagerMixin, YouTubeManagerMixin):
                 context, service_context
             )
         typing_stop = asyncio.Event()
-        typing_task = self.hass.async_create_task(
+        typing_task = self.entry.async_create_background_task(
+            self.hass,
             self._async_keep_zalo_typing_active(
                 context, service_context, typing_stop
-            )
+            ),
+            "conversational_assistant_zalo_typing",
         )
         try:
             async with asyncio.timeout(timeout_seconds):
@@ -18551,13 +18574,15 @@ class ConversationalAssistantManager(NoteManagerMixin, YouTubeManagerMixin):
         initial_typing_sent: bool = False,
     ) -> None:
         """Start and retain a slow Zalo task until it completes."""
-        task = self.hass.async_create_task(
+        task = self.entry.async_create_background_task(
+            self.hass,
             self._async_process_zalo_long_running_message(
                 context,
                 service_context,
                 action,
                 initial_typing_sent=initial_typing_sent,
-            )
+            ),
+            "conversational_assistant_zalo_request",
         )
         owner_key = context.owner_key
         self._zalo_background_tasks.add(task)
@@ -18573,6 +18598,7 @@ class ConversationalAssistantManager(NoteManagerMixin, YouTubeManagerMixin):
             owner_tasks.discard(done_task)
             if not owner_tasks:
                 self._zalo_background_tasks_by_owner.pop(owner_key, None)
+                self._zalo_long_running_locks.pop(owner_key, None)
 
         task.add_done_callback(_discard_background_task)
 
@@ -18763,10 +18789,12 @@ class ConversationalAssistantManager(NoteManagerMixin, YouTubeManagerMixin):
             context, service_context
         )
         typing_stop = asyncio.Event()
-        typing_task = self.hass.async_create_task(
+        typing_task = self.entry.async_create_background_task(
+            self.hass,
             self._async_keep_zalo_typing_active(
                 context, service_context, typing_stop
-            )
+            ),
+            "conversational_assistant_zalo_typing",
         )
         try:
             reply = await self._async_process_zalo_message(
@@ -18852,16 +18880,29 @@ class ConversationalAssistantManager(NoteManagerMixin, YouTubeManagerMixin):
             return list(self._mobile_targets_cache)
 
         usable_mobile_entry_ids: set[str] = set()
-        for config_entry in self.hass.config_entries.async_entries("mobile_app"):
-            webhook_id = config_entry.data.get(ATTR_WEBHOOK_ID)
-            if not webhook_id:
-                continue
-            try:
-                service = get_notify_service(self.hass, webhook_id)
-            except (KeyError, TypeError):
-                service = None
-            if service and self.hass.services.has_service("notify", service):
-                usable_mobile_entry_ids.add(config_entry.entry_id)
+        try:
+            # Mobile App is optional. Import its helpers only when fallback
+            # discovery is actually requested, never while this integration is
+            # imported or Home Assistant is starting.
+            from homeassistant.components.mobile_app.const import ATTR_WEBHOOK_ID
+            from homeassistant.components.mobile_app.util import (
+                get_notify_service,
+            )
+        except ImportError:
+            _LOGGER.debug(
+                "Mobile App helpers are unavailable; skipping legacy mobile discovery"
+            )
+        else:
+            for config_entry in self.hass.config_entries.async_entries("mobile_app"):
+                webhook_id = config_entry.data.get(ATTR_WEBHOOK_ID)
+                if not webhook_id:
+                    continue
+                try:
+                    service = get_notify_service(self.hass, webhook_id)
+                except (KeyError, TypeError):
+                    service = None
+                if service and self.hass.services.has_service("notify", service):
+                    usable_mobile_entry_ids.add(config_entry.entry_id)
 
         registry = dr.async_get(self.hass)
         targets: list[NotificationTarget] = []
@@ -19717,13 +19758,15 @@ class ConversationalAssistantManager(NoteManagerMixin, YouTubeManagerMixin):
         source_keys: set[str] | None = None,
     ) -> None:
         """Start and retain one direct speaker-announcement background task."""
-        task = self.hass.async_create_task(
+        task = self.entry.async_create_background_task(
+            self.hass,
             self._async_process_speaker_announcement_task(
                 content,
                 list(targets),
                 zalo_context=zalo_context,
                 voice_origin=voice_origin,
-            )
+            ),
+            "conversational_assistant_speaker_announcement",
         )
         owner_key = zalo_context.owner_key if zalo_context is not None else None
         indexed_sources = set(source_keys or ())
