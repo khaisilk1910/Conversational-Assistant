@@ -4673,7 +4673,16 @@ class ConversationalAssistantManager(NoteManagerMixin, YouTubeManagerMixin):
 
             if should_notify:
                 reminder.last_notified = now
-                await self._async_send_notification(reminder)
+                try:
+                    await self._async_send_notification(reminder)
+                except asyncio.CancelledError:
+                    raise
+                except Exception:  # noqa: BLE001 - timer must always reschedule
+                    _LOGGER.exception(
+                        "Unexpected error delivering Conversational Assistant "
+                        "reminder %s",
+                        reminder.reminder_id,
+                    )
 
         if changed:
             self._save_later()
@@ -19972,10 +19981,42 @@ class ConversationalAssistantManager(NoteManagerMixin, YouTubeManagerMixin):
         return selected, prefix + match.remainder
 
     def _webhook_ids_for_device_ids(self, device_ids: list[str]) -> list[str]:
-        """Resolve Home Assistant devices to mobile app webhook IDs."""
-        device_registry = dr.async_get(self.hass)
-        webhook_ids: list[str] = []
+        """Resolve Home Assistant devices to Mobile App webhook IDs."""
+        if not device_ids:
+            return []
 
+        # Mobile App is optional. Keep these imports lazy so this integration
+        # never makes Home Assistant startup depend on mobile_app internals.
+        # Prefer Home Assistant's public helper on current releases and retain
+        # a config-entry fallback for older compatible releases.
+        try:
+            from homeassistant.components.mobile_app.util import (
+                webhook_id_from_device_id,
+            )
+        except ImportError:
+            webhook_id_from_device_id = None
+
+        webhook_ids: list[str] = []
+        if webhook_id_from_device_id is not None:
+            for device_id in device_ids:
+                try:
+                    webhook_id = webhook_id_from_device_id(self.hass, device_id)
+                except (AttributeError, KeyError, TypeError):
+                    webhook_id = None
+                if webhook_id and webhook_id not in webhook_ids:
+                    webhook_ids.append(webhook_id)
+            return webhook_ids
+
+        try:
+            from homeassistant.components.mobile_app.const import ATTR_WEBHOOK_ID
+        except ImportError:
+            _LOGGER.debug(
+                "Mobile App constants are unavailable; no mobile notification "
+                "targets can be resolved"
+            )
+            return []
+
+        device_registry = dr.async_get(self.hass)
         for device_id in device_ids:
             device = device_registry.async_get(device_id)
             if device is None:
@@ -19994,12 +20035,21 @@ class ConversationalAssistantManager(NoteManagerMixin, YouTubeManagerMixin):
     def _notification_services_for_device_ids(
         self, device_ids: list[str]
     ) -> list[str]:
-        """Resolve mobile app device IDs to notify service names."""
+        """Resolve Mobile App device IDs to notify service names."""
+        try:
+            from homeassistant.components.mobile_app.util import get_notify_service
+        except ImportError:
+            _LOGGER.debug(
+                "Mobile App notification helpers are unavailable; skipping "
+                "mobile notification targets"
+            )
+            return []
+
         services: list[str] = []
         for webhook_id in self._webhook_ids_for_device_ids(device_ids):
             try:
                 service = get_notify_service(self.hass, webhook_id)
-            except (KeyError, TypeError):
+            except (AttributeError, KeyError, TypeError):
                 service = None
             if (
                 service
@@ -20204,11 +20254,23 @@ class ConversationalAssistantManager(NoteManagerMixin, YouTubeManagerMixin):
 
     async def _async_send_notification(self, reminder: Reminder) -> None:
         """Send reminder through every assigned notification channel."""
-        mobile_sent = await self._async_send_mobile_notification(reminder)
-        zalo_sent = await self._async_send_zalo_notification(reminder)
-        speaker_sent = await self._async_send_speaker_notification(reminder)
+        channel_results: list[bool] = []
+        channels = (
+            ("mobile", self._async_send_mobile_notification),
+            ("Zalo", self._async_send_zalo_notification),
+            ("speaker", self._async_send_speaker_notification),
+        )
+        for channel_name, sender in channels:
+            try:
+                channel_results.append(await sender(reminder))
+            except Exception:  # noqa: BLE001 - isolate optional output channels
+                channel_results.append(False)
+                _LOGGER.exception(
+                    "Failed to send Conversational Assistant reminder via %s",
+                    channel_name,
+                )
 
-        if mobile_sent or zalo_sent or speaker_sent:
+        if any(channel_results):
             return
 
         _LOGGER.warning(
