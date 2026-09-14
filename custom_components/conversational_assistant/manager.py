@@ -10782,7 +10782,13 @@ class ConversationalAssistantManager(NoteManagerMixin, YouTubeManagerMixin):
             "Vietnam impact as an alert. The first non-empty line MUST be exactly "
             "STORM_STATUS: NONE when there is no qualifying system, with no other "
             "content, or STORM_STATUS: ALERT when at least one qualifying system "
-            "exists. Never omit or alter this status line. "
+            "exists. Never omit or alter this status line. For STORM_STATUS: ALERT, "
+            "the body MUST explicitly name the storm/depression, identify Vietnam, "
+            "the East Sea/Bien Dong, Gulf of Tonkin/Vinh Bac Bo, or a clearly named "
+            "Vietnam region as the potentially affected area, and include a "
+            "Nguon:/Source: line naming the information source and its update time. "
+            "If those facts cannot be supported by the search results, do not claim "
+            "an alert. "
             f"Current Home Assistant local time: {reference_time.isoformat()}. "
             f"Answer in {language_name}. {format_rule}"
         )
@@ -10842,42 +10848,71 @@ class ConversationalAssistantManager(NoteManagerMixin, YouTubeManagerMixin):
         )
         vietnam_cues = (
             "viet nam",
+            "vietnam",
             "bien dong",
             "vung bien viet nam",
             "ven bien viet nam",
-            "vietnam",
+            "vinh bac bo",
+            "gulf of tonkin",
+            "bac bo",
+            "trung bo",
+            "nam bo",
+            "hoang sa",
+            "truong sa",
         )
         source_cues = (
             "nguon",
             "cap nhat",
             "thoi diem cap nhat",
             "trung tam du bao",
+            "trung tam du bao khi tuong thuy van quoc gia",
+            "cuc khi tuong thuy van",
             "nchmf",
             "jma",
             "jtwc",
+            "pagasa",
+            "hko",
+            "noaa",
             "source",
             "updated",
             "update time",
             "meteorological agency",
+            "national center for hydro meteorological forecasting",
         )
         negative_impact_cues = (
             "khong anh huong viet nam",
+            "khong anh huong den viet nam",
+            "khong anh huong truc tiep den viet nam",
             "khong co kha nang anh huong viet nam",
+            "khong co kha nang anh huong den viet nam",
+            "chua co kha nang anh huong den viet nam",
             "khong de doa viet nam",
             "no impact on vietnam",
+            "no direct impact on vietnam",
             "not expected to affect vietnam",
+            "not forecast to affect vietnam",
+            "not likely to affect vietnam",
             "unlikely to affect vietnam",
             "no threat to vietnam",
         )
         if any(cue in normalized_body for cue in negative_impact_cues):
             return None
-        if not (
-            any(cue in normalized_body for cue in storm_cues)
-            and any(cue in normalized_body for cue in vietnam_cues)
-            and any(cue in normalized_body for cue in source_cues)
-        ):
-            _LOGGER.warning(
-                "Rejected storm alert without storm, Vietnam-impact, and source evidence"
+        has_storm_evidence = any(cue in normalized_body for cue in storm_cues)
+        has_vietnam_evidence = any(cue in normalized_body for cue in vietnam_cues)
+        has_source_evidence = (
+            any(cue in normalized_body for cue in source_cues)
+            or re.search(r"https?://|www\.", body, flags=re.IGNORECASE) is not None
+        )
+        if not (has_storm_evidence and has_vietnam_evidence and has_source_evidence):
+            # An AI Search answer that does not satisfy the alert contract is an
+            # expected validation rejection, not a Home Assistant runtime warning.
+            # Keep the rejection visible to debug logging while allowing failover
+            # to the next configured search agent without alarming the user.
+            _LOGGER.debug(
+                "Rejected incomplete storm alert: storm=%s vietnam=%s source=%s",
+                has_storm_evidence,
+                has_vietnam_evidence,
+                has_source_evidence,
             )
             return None
         if zalo and not body.startswith(("🚨", "🌪️", "⚠️", "🌀")):
