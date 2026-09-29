@@ -9,7 +9,6 @@ from collections import deque
 from collections.abc import Callable
 from dataclasses import dataclass, field, replace
 from datetime import date, datetime, time, timedelta
-from functools import partial
 import logging
 from math import isfinite
 import os
@@ -212,6 +211,7 @@ from .const import (
     MEDIA_PLAYER_DOMAIN,
     PENDING_FOLLOWUP_SENTENCES,
     PENDING_CONFIRMATION_TIMEOUT_SECONDS,
+    QUERY_CONTEXT_TIMEOUT_SECONDS,
     SEARCH_SENTENCES,
     WEATHER_SENTENCES,
     YOUTUBE_SENTENCES,
@@ -1329,6 +1329,24 @@ class ActiveZaloChat:
     expires_at: datetime
 
 
+@dataclass(slots=True)
+class ActiveQueryContext:
+    """Short-lived RAM-only context for one natural conversation thread.
+
+    The legacy class name is retained to keep the surrounding manager stable,
+    but the payload is no longer limited to Search/Weather.  Any integration
+    feature can become the active topic and the most recent user/assistant turn
+    is kept so an elliptical follow-up can be resolved without persistent I/O.
+    """
+
+    feature: str
+    last_query: str
+    conversation_id: str | None
+    expires_at: datetime
+    source_keys: set[str] = field(default_factory=set)
+    last_response: str = ""
+
+
 def _add_month(value: datetime, target_day: int) -> datetime:
     """Add one month while preserving the requested day when possible."""
     year = value.year + (1 if value.month == 12 else 0)
@@ -1570,6 +1588,8 @@ class ConversationalAssistantManager(NoteManagerMixin, YouTubeManagerMixin):
         self._zalo_seen_message_id_set: set[str] = set()
         self._zalo_ha_conversation_ids: dict[str, str] = {}
         self._zalo_search_conversation_ids: dict[str, str] = {}
+        self._zalo_query_contexts: dict[str, ActiveQueryContext] = {}
+        self._voice_query_contexts: dict[str, ActiveQueryContext] = {}
         self._zalo_chat_sessions: dict[str, ActiveZaloChat] = {}
         self._zalo_chat_timeout_tasks: dict[str, asyncio.Task[Any]] = {}
         self._zalo_chat_locks: dict[str, asyncio.Lock] = {}
@@ -3123,6 +3143,8 @@ class ConversationalAssistantManager(NoteManagerMixin, YouTubeManagerMixin):
         """Return whether a Zalo chat may reply without the invocation keyword."""
         if self._zalo_owner_has_pending_confirmation(owner_key):
             return True
+        if self._zalo_query_context(owner_key) is not None:
+            return True
         if any(
             not task.done()
             for task in self._zalo_background_tasks_by_owner.get(
@@ -3768,9 +3790,36 @@ class ConversationalAssistantManager(NoteManagerMixin, YouTubeManagerMixin):
         handler: Callable[..., Any],
         label: str,
     ) -> None:
-        """Register one Assist trigger without making the entry all-or-nothing."""
+        """Register one Assist trigger and attach lightweight RAM context."""
+        context_feature = self._context_feature_from_trigger_label(label)
+
+        async def _contextual_handler(
+            user_input: ConversationInput, result: RecognizeResult
+        ) -> str | None:
+            response = await handler(user_input, result)
+            if context_feature and isinstance(response, str) and response.strip():
+                # A feature handler may already have installed a provider
+                # conversation ID. Preserve it while adding the assistant turn.
+                active = self._find_voice_query_context(user_input)
+                conversation_id = (
+                    active.conversation_id
+                    if active is not None and active.feature == context_feature
+                    else None
+                )
+                self._remember_voice_query_context(
+                    user_input,
+                    feature=context_feature,
+                    query=user_input.text,
+                    conversation_id=conversation_id,
+                    response=response,
+                )
+            return response
+
+        registered_handler = (
+            _contextual_handler if context_feature is not None else handler
+        )
         try:
-            unsub = agent_manager.register_trigger(sentences, handler)
+            unsub = agent_manager.register_trigger(sentences, registered_handler)
         except Exception:  # noqa: BLE001 - one grammar must not break startup
             _LOGGER.exception(
                 "Failed registering Conversational Assistant trigger group %s; "
@@ -3967,6 +4016,8 @@ class ConversationalAssistantManager(NoteManagerMixin, YouTubeManagerMixin):
                 )
         self._zalo_ha_conversation_ids.clear()
         self._zalo_search_conversation_ids.clear()
+        self._zalo_query_contexts.clear()
+        self._voice_query_contexts.clear()
         chat_timeout_tasks = tuple(self._zalo_chat_timeout_tasks.values())
         for task in chat_timeout_tasks:
             task.cancel()
@@ -4191,13 +4242,36 @@ class ConversationalAssistantManager(NoteManagerMixin, YouTubeManagerMixin):
             self.learned_commands.values(),
             key=lambda item: (item.phrase, item.command_id),
         ):
+            async def _learned_context_handler(
+                user_input: ConversationInput,
+                result: RecognizeResult,
+                *,
+                command_id: str = command.command_id,
+                context_feature: str = command.action,
+            ) -> str | None:
+                response = await self._async_execute_learned_command_from_voice(
+                    user_input, result, command_id=command_id
+                )
+                if isinstance(response, str) and response.strip():
+                    active = self._find_voice_query_context(user_input)
+                    conversation_id = (
+                        active.conversation_id
+                        if active is not None and active.feature == context_feature
+                        else None
+                    )
+                    self._remember_voice_query_context(
+                        user_input,
+                        feature=context_feature,
+                        query=user_input.text,
+                        conversation_id=conversation_id,
+                        response=response,
+                    )
+                return response
+
             try:
                 unsub = agent_manager.register_trigger(
                     hassil_sentences(command),
-                    partial(
-                        self._async_execute_learned_command_from_voice,
-                        command_id=command.command_id,
-                    ),
+                    _learned_context_handler,
                 )
             except Exception:  # noqa: BLE001 - keep other aliases active
                 _LOGGER.exception(
@@ -10151,6 +10225,8 @@ class ConversationalAssistantManager(NoteManagerMixin, YouTubeManagerMixin):
             is not None
         ):
             labels.append("quản lý sự kiện lịch")
+        if self._zalo_query_contexts.pop(owner_key, None) is not None:
+            labels.append("ngữ cảnh hội thoại")
 
         session = self._zalo_chat_sessions.pop(owner_key, None)
         if session is not None:
@@ -10199,6 +10275,8 @@ class ConversationalAssistantManager(NoteManagerMixin, YouTubeManagerMixin):
         labels: list[str] = []
         if self._clear_voice_youtube_pending_for_source(source_keys):
             labels.append("YouTube")
+        if self._clear_voice_query_context_for_source(source_keys):
+            labels.append("ngữ cảnh hội thoại")
 
         for pending_id, pending in list(self._pending_notes.items()):
             if source_keys & pending.source_keys:
@@ -12375,9 +12453,9 @@ class ConversationalAssistantManager(NoteManagerMixin, YouTubeManagerMixin):
         query = _search_request(context.text)
         reply, conversation_id = await self._async_ai_search(
             query or "",
-            conversation_id=self._zalo_search_conversation_ids.get(
-                context.owner_key
-            ),
+            # An explicit Search command starts a new topic. Natural follow-up
+            # turns reuse the returned provider conversation ID separately.
+            conversation_id=None,
             service_context=service_context,
             zalo=True,
             language_hint=_request_language(context.text),
@@ -12385,6 +12463,152 @@ class ConversationalAssistantManager(NoteManagerMixin, YouTubeManagerMixin):
         )
         if conversation_id:
             self._zalo_search_conversation_ids[context.owner_key] = conversation_id
+        else:
+            self._zalo_search_conversation_ids.pop(context.owner_key, None)
+        self._remember_zalo_query_context(
+            context.owner_key,
+            feature=ACTION_SEARCH,
+            query=query or context.text,
+            conversation_id=conversation_id,
+        )
+        return reply
+
+    async def _async_query_context_from_zalo(
+        self,
+        context: ZaloWebhookContext,
+        active: ActiveQueryContext,
+        service_context: Context | None,
+    ) -> str:
+        """Continue any short-lived natural Zalo conversation topic."""
+        current = context.text.strip()
+        language = _request_language(current)
+
+        if active.feature == ACTION_WEATHER:
+            query = self._weather_followup_query(active.last_query, current)
+            resolved_query, error, plan = await self._async_resolve_weather_query(
+                query,
+                service_context,
+                zalo=True,
+                language=language,
+            )
+            if error is not None:
+                self._remember_zalo_query_context(
+                    context.owner_key,
+                    feature=ACTION_WEATHER,
+                    query=query,
+                    conversation_id=active.conversation_id,
+                )
+                return error
+            if plan is not None:
+                native_reply = await self._async_native_weather_response(
+                    query,
+                    plan,
+                    zalo=True,
+                    language=language,
+                )
+                if native_reply is not None:
+                    self._remember_zalo_query_context(
+                        context.owner_key,
+                        feature=ACTION_WEATHER,
+                        query=query,
+                        conversation_id=None,
+                    )
+                    return native_reply
+            reply, conversation_id = await self._async_ai_search(
+                resolved_query or query,
+                conversation_id=active.conversation_id,
+                service_context=service_context,
+                zalo=True,
+                language_hint=language,
+                zalo_context=context,
+                feature="weather",
+            )
+            self._remember_zalo_query_context(
+                context.owner_key,
+                feature=ACTION_WEATHER,
+                query=query,
+                conversation_id=conversation_id or active.conversation_id,
+            )
+            return reply
+
+        if active.feature == ACTION_SEARCH:
+            query = current
+            if active.conversation_id is None and active.last_query:
+                query = self._contextual_followup_prompt(
+                    active, current, language
+                )
+            reply, conversation_id = await self._async_ai_search(
+                query,
+                conversation_id=active.conversation_id,
+                service_context=service_context,
+                zalo=True,
+                language_hint=language,
+                zalo_context=context,
+            )
+            next_conversation_id = conversation_id or active.conversation_id
+            if next_conversation_id:
+                self._zalo_search_conversation_ids[
+                    context.owner_key
+                ] = next_conversation_id
+            self._remember_zalo_query_context(
+                context.owner_key,
+                feature=ACTION_SEARCH,
+                query=current,
+                conversation_id=next_conversation_id,
+            )
+            return reply
+
+        # Calendar follow-ups such as “còn thứ sáu?” remain local and query
+        # calendar entities directly when a time reference can be resolved.
+        if active.feature == ACTION_CALENDAR and calendar_has_time_reference(current):
+            calendar_context = replace(context, text=f"lịch {current}")
+            reply = await self._async_calendar_from_zalo(
+                calendar_context, service_context
+            )
+            self._remember_zalo_query_context(
+                context.owner_key,
+                feature=ACTION_CALENDAR,
+                query=current,
+                conversation_id=active.conversation_id,
+                response=reply,
+            )
+            return reply
+
+        # Home Assistant/device follow-ups are local-first. Include the previous
+        # request only for an elliptical device value/action so exact target
+        # matching can reuse the named entity without guessing one.
+        if active.feature in {ACTION_HOME_ASSISTANT, ACTION_CALENDAR}:
+            ha_context = context
+            if (
+                active.feature == ACTION_HOME_ASSISTANT
+                and device_power_request_hint(current)
+            ):
+                ha_context = replace(
+                    context,
+                    text=self._device_context_followup_text(
+                        active.last_query, current
+                    ),
+                )
+            return await self._async_home_assistant_conversation_from_zalo(
+                ha_context, service_context
+            )
+
+        query = self._contextual_followup_prompt(active, current, language)
+        reply, conversation_id = await self._async_ai_search(
+            query,
+            conversation_id=active.conversation_id,
+            service_context=service_context,
+            zalo=True,
+            language_hint=language,
+            zalo_context=context,
+            feature=ACTION_CHAT,
+        )
+        self._remember_zalo_query_context(
+            context.owner_key,
+            feature=active.feature,
+            query=current,
+            conversation_id=conversation_id or active.conversation_id,
+        )
         return reply
 
     async def _async_chat_from_zalo(
@@ -12451,6 +12675,12 @@ class ConversationalAssistantManager(NoteManagerMixin, YouTubeManagerMixin):
                 zalo=True,
                 language=language,
             )
+            self._remember_zalo_query_context(
+                context.owner_key,
+                feature=ACTION_WEATHER,
+                query=query,
+                conversation_id=None,
+            )
             return reply
         resolved_query, error, plan = await self._async_resolve_weather_query(
             query,
@@ -12459,6 +12689,12 @@ class ConversationalAssistantManager(NoteManagerMixin, YouTubeManagerMixin):
             language=language,
         )
         if error is not None:
+            self._remember_zalo_query_context(
+                context.owner_key,
+                feature=ACTION_WEATHER,
+                query=query,
+                conversation_id=None,
+            )
             return error
         if plan is not None:
             native_reply = await self._async_native_weather_response(
@@ -12468,8 +12704,14 @@ class ConversationalAssistantManager(NoteManagerMixin, YouTubeManagerMixin):
                 language=language,
             )
             if native_reply is not None:
+                self._remember_zalo_query_context(
+                    context.owner_key,
+                    feature=ACTION_WEATHER,
+                    query=query,
+                    conversation_id=None,
+                )
                 return native_reply
-        reply, _conversation_id = await self._async_ai_search(
+        reply, conversation_id = await self._async_ai_search(
             resolved_query or query,
             conversation_id=None,
             service_context=service_context,
@@ -12477,6 +12719,12 @@ class ConversationalAssistantManager(NoteManagerMixin, YouTubeManagerMixin):
             language_hint=language,
             zalo_context=context,
             feature="weather",
+        )
+        self._remember_zalo_query_context(
+            context.owner_key,
+            feature=ACTION_WEATHER,
+            query=query,
+            conversation_id=conversation_id,
         )
         return reply
 
@@ -17815,6 +18063,109 @@ class ConversationalAssistantManager(NoteManagerMixin, YouTubeManagerMixin):
         context: ZaloWebhookContext,
         service_context: Context | None = None,
     ) -> str | ZaloDirectResponse | None:
+        """Route one Zalo turn and maintain general RAM-only context."""
+        prior = self._zalo_query_context(context.owner_key)
+        explicit_feature = self._context_feature_from_zalo_text(context)
+        reply = await self._async_process_zalo_message_inner(
+            context, service_context
+        )
+        active_after = self._zalo_query_context(context.owner_key)
+
+        if isinstance(reply, ZaloDirectResponse):
+            feature = explicit_feature or (
+                prior.feature if prior is not None else None
+            )
+            if feature is not None:
+                response = f"Đã hoàn tất {reply.response_type}."
+                if (
+                    active_after is not None
+                    and active_after is not prior
+                    and active_after.feature == feature
+                ):
+                    # The feature handler already saved a richer contextual
+                    # query. Keep it and only attach the assistant-side result.
+                    active_after.last_response = response[:1600]
+                    active_after.expires_at = dt_util.now() + timedelta(
+                        seconds=QUERY_CONTEXT_TIMEOUT_SECONDS
+                    )
+                    self._schedule_pending_expiry()
+                else:
+                    self._remember_zalo_query_context(
+                        context.owner_key,
+                        feature=feature,
+                        query=context.text,
+                        conversation_id=(
+                            prior.conversation_id
+                            if prior is not None and prior.feature == feature
+                            else None
+                        ),
+                        response=response,
+                    )
+            return reply
+
+        if not isinstance(reply, str) or not reply.strip():
+            return reply
+
+        feature = explicit_feature
+        if feature is None and prior is not None:
+            feature = prior.feature
+        if feature is None:
+            # A normal Zalo user message may fall through to Home Assistant
+            # Conversation without matching an explicit keyword. If it produced
+            # a real reply, keep that as the active topic as well.
+            if (
+                self.zalo_home_assistant_enabled
+                and context.thread_type == ZALO_TYPE_USER
+                and not self.zalo_invocation_keyword_enabled
+            ):
+                feature = ACTION_HOME_ASSISTANT
+
+        if feature is not None and feature not in {
+            "commands",
+            "help",
+            "command_learn",
+            "command_list",
+            "command_delete",
+        }:
+            active_after = self._zalo_query_context(context.owner_key)
+            if (
+                active_after is not None
+                and active_after is not prior
+                and active_after.feature == feature
+            ):
+                # Do not overwrite feature-enriched state such as a weather
+                # query carrying the previous location. The inner handler owns
+                # the user-side context; this wrapper only records the reply.
+                active_after.last_response = reply.strip()[:1600]
+                active_after.expires_at = dt_util.now() + timedelta(
+                    seconds=QUERY_CONTEXT_TIMEOUT_SECONDS
+                )
+                self._schedule_pending_expiry()
+            else:
+                conversation_id = (
+                    active_after.conversation_id
+                    if active_after is not None
+                    and active_after.feature == feature
+                    else (
+                        prior.conversation_id
+                        if prior is not None and prior.feature == feature
+                        else None
+                    )
+                )
+                self._remember_zalo_query_context(
+                    context.owner_key,
+                    feature=feature,
+                    query=context.text,
+                    conversation_id=conversation_id,
+                    response=reply,
+                )
+        return reply
+
+    async def _async_process_zalo_message_inner(
+        self,
+        context: ZaloWebhookContext,
+        service_context: Context | None = None,
+    ) -> str | ZaloDirectResponse | None:
         """Route one inbound Zalo text message to reminder actions."""
         if self._is_global_cancel_text(context.text):
             labels = self._cancel_zalo_active_flow(context.owner_key)
@@ -18065,6 +18416,28 @@ class ConversationalAssistantManager(NoteManagerMixin, YouTubeManagerMixin):
                 context, pending_deletion
             )
 
+        active_query = self._zalo_query_context(context.owner_key)
+        if (
+            command is None
+            and active_query is not None
+            and explicit_ha_kind is not None
+            and self._ha_kind_matches_context_feature(
+                explicit_ha_kind, active_query.feature
+            )
+            and self._is_query_context_followup(
+                context.text, active_query.feature
+            )
+        ):
+            return await self._async_query_context_from_zalo(
+                context, active_query, service_context
+            )
+
+        # A clearly new keyword/Home Assistant request starts a new top-level
+        # action and therefore invalidates the older natural context. The new
+        # handler installs its own topic again after it produces a response.
+        if command is not None or explicit_ha_kind is not None:
+            self._zalo_query_contexts.pop(context.owner_key, None)
+
         if command == "command_learn":
             self._clear_zalo_pending_for_owner(context.owner_key)
             return self._learn_command_text(context.text)
@@ -18157,6 +18530,18 @@ class ConversationalAssistantManager(NoteManagerMixin, YouTubeManagerMixin):
         if explicit_ha_kind is not None:
             return await self._async_process_home_assistant_from_zalo(
                 context, explicit_ha_kind, service_context
+            )
+
+        active_query = self._zalo_query_context(context.owner_key)
+        if (
+            command is None
+            and active_query is not None
+            and self._is_query_context_followup(
+                context.text, active_query.feature
+            )
+        ):
+            return await self._async_query_context_from_zalo(
+                context, active_query, service_context
             )
 
         if context.owner_key in self._zalo_chat_sessions:
@@ -18305,6 +18690,22 @@ class ConversationalAssistantManager(NoteManagerMixin, YouTubeManagerMixin):
         if command == ACTION_WEATHER:
             query = weather_search_request(effective_text)
             return ACTION_WEATHER if query and query.strip() else None
+
+        active_query = self._zalo_query_context(context.owner_key)
+        if (
+            command is None
+            and active_query is not None
+            and self._is_query_context_followup(
+                effective_text, active_query.feature
+            )
+        ):
+            if active_query.feature in {ACTION_SEARCH, ACTION_WEATHER}:
+                return active_query.feature
+            if active_query.feature in {ACTION_HOME_ASSISTANT, ACTION_CALENDAR}:
+                return None
+            # Other context continuations use the conversational AI fallback;
+            # run them as chat-class background work so the webhook stays fast.
+            return ACTION_CHAT
         if command == ACTION_IMAGE_GENERATION:
             instructions = _image_generation_request(effective_text)
             return (
@@ -19587,23 +19988,86 @@ class ConversationalAssistantManager(NoteManagerMixin, YouTubeManagerMixin):
                 await asyncio.sleep(SPEAKER_BUSY_RETRY_DELAY_SECONDS)
 
             try:
+                service_data = self._tts_speak_service_data(
+                    speaker_entity_id, message, tts_entity_id
+                )
                 await self._async_call_service(
                     TTS_DOMAIN,
                     TTS_SERVICE_SPEAK,
-                    self._tts_speak_service_data(speaker_entity_id, message),
+                    service_data,
                     blocking=True,
                     target={"entity_id": tts_entity_id},
                     timeout_seconds=TTS_SERVICE_TIMEOUT_SECONDS,
                 )
             except asyncio.CancelledError:
                 raise
-            except Exception:  # noqa: BLE001 - report the exact failed speaker
+            except Exception as err:  # noqa: BLE001 - retry engine defaults once
+                # A stale/unsupported language or voice is a common source of
+                # provider-side invalid-request errors. Retry only when the
+                # failure does not already identify a Wyoming transport/stream
+                # mismatch or an unreachable Cast URL, where a second synthesis
+                # would only add latency and produce the same failure.
+                error_text = " ".join(str(err).split())
+                non_retryable = any(
+                    marker in error_text.casefold()
+                    for marker in (
+                        "malformed synthesis stream start",
+                        "connection reset by peer",
+                        "unexpected disconnection",
+                        "failed to cast media",
+                    )
+                )
+                if (
+                    not non_retryable
+                    and ("language" in service_data or "options" in service_data)
+                ):
+                    _LOGGER.warning(
+                        "TTS request on %s via %s failed with configured "
+                        "language/voice; retrying once with engine defaults: %s",
+                        speaker_entity_id,
+                        tts_entity_id,
+                        err,
+                    )
+                    try:
+                        await self._async_call_service(
+                            TTS_DOMAIN,
+                            TTS_SERVICE_SPEAK,
+                            {
+                                "media_player_entity_id": speaker_entity_id,
+                                "message": message,
+                                "cache": True,
+                            },
+                            blocking=True,
+                            target={"entity_id": tts_entity_id},
+                            timeout_seconds=TTS_SERVICE_TIMEOUT_SECONDS,
+                        )
+                    except asyncio.CancelledError:
+                        raise
+                    except Exception as retry_err:  # noqa: BLE001
+                        _LOGGER.exception(
+                            "Failed direct TTS announcement on %s using %s "
+                            "even with engine defaults",
+                            speaker_entity_id,
+                            tts_entity_id,
+                        )
+                        detail = " ".join(str(retry_err).split())[:180]
+                        return (
+                            target.display_name,
+                            "loa hoặc dịch vụ TTS phát sinh lỗi"
+                            + (f": {detail}" if detail else ""),
+                        )
+                    return target.display_name, None
                 _LOGGER.exception(
                     "Failed direct TTS announcement on %s using %s",
                     speaker_entity_id,
                     tts_entity_id,
                 )
-                return target.display_name, "loa hoặc dịch vụ TTS phát sinh lỗi"
+                detail = error_text[:180]
+                return (
+                    target.display_name,
+                    "loa hoặc dịch vụ TTS phát sinh lỗi"
+                    + (f": {detail}" if detail else ""),
+                )
         return target.display_name, None
 
     async def _async_deliver_speaker_announcement(
@@ -19880,7 +20344,10 @@ class ConversationalAssistantManager(NoteManagerMixin, YouTubeManagerMixin):
         return self._tts_entity_id_cache
 
     def _tts_speak_service_data(
-        self, speaker_entity_id: str, message: str
+        self,
+        speaker_entity_id: str,
+        message: str,
+        tts_entity_id: str | None = None,
     ) -> dict[str, Any]:
         """Build tts.speak data while preserving the default blank behavior."""
         data: dict[str, Any] = {
@@ -19894,6 +20361,35 @@ class ConversationalAssistantManager(NoteManagerMixin, YouTubeManagerMixin):
         voice = str(
             self._option(CONF_TTS_VOICE, DEFAULT_TTS_VOICE) or ""
         ).strip()
+        state = self.hass.states.get(tts_entity_id) if tts_entity_id else None
+        if state is not None:
+            supported_languages = state.attributes.get("supported_languages")
+            if (
+                language
+                and isinstance(supported_languages, (list, tuple, set))
+                and supported_languages
+                and language not in supported_languages
+            ):
+                _LOGGER.warning(
+                    "Configured TTS language %s is not advertised by %s; "
+                    "using the engine default",
+                    language,
+                    tts_entity_id,
+                )
+                language = ""
+            supported_options = state.attributes.get("supported_options")
+            if (
+                voice
+                and isinstance(supported_options, (list, tuple, set))
+                and supported_options
+                and "voice" not in supported_options
+            ):
+                _LOGGER.warning(
+                    "Configured TTS voice is not supported by %s; using the "
+                    "engine default voice",
+                    tts_entity_id,
+                )
+                voice = ""
         if language:
             data["language"] = language
         if voice:
@@ -20495,6 +20991,447 @@ class ConversationalAssistantManager(NoteManagerMixin, YouTubeManagerMixin):
             keys.add(f"context:{context_id}")
         return keys
 
+    @staticmethod
+    def _conversation_context_source_key(
+        user_input: ConversationInput,
+    ) -> str | None:
+        """Return a stable Voice identity for one independent context thread.
+
+        Satellite/device identifiers are preferred to the HA conversation ID.
+        Some Assist pipelines create or replace the conversation ID after the
+        first turn; using the physical source first keeps a natural follow-up
+        attached to the same speaker without merging different speakers owned
+        by the same Home Assistant user. UI/chat callers normally have no
+        satellite/device and therefore continue to use conversation_id.
+        """
+        if user_input.satellite_id:
+            return f"satellite:{user_input.satellite_id}"
+        if user_input.device_id:
+            return f"device:{user_input.device_id}"
+        if user_input.conversation_id:
+            return f"conversation:{user_input.conversation_id}"
+        if user_input.context.user_id:
+            return f"user:{user_input.context.user_id}"
+        context_id = str(getattr(user_input.context, "id", "") or "").strip()
+        if context_id:
+            return f"context:{context_id}"
+        return None
+
+    def _purge_expired_query_contexts(self) -> None:
+        """Drop expired natural follow-up contexts without any storage I/O."""
+        now = dt_util.now()
+        for context_id, active in list(self._voice_query_contexts.items()):
+            if active.expires_at <= now:
+                del self._voice_query_contexts[context_id]
+        for owner_key, active in list(self._zalo_query_contexts.items()):
+            if active.expires_at <= now:
+                del self._zalo_query_contexts[owner_key]
+
+    def _remember_voice_query_context(
+        self,
+        user_input: ConversationInput,
+        *,
+        feature: str,
+        query: str,
+        conversation_id: str | None,
+        response: str = "",
+    ) -> None:
+        """Remember one short-lived general conversation topic for Voice Assist."""
+        source_key = self._conversation_context_source_key(user_input)
+        feature = str(feature or "").strip()
+        if source_key is None or not feature:
+            return
+        self._purge_expired_query_contexts()
+        for context_id, active in list(self._voice_query_contexts.items()):
+            if source_key in active.source_keys:
+                del self._voice_query_contexts[context_id]
+        now = dt_util.now()
+        self._voice_query_contexts[uuid.uuid4().hex] = ActiveQueryContext(
+            feature=feature,
+            last_query=str(query or "").strip(),
+            conversation_id=conversation_id,
+            expires_at=now + timedelta(seconds=QUERY_CONTEXT_TIMEOUT_SECONDS),
+            source_keys={source_key},
+            last_response=str(response or "").strip()[:1600],
+        )
+        self._sync_pending_followup_trigger()
+
+    def _find_voice_query_context(
+        self, user_input: ConversationInput
+    ) -> ActiveQueryContext | None:
+        """Return the newest live conversation context matching this Voice source."""
+        self._purge_expired_query_contexts()
+        source_key = self._conversation_context_source_key(user_input)
+        if source_key is None:
+            return None
+        matching = [
+            active
+            for active in self._voice_query_contexts.values()
+            if source_key in active.source_keys
+        ]
+        if not matching:
+            return None
+        return max(matching, key=lambda item: item.expires_at)
+
+    def _clear_voice_query_context_for_source(
+        self, source_keys: set[str]
+    ) -> bool:
+        """Remove natural conversation context for one Voice source."""
+        removed = False
+        for context_id, active in list(self._voice_query_contexts.items()):
+            if source_keys & active.source_keys:
+                del self._voice_query_contexts[context_id]
+                removed = True
+        return removed
+
+    def _remember_zalo_query_context(
+        self,
+        owner_key: str,
+        *,
+        feature: str,
+        query: str,
+        conversation_id: str | None,
+        response: str = "",
+    ) -> None:
+        """Remember one short-lived general conversation topic for a Zalo owner."""
+        feature = str(feature or "").strip()
+        if not feature:
+            return
+        self._zalo_query_contexts[owner_key] = ActiveQueryContext(
+            feature=feature,
+            last_query=str(query or "").strip(),
+            conversation_id=conversation_id,
+            expires_at=dt_util.now()
+            + timedelta(seconds=QUERY_CONTEXT_TIMEOUT_SECONDS),
+            last_response=str(response or "").strip()[:1600],
+        )
+        self._schedule_pending_expiry()
+
+    def _zalo_query_context(
+        self, owner_key: str
+    ) -> ActiveQueryContext | None:
+        """Return one unexpired natural conversation context for Zalo."""
+        active = self._zalo_query_contexts.get(owner_key)
+        if active is None:
+            return None
+        if active.expires_at <= dt_util.now():
+            self._zalo_query_contexts.pop(owner_key, None)
+            return None
+        return active
+
+    @staticmethod
+    def _context_feature_from_trigger_label(label: str) -> str | None:
+        """Map one Voice trigger group to the general conversation feature."""
+        return {
+            "reminder_create": ACTION_REMINDER_CREATE,
+            "reminder_list": ACTION_REMINDER_LIST,
+            "reminder_delete": ACTION_REMINDER_DELETE,
+            "camera_analysis": ACTION_CAMERA_ANALYSIS,
+            "camera_video": ACTION_CAMERA_VIDEO,
+            "camera_capture": ACTION_CAMERA,
+            "camera_schedule_list": "camera_schedule_list",
+            "camera_schedule_delete": "camera_schedule_delete",
+            "weather": ACTION_WEATHER,
+            "youtube": ACTION_YOUTUBE,
+            "search": ACTION_SEARCH,
+            "lunar": ACTION_LUNAR_DATE_CONVERT,
+            "zalo_send": ACTION_ZALO_SEND,
+            "speaker": ACTION_SPEAKER_ANNOUNCE,
+            "device": ACTION_HOME_ASSISTANT,
+            "note_create": ACTION_NOTE_CREATE,
+            "note_list": ACTION_NOTE_LIST,
+            "note_edit": ACTION_NOTE_EDIT,
+            "note_delete": ACTION_NOTE_DELETE,
+            "note_view": ACTION_NOTE_VIEW,
+        }.get(label)
+
+    def _context_feature_from_zalo_text(
+        self, context: ZaloWebhookContext
+    ) -> str | None:
+        """Resolve a new explicit Zalo turn to one general context feature."""
+        command = self._zalo_command_kind(context.text)
+        if command is None:
+            learned_match = match_learned_command(
+                context.text, list(self.learned_commands.values())
+            )
+            if learned_match is not None:
+                command = learned_match.command.action
+        if command is not None:
+            return command
+
+        ha_kind = (
+            explicit_home_assistant_request_kind(context.text)
+            if self.zalo_home_assistant_enabled
+            else None
+        )
+        if ha_kind == "weather":
+            return ACTION_WEATHER
+        if ha_kind == "calendar":
+            return ACTION_CALENDAR
+        if ha_kind == "camera_analysis":
+            return ACTION_CAMERA_ANALYSIS
+        if ha_kind == "camera_video":
+            return ACTION_CAMERA_VIDEO
+        if ha_kind == "camera":
+            return ACTION_CAMERA
+        if ha_kind == "conversation":
+            return ACTION_HOME_ASSISTANT
+        if context.owner_key in self._zalo_chat_sessions:
+            return ACTION_CHAT
+        return None
+
+    def _device_context_followup_text(
+        self, previous: str, current: str
+    ) -> str:
+        """Attach only locally resolved previous device names to a follow-up."""
+        current_text = str(current or "").strip()
+        if not current_text or not str(previous or "").strip():
+            return current_text
+        try:
+            interpretation = deterministic_interpretation(
+                previous, self._device_power_targets(), dt_util.now()
+            )
+        except Exception:  # noqa: BLE001 - context must never break routing
+            return current_text
+        names = [
+            target.display_name
+            for target in interpretation.targets
+            if str(target.display_name or "").strip()
+        ]
+        if not names:
+            return current_text
+        return f"{current_text} {' và '.join(names)}"
+
+    @staticmethod
+    def _ha_kind_matches_context_feature(
+        ha_kind: str | None, feature: str
+    ) -> bool:
+        """Return whether an explicit HA intent still belongs to this topic."""
+        if ha_kind is None:
+            return True
+        return {
+            "weather": feature == ACTION_WEATHER,
+            "calendar": feature == ACTION_CALENDAR,
+            "camera": feature == ACTION_CAMERA,
+            "camera_analysis": feature == ACTION_CAMERA_ANALYSIS,
+            "camera_video": feature == ACTION_CAMERA_VIDEO,
+            "conversation": feature == ACTION_HOME_ASSISTANT,
+        }.get(ha_kind, False)
+
+    @staticmethod
+    def _contextual_followup_prompt(
+        active: ActiveQueryContext, current: str, language: str
+    ) -> str:
+        """Build a compact fallback prompt from only the immediately prior turn."""
+        previous = active.last_query.strip()
+        answer = active.last_response.strip()
+        current = str(current or "").strip()
+        if language == "en":
+            parts = [
+                "Continue the same conversation topic. Answer only the new follow-up.",
+                f"Previous user turn: {previous}",
+            ]
+            if answer:
+                parts.append(f"Previous assistant answer: {answer}")
+            parts.append(f"Current follow-up: {current}")
+            return "\n".join(parts)
+        parts = [
+            "Tiếp tục đúng chủ đề hội thoại ngay trước đó. Chỉ trả lời câu hỏi mới, ngắn gọn và đúng trọng tâm.",
+            f"Lượt người dùng trước: {previous}",
+        ]
+        if answer:
+            parts.append(f"Phản hồi trước của trợ lý: {answer}")
+        parts.append(f"Câu hỏi tiếp theo: {current}")
+        return "\n".join(parts)
+
+    @staticmethod
+    def _is_query_context_followup(text: str, feature: str) -> bool:
+        """Detect a short natural continuation for any active feature locally."""
+        normalized = normalize_text(text)
+        if not normalized:
+            return False
+
+        continuation_prefixes = (
+            "the ",
+            "the con ",
+            "the thi ",
+            "con ",
+            "con neu ",
+            "vay ",
+            "vay con ",
+            "vay thi ",
+            "neu ",
+            "roi ",
+            "roi sao",
+            "no ",
+            "cai do ",
+            "cai nay ",
+            "cai kia ",
+            "viec do ",
+            "truong hop do ",
+            "tiep ",
+            "tiep theo ",
+            "khac ",
+            "doi thanh ",
+            "chuyen thanh ",
+            "tang len ",
+            "giam xuong ",
+            "dat thanh ",
+            "what about ",
+            "how about ",
+            "and what about ",
+            "then ",
+            "what if ",
+            "that ",
+            "it ",
+            "another ",
+            "change it ",
+            "set it ",
+        )
+        new_topic_prefixes = (
+            "the gioi ",
+            "the he ",
+            "the ky ",
+        )
+        if (
+            normalized.startswith(continuation_prefixes)
+            and not normalized.startswith(new_topic_prefixes)
+        ):
+            return True
+
+        exact_followups = {
+            "tai sao",
+            "vi sao",
+            "sao vay",
+            "nhu the nao",
+            "bao nhieu",
+            "khi nao",
+            "o dau",
+            "ai vay",
+            "con gi nua",
+            "con nua khong",
+            "them nua",
+            "khac di",
+            "bai khac di",
+            "video khac di",
+            "phat lai",
+            "lam lai",
+            "why",
+            "how",
+            "when",
+            "where",
+            "who",
+            "anything else",
+            "another one",
+            "do it again",
+        }
+        if normalized in exact_followups:
+            return True
+
+        weather_detail_cues = (
+            "nhiet do",
+            "do am",
+            "co mua",
+            "kha nang mua",
+            "xac suat mua",
+            "luong mua",
+            "toc do gio",
+            "huong gio",
+            "gio giat",
+            "chi so uv",
+            "uv index",
+            "ap suat",
+            "tam nhin",
+            "may nhieu",
+            "nong khong",
+            "lanh khong",
+            "bao nhieu do",
+        )
+        if feature == ACTION_WEATHER:
+            if any(cue in normalized for cue in weather_detail_cues):
+                return True
+            plan = parse_weather_query_plan(text, dt_util.now())
+            if plan.explicit_period and len(normalized.split()) <= 12:
+                return True
+
+        if feature == ACTION_CALENDAR and calendar_has_time_reference(text):
+            return len(normalized.split()) <= 14
+
+        if feature in {ACTION_HOME_ASSISTANT, "device"}:
+            device_continuation_cues = (
+                "do",
+                "phan tram",
+                "%",
+                "muc ",
+                "che do ",
+                "toc do ",
+                "nhiet do ",
+                "bat lai",
+                "tat no",
+                "mo lai",
+                "dong lai",
+            )
+            if len(normalized.split()) <= 10 and any(
+                cue in normalized for cue in device_continuation_cues
+            ):
+                return True
+
+        referential_cues = (
+            " do",
+            " nay",
+            " kia",
+            " truoc",
+            " sau",
+            " nua",
+            " lai",
+            " tiep",
+            " khac",
+            "that",
+            "this",
+            "those",
+            "again",
+            "next",
+            "else",
+        )
+        if len(normalized.split()) <= 12 and any(
+            cue in f" {normalized} " for cue in referential_cues
+        ):
+            return True
+
+        question_prefixes = (
+            "tai sao ",
+            "vi sao ",
+            "sao ",
+            "nhu the nao ",
+            "bao nhieu ",
+            "khi nao ",
+            "o dau ",
+            "ai ",
+            "co the ",
+            "co con ",
+            "why ",
+            "how ",
+            "when ",
+            "where ",
+            "who ",
+            "can it ",
+            "can you ",
+        )
+        return len(normalized.split()) <= 12 and normalized.startswith(
+            question_prefixes
+        )
+
+    @staticmethod
+    def _weather_followup_query(previous: str, current: str) -> str:
+        """Carry an explicit prior location into an elliptical weather turn."""
+        current_text = str(current or "").strip()
+        if weather_query_location_hint(current_text) is not None:
+            return current_text
+        previous_location = weather_query_location_hint(previous)
+        if previous_location:
+            return f"{current_text} tại {previous_location}".strip()
+        return current_text
+
     @callback
     def _schedule_pending_expiry(self) -> None:
         """Schedule cleanup for the earliest pending confirmation."""
@@ -20523,6 +21460,8 @@ class ConversationalAssistantManager(NoteManagerMixin, YouTubeManagerMixin):
             *self._zalo_pending_device_powers.values(),
             *self._zalo_pending_calendar_events.values(),
             *self._zalo_pending_calendar_managements.values(),
+            *self._voice_query_contexts.values(),
+            *self._zalo_query_contexts.values(),
         ]
         if not pending_items:
             return
@@ -20536,7 +21475,8 @@ class ConversationalAssistantManager(NoteManagerMixin, YouTubeManagerMixin):
 
     @callback
     def _sync_pending_followup_trigger(self) -> None:
-        """Enable a catch-all trigger while a confirmation is pending."""
+        """Enable catch-all while a confirmation or query context is active."""
+        self._purge_expired_query_contexts()
         has_pending = bool(
             self._pending
             or self._pending_deletions
@@ -20547,6 +21487,7 @@ class ConversationalAssistantManager(NoteManagerMixin, YouTubeManagerMixin):
             or self._pending_voice_speaker_announcements
             or self._pending_voice_youtube
             or self._has_pending_notes()
+            or self._voice_query_contexts
         )
         if has_pending and self._unsub_pending_trigger is None:
             self._unsub_pending_trigger = get_agent_manager(
@@ -20571,6 +21512,7 @@ class ConversationalAssistantManager(NoteManagerMixin, YouTubeManagerMixin):
         """Remove expired creation, deletion, camera, and note requests."""
         self._purge_expired_note_pending()
         self._purge_expired_youtube_pending()
+        self._purge_expired_query_contexts()
         now = dt_util.now()
         for pending_id, pending in list(self._pending.items()):
             if pending.expires_at <= now:
@@ -20916,12 +21858,25 @@ class ConversationalAssistantManager(NoteManagerMixin, YouTubeManagerMixin):
         *,
         ai_generated: bool = False,
     ) -> str:
-        """Return complete, TTS-safe speech without an extra AI rewrite."""
-        del user_input, ai_generated
+        """Return TTS-safe speech and refresh an existing natural context."""
+        del ai_generated
         response = str(text or "").strip()
         if not response:
             return response
-        return _assist_speech_text(self._address_response(response))
+        spoken = _assist_speech_text(self._address_response(response))
+        active = self._find_voice_query_context(user_input)
+        if active is not None:
+            # Feature handlers own last_query because they may have enriched it
+            # with local context (for example a carried weather location or an
+            # exact device name). Only refresh the assistant turn here; blindly
+            # replacing last_query with the raw utterance would discard that
+            # useful local context after every response.
+            active.last_response = spoken[:1600]
+            active.expires_at = dt_util.now() + timedelta(
+                seconds=QUERY_CONTEXT_TIMEOUT_SECONDS
+            )
+            self._schedule_pending_expiry()
+        return spoken
 
     @staticmethod
     def _reminder_from_targets(
@@ -21338,12 +22293,18 @@ class ConversationalAssistantManager(NoteManagerMixin, YouTubeManagerMixin):
         parsed_query = _search_request(user_input.text)
         if parsed_query is not None:
             query = parsed_query
-        reply, _conversation_id = await self._async_ai_search(
+        reply, conversation_id = await self._async_ai_search(
             query,
             conversation_id=user_input.conversation_id,
             service_context=user_input.context,
             zalo=False,
             language_hint=_request_language(user_input.text),
+        )
+        self._remember_voice_query_context(
+            user_input,
+            feature=ACTION_SEARCH,
+            query=query,
+            conversation_id=conversation_id,
         )
         return await self._async_voice_response(
             user_input, reply, ai_generated=True
@@ -21367,6 +22328,12 @@ class ConversationalAssistantManager(NoteManagerMixin, YouTubeManagerMixin):
                 zalo=False,
                 language=language,
             )
+            self._remember_voice_query_context(
+                user_input,
+                feature=ACTION_WEATHER,
+                query=query,
+                conversation_id=None,
+            )
             return await self._async_voice_response(
                 user_input, reply, ai_generated=True
             )
@@ -21377,6 +22344,12 @@ class ConversationalAssistantManager(NoteManagerMixin, YouTubeManagerMixin):
             language=language,
         )
         if error is not None:
+            self._remember_voice_query_context(
+                user_input,
+                feature=ACTION_WEATHER,
+                query=query,
+                conversation_id=None,
+            )
             return await self._async_voice_response(user_input, error)
         if plan is not None:
             native_reply = await self._async_native_weather_response(
@@ -21386,16 +22359,156 @@ class ConversationalAssistantManager(NoteManagerMixin, YouTubeManagerMixin):
                 language=language,
             )
             if native_reply is not None:
+                self._remember_voice_query_context(
+                    user_input,
+                    feature=ACTION_WEATHER,
+                    query=query,
+                    conversation_id=None,
+                )
                 return await self._async_voice_response(
                     user_input, native_reply
                 )
-        reply, _conversation_id = await self._async_ai_search(
+        reply, conversation_id = await self._async_ai_search(
             resolved_query or query,
             conversation_id=None,
             service_context=user_input.context,
             zalo=False,
             language_hint=language,
             feature="weather",
+        )
+        self._remember_voice_query_context(
+            user_input,
+            feature=ACTION_WEATHER,
+            query=query,
+            conversation_id=conversation_id,
+        )
+        return await self._async_voice_response(
+            user_input, reply, ai_generated=True
+        )
+
+    async def _async_query_context_from_voice(
+        self,
+        user_input: ConversationInput,
+        active: ActiveQueryContext,
+    ) -> str:
+        """Continue any short-lived natural topic through Voice Assist."""
+        current = user_input.text.strip()
+        language = _request_language(current)
+
+        # Weather remains fully local-first: parse the follow-up, use the
+        # configured weather entity, then fall back to AI only when necessary.
+        if active.feature == ACTION_WEATHER:
+            query = self._weather_followup_query(active.last_query, current)
+            resolved_query, error, plan = await self._async_resolve_weather_query(
+                query,
+                user_input.context,
+                zalo=False,
+                language=language,
+            )
+            if error is not None:
+                self._remember_voice_query_context(
+                    user_input,
+                    feature=ACTION_WEATHER,
+                    query=query,
+                    conversation_id=active.conversation_id,
+                )
+                return await self._async_voice_response(user_input, error)
+            if plan is not None:
+                native_reply = await self._async_native_weather_response(
+                    query,
+                    plan,
+                    zalo=False,
+                    language=language,
+                )
+                if native_reply is not None:
+                    self._remember_voice_query_context(
+                        user_input,
+                        feature=ACTION_WEATHER,
+                        query=query,
+                        conversation_id=None,
+                    )
+                    return await self._async_voice_response(
+                        user_input, native_reply
+                    )
+            reply, conversation_id = await self._async_ai_search(
+                resolved_query or query,
+                conversation_id=active.conversation_id,
+                service_context=user_input.context,
+                zalo=False,
+                language_hint=language,
+                feature="weather",
+            )
+            self._remember_voice_query_context(
+                user_input,
+                feature=ACTION_WEATHER,
+                query=query,
+                conversation_id=conversation_id or active.conversation_id,
+            )
+            return await self._async_voice_response(
+                user_input, reply, ai_generated=True
+            )
+
+        # Search keeps the provider conversation ID so the provider can retain
+        # its native context without resending a long transcript.
+        if active.feature == ACTION_SEARCH:
+            query = current
+            if active.conversation_id is None and active.last_query:
+                query = self._contextual_followup_prompt(
+                    active, current, language
+                )
+            reply, conversation_id = await self._async_ai_search(
+                query,
+                conversation_id=active.conversation_id,
+                service_context=user_input.context,
+                zalo=False,
+                language_hint=language,
+            )
+            self._remember_voice_query_context(
+                user_input,
+                feature=ACTION_SEARCH,
+                query=current,
+                conversation_id=conversation_id or active.conversation_id,
+            )
+            return await self._async_voice_response(
+                user_input, reply, ai_generated=True
+            )
+
+        # Device/Home Assistant and calendar continuations are sent to the HA
+        # Conversation path first. This preserves local intents, exposed entity
+        # permissions and the Assist conversation_id before any external AI is
+        # considered.
+        if active.feature in {ACTION_HOME_ASSISTANT, ACTION_CALENDAR}:
+            ha_text = current
+            if (
+                active.feature == ACTION_HOME_ASSISTANT
+                and device_power_request_hint(current)
+            ):
+                ha_text = self._device_context_followup_text(
+                    active.last_query, current
+                )
+            return await self._async_home_assistant_conversation_from_voice(
+                user_input, ha_text
+            )
+
+        # Every other feature still receives natural follow-ups. Existing
+        # feature-specific pending state machines (notes, reminders, cameras,
+        # YouTube selections, speaker destinations, etc.) run before this path.
+        # Once no dedicated state is pending, use only the immediately previous
+        # turn as a compact conversational fallback instead of forcing a keyword.
+        query = self._contextual_followup_prompt(active, current, language)
+        reply, conversation_id = await self._async_ai_search(
+            query,
+            conversation_id=active.conversation_id,
+            service_context=user_input.context,
+            zalo=False,
+            language_hint=language,
+            feature=ACTION_CHAT,
+        )
+        self._remember_voice_query_context(
+            user_input,
+            feature=active.feature,
+            query=current,
+            conversation_id=conversation_id or active.conversation_id,
         )
         return await self._async_voice_response(
             user_input, reply, ai_generated=True
@@ -21530,12 +22643,18 @@ class ConversationalAssistantManager(NoteManagerMixin, YouTubeManagerMixin):
             return await self._async_voice_response(user_input, response)
         if command.action == ACTION_SEARCH:
             query = _search_request(transformed_text)
-            reply, _conversation_id = await self._async_ai_search(
+            reply, conversation_id = await self._async_ai_search(
                 query or "",
                 conversation_id=user_input.conversation_id,
                 service_context=user_input.context,
                 zalo=False,
                 language_hint=_request_language(request or user_input.text),
+            )
+            self._remember_voice_query_context(
+                user_input,
+                feature=ACTION_SEARCH,
+                query=query or transformed_text,
+                conversation_id=conversation_id,
             )
             return await self._async_voice_response(
                 user_input, reply, ai_generated=True
@@ -21550,6 +22669,12 @@ class ConversationalAssistantManager(NoteManagerMixin, YouTubeManagerMixin):
                 language=language,
             )
             if error is not None:
+                self._remember_voice_query_context(
+                    user_input,
+                    feature=ACTION_WEATHER,
+                    query=query,
+                    conversation_id=None,
+                )
                 return await self._async_voice_response(user_input, error)
             if plan is not None:
                 native_reply = await self._async_native_weather_response(
@@ -21559,16 +22684,28 @@ class ConversationalAssistantManager(NoteManagerMixin, YouTubeManagerMixin):
                     language=language,
                 )
                 if native_reply is not None:
+                    self._remember_voice_query_context(
+                        user_input,
+                        feature=ACTION_WEATHER,
+                        query=query,
+                        conversation_id=None,
+                    )
                     return await self._async_voice_response(
                         user_input, native_reply
                     )
-            reply, _conversation_id = await self._async_ai_search(
+            reply, conversation_id = await self._async_ai_search(
                 resolved_query or query,
                 conversation_id=None,
                 service_context=user_input.context,
                 zalo=False,
                 language_hint=language,
                 feature="weather",
+            )
+            self._remember_voice_query_context(
+                user_input,
+                feature=ACTION_WEATHER,
+                query=query,
+                conversation_id=conversation_id,
             )
             return await self._async_voice_response(
                 user_input, reply, ai_generated=True
@@ -21672,9 +22809,6 @@ class ConversationalAssistantManager(NoteManagerMixin, YouTubeManagerMixin):
             "cancel reminder ",
             "nhac ",
             "hen ",
-            "them ",
-            "tao ",
-            "dat ",
             "huy nhac hen ",
             "xoa nhac hen ",
             "huy nhac nho ",
@@ -21862,6 +22996,12 @@ class ConversationalAssistantManager(NoteManagerMixin, YouTubeManagerMixin):
             )
 
         if self._is_primary_voice_command(user_input.text):
+            # A new explicit command always wins over the previous topic. Search
+            # and weather handlers will install a fresh context after they run.
+            self._clear_voice_query_context_for_source(
+                self._source_keys(user_input)
+            )
+            self._sync_pending_followup_trigger()
             # Let the dedicated create/list/delete/search/help/YouTube trigger respond.
             return None
 
@@ -21894,6 +23034,38 @@ class ConversationalAssistantManager(NoteManagerMixin, YouTubeManagerMixin):
             and creation is None
             and deletion is None
         ):
+            active_query = self._find_voice_query_context(user_input)
+            ha_kind = explicit_home_assistant_request_kind(user_input.text)
+            if (
+                active_query is not None
+                and ha_kind is not None
+                and not self._ha_kind_matches_context_feature(
+                    ha_kind, active_query.feature
+                )
+            ):
+                # A clearly different HA intent is a new top-level request.
+                # Let the normal Home Assistant/feature route handle it.
+                self._clear_voice_query_context_for_source(
+                    self._source_keys(user_input)
+                )
+                self._sync_pending_followup_trigger()
+                return None
+            if (
+                active_query is not None
+                and self._is_query_context_followup(
+                    user_input.text, active_query.feature
+                )
+            ):
+                return await self._async_query_context_from_voice(
+                    user_input, active_query
+                )
+            if active_query is not None and (
+                ha_kind is not None
+                or device_power_request_hint(user_input.text)
+            ):
+                self._clear_voice_query_context_for_source(
+                    self._source_keys(user_input)
+                )
             self._sync_pending_followup_trigger()
             return None
 

@@ -1615,9 +1615,7 @@ class ConversationalAssistantOptionsFlow(config_entries.OptionsFlow):
         )
         options.setdefault(
             CONF_TTS_ENTITY_ID,
-            self.config_entry.data.get(
-                CONF_TTS_ENTITY_ID, _first_tts_entity_id(self.hass)
-            ),
+            self.config_entry.data.get(CONF_TTS_ENTITY_ID, ""),
         )
         options.setdefault(
             CONF_TTS_LANGUAGE,
@@ -1968,7 +1966,7 @@ class ConversationalAssistantOptionsFlow(config_entries.OptionsFlow):
         options = self._ensure_options()
         if user_input is not None:
             options.update(_normalize_general_settings(user_input))
-            return await self.async_step_general()
+            return self.async_create_entry(title="", data=options)
 
         values = options
         return self.async_show_form(
@@ -2187,7 +2185,7 @@ class ConversationalAssistantOptionsFlow(config_entries.OptionsFlow):
             errors = _validate_zalo_settings(user_input)
             if not errors:
                 options.update(user_input)
-                return await self.async_step_zalo()
+                return self.async_create_entry(title="", data=options)
 
         values = user_input or options
         return self.async_show_form(
@@ -2242,11 +2240,10 @@ class ConversationalAssistantOptionsFlow(config_entries.OptionsFlow):
             api_key = str(
                 user_input.get(CONF_YOUTUBE_API_KEY, "") or ""
             ).strip()
-            if api_key:
-                options[CONF_YOUTUBE_API_KEY] = api_key
-            else:
-                options.pop(CONF_YOUTUBE_API_KEY, None)
-            return await self.async_step_init()
+            # Keep an explicit blank in options. Removing the key would expose
+            # an older value still present in config_entry.data via fallback.
+            options[CONF_YOUTUBE_API_KEY] = api_key
+            return self.async_create_entry(title="", data=options)
 
         return self.async_show_form(
             step_id="youtube",
@@ -2268,13 +2265,10 @@ class ConversationalAssistantOptionsFlow(config_entries.OptionsFlow):
         if user_input is not None:
             user_input = _normalize_ai_settings(user_input)
             options.update(user_input)
-            if not user_input.get(CONF_AI_SEARCH_AGENT_ID):
-                options.pop(CONF_AI_SEARCH_AGENT_ID, None)
-            if not user_input.get(CONF_AI_IMAGE_TASK_ENTITY_ID):
-                options.pop(CONF_AI_IMAGE_TASK_ENTITY_ID, None)
-            if not user_input.get(CONF_AI_CAMERA_TASK_ENTITY_ID):
-                options.pop(CONF_AI_CAMERA_TASK_ENTITY_ID, None)
-            return await self.async_step_init()
+            # Empty selectors are intentional overrides. Do not pop them:
+            # _current()/manager._option() otherwise resurrect legacy values
+            # from config_entry.data.
+            return self.async_create_entry(title="", data=options)
 
         values = user_input or options
         return self.async_show_form(
@@ -2333,8 +2327,10 @@ class ConversationalAssistantOptionsFlow(config_entries.OptionsFlow):
             normalized = _normalize_tts_settings(user_input)
             options.update(normalized)
             if CONF_TTS_ENTITY_ID not in user_input:
-                options.pop(CONF_TTS_ENTITY_ID, None)
-            return await self.async_step_init()
+                # Explicit blank means automatic TTS entity discovery. Keeping
+                # the blank also prevents an old data value from reappearing.
+                options[CONF_TTS_ENTITY_ID] = ""
+            return self.async_create_entry(title="", data=options)
 
         values = user_input or options
         return self.async_show_form(
@@ -2345,8 +2341,7 @@ class ConversationalAssistantOptionsFlow(config_entries.OptionsFlow):
                         CONF_SPEAKER_ENABLED, DEFAULT_SPEAKER_ENABLED
                     )
                 ),
-                str(values.get(CONF_TTS_ENTITY_ID) or "").strip()
-                or _first_tts_entity_id(self.hass),
+                str(values.get(CONF_TTS_ENTITY_ID) or "").strip(),
                 str(
                     values.get(CONF_TTS_LANGUAGE, DEFAULT_TTS_LANGUAGE)
                     or ""

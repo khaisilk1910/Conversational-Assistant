@@ -258,7 +258,13 @@ ACTION_DISMISS = "CONVERSATIONAL_ASSISTANT_DISMISS"
 # The timeout is refreshed whenever the integration sends the next prompt.
 PENDING_CONFIRMATION_TIMEOUT_SECONDS = 120
 
-# Registered only while a reminder is waiting for destination confirmation.
+# Natural follow-up questions reuse the most recent conversation topic for a
+# short period across every supported integration feature. The context is RAM
+# only and expires lazily/timer-driven, so it adds no storage I/O and never
+# delays Home Assistant startup.
+QUERY_CONTEXT_TIMEOUT_SECONDS = 120
+
+# Registered only while a confirmation or natural conversation context is active.
 PENDING_FOLLOWUP_SENTENCES = ["{selection}"]
 
 # Voice Assist already handles ordinary on/off commands, target temperature,
