@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from copy import deepcopy
 import json
 import logging
 from typing import Any
@@ -16,6 +17,9 @@ from homeassistant.helpers.typing import ConfigType
 from .const import (
     ATTR_CONFIG_ENTRY_ID,
     ATTR_ZALO_PAYLOAD,
+    CONFIG_ENTRY_MINOR_VERSION,
+    CONFIG_ENTRY_VERSION,
+    CONFIG_OPTION_KEYS,
     CONF_NOTIFICATION_DEVICES,
     DOMAIN,
     INTEGRATION_NAME,
@@ -23,6 +27,7 @@ from .const import (
     SERVICE_PROCESS_ZALO_WEBHOOK,
 )
 from .manager import ConversationalAssistantManager
+from .youtube_proxy import async_setup_youtube_audio_proxy
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -104,8 +109,6 @@ async def async_setup(hass: HomeAssistant, _config: ConfigType) -> bool:
     )
 
     try:
-        from .youtube_proxy import async_setup_youtube_audio_proxy
-
         async_setup_youtube_audio_proxy(hass)
     except Exception:  # noqa: BLE001 - optional helper must not block integration
         _LOGGER.exception(
@@ -115,18 +118,64 @@ async def async_setup(hass: HomeAssistant, _config: ConfigType) -> bool:
     return True
 
 
+def _canonicalize_entry_settings(
+    entry: ConfigEntry,
+) -> tuple[dict[str, Any], dict[str, Any], bool]:
+    """Move all user-editable settings to options without losing blanks."""
+    data = deepcopy(dict(entry.data))
+    options = deepcopy(dict(entry.options))
+    changed = False
+
+    for key in CONFIG_OPTION_KEYS:
+        if key in data:
+            if key not in options:
+                options[key] = data[key]
+            data.pop(key, None)
+            changed = True
+
+    for obsolete_key in ("zalo_webhook_id", CONF_NOTIFICATION_DEVICES):
+        if obsolete_key in data:
+            data.pop(obsolete_key, None)
+            changed = True
+        if obsolete_key in options:
+            options.pop(obsolete_key, None)
+            changed = True
+
+    return data, options, changed
+
+
+async def async_migrate_entry(
+    hass: HomeAssistant, entry: ConfigEntry
+) -> bool:
+    """Migrate legacy config-entry data to canonical mutable options."""
+    if entry.version > CONFIG_ENTRY_VERSION:
+        _LOGGER.error(
+            "Cannot migrate Conversational Assistant config entry from future "
+            "version %s",
+            entry.version,
+        )
+        return False
+
+    data, options, changed = _canonicalize_entry_settings(entry)
+    target_minor = max(entry.minor_version, CONFIG_ENTRY_MINOR_VERSION)
+    if (
+        changed
+        or entry.version != CONFIG_ENTRY_VERSION
+        or entry.minor_version < CONFIG_ENTRY_MINOR_VERSION
+    ):
+        hass.config_entries.async_update_entry(
+            entry,
+            data=data,
+            options=options,
+            version=CONFIG_ENTRY_VERSION,
+            minor_version=target_minor,
+        )
+    return True
+
+
 async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     """Set up Conversational Assistant from a config entry."""
-    updated_data = dict(entry.data)
-    updated_options = dict(entry.options)
-    changed = False
-    for obsolete_key in ("zalo_webhook_id", CONF_NOTIFICATION_DEVICES):
-        if obsolete_key in updated_data:
-            updated_data.pop(obsolete_key, None)
-            changed = True
-        if obsolete_key in updated_options:
-            updated_options.pop(obsolete_key, None)
-            changed = True
+    updated_data, updated_options, changed = _canonicalize_entry_settings(entry)
     if changed or entry.title != INTEGRATION_NAME:
         hass.config_entries.async_update_entry(
             entry,
@@ -161,7 +210,6 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                 exc_info=True,
             )
         raise
-    entry.async_on_unload(entry.add_update_listener(_async_update_listener))
     return True
 
 
@@ -174,7 +222,3 @@ async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     await manager.async_unload()
     return True
 
-
-async def _async_update_listener(hass: HomeAssistant, entry: ConfigEntry) -> None:
-    """Schedule one race-safe reload after options change."""
-    hass.config_entries.async_schedule_reload(entry.entry_id)

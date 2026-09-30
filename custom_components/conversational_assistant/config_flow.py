@@ -75,6 +75,8 @@ from .const import (
     CONF_ZALO_WEBHOOK_ACCOUNT_SELECTION,
     CONF_ZALO_WEBHOOK_BOT_ACCOUNT_ID,
     CONF_ZALO_WEBHOOK_ENABLED,
+    CONFIG_ENTRY_MINOR_VERSION,
+    CONFIG_ENTRY_VERSION,
     DEFAULT_AI_AGENT_FAILOVER_ENABLED,
     DEFAULT_AI_CAMERA_INSTRUCTIONS,
     DEFAULT_AI_CAMERA_TASK_ENTITY_ID,
@@ -178,10 +180,7 @@ def _zalo_settings_schema(
             ): selector.BooleanSelector(),
             vol.Optional(
                 CONF_ZALO_INVOCATION_KEYWORD,
-                default=(
-                    zalo_invocation_keyword
-                    or DEFAULT_ZALO_INVOCATION_KEYWORD
-                ),
+                default=zalo_invocation_keyword,
             ): selector.TextSelector(
                 selector.TextSelectorConfig(
                     type=selector.TextSelectorType.TEXT
@@ -1086,14 +1085,6 @@ def _first_tts_entity_id(hass) -> str | None:
     return entity_ids[0] if entity_ids else None
 
 
-def _first_weather_entity_id(hass: HomeAssistant) -> str | None:
-    """Return the first currently registered weather entity, if any."""
-    entity_ids = sorted(
-        state.entity_id for state in hass.states.async_all("weather")
-    )
-    return entity_ids[0] if entity_ids else None
-
-
 def _weather_entity_count(hass: HomeAssistant) -> int:
     """Return the number of currently registered weather entities."""
     return len(hass.states.async_all("weather"))
@@ -1276,7 +1267,8 @@ def _make_zalo_target(
 class ConversationalAssistantConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
     """Handle a config flow for Conversational Assistant."""
 
-    VERSION = 1
+    VERSION = CONFIG_ENTRY_VERSION
+    MINOR_VERSION = CONFIG_ENTRY_MINOR_VERSION
 
     async def async_step_user(
         self, user_input: dict[str, Any] | None = None
@@ -1292,7 +1284,8 @@ class ConversationalAssistantConfigFlow(config_entries.ConfigFlow, domain=DOMAIN
             if not errors:
                 return self.async_create_entry(
                     title=INTEGRATION_NAME,
-                    data=user_input,
+                    data={},
+                    options=user_input,
                 )
 
         values = user_input or {}
@@ -1422,7 +1415,7 @@ class ConversationalAssistantConfigFlow(config_entries.ConfigFlow, domain=DOMAIN
         return ConversationalAssistantOptionsFlow()
 
 
-class ConversationalAssistantOptionsFlow(config_entries.OptionsFlow):
+class ConversationalAssistantOptionsFlow(config_entries.OptionsFlowWithReload):
     """Manage automatic destinations and named Zalo destinations."""
 
     def __init__(self) -> None:
@@ -2130,11 +2123,7 @@ class ConversationalAssistantOptionsFlow(config_entries.OptionsFlow):
         return self.async_show_form(
             step_id="weather",
             data_schema=_weather_settings_schema(
-                str(
-                    normalized.get(CONF_WEATHER_ENTITY_ID, "")
-                    or _first_weather_entity_id(self.hass)
-                    or ""
-                ),
+                str(normalized.get(CONF_WEATHER_ENTITY_ID, "") or ""),
                 str(normalized.get(CONF_WEATHER_LOCATION, "") or ""),
                 bool(normalized[CONF_WEATHER_FORECAST_ENABLED]),
                 values.get(
@@ -2240,8 +2229,7 @@ class ConversationalAssistantOptionsFlow(config_entries.OptionsFlow):
             api_key = str(
                 user_input.get(CONF_YOUTUBE_API_KEY, "") or ""
             ).strip()
-            # Keep an explicit blank in options. Removing the key would expose
-            # an older value still present in config_entry.data via fallback.
+            # Keep an explicit blank in options so clearing the key persists.
             options[CONF_YOUTUBE_API_KEY] = api_key
             return self.async_create_entry(title="", data=options)
 
@@ -2265,9 +2253,7 @@ class ConversationalAssistantOptionsFlow(config_entries.OptionsFlow):
         if user_input is not None:
             user_input = _normalize_ai_settings(user_input)
             options.update(user_input)
-            # Empty selectors are intentional overrides. Do not pop them:
-            # _current()/manager._option() otherwise resurrect legacy values
-            # from config_entry.data.
+            # Empty selectors are intentional values and must remain stored.
             return self.async_create_entry(title="", data=options)
 
         values = user_input or options
