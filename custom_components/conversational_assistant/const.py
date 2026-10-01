@@ -227,7 +227,16 @@ ZALO_TEXT_CHUNK_MAX_CHARS = 1800
 # The built-in guide contains many Markdown spans. Send it in smaller chunks
 # so Zalo markdown/style conversion cannot silently reject one large payload.
 ZALO_GUIDE_CHUNK_MAX_CHARS = 850
+# Multi-day weather bulletins contain many emoji/Markdown style spans. The Zalo
+# server can return a generic HTTP 500 for a large styled payload even though a
+# short interactive one-day forecast succeeds. Keep scheduled weather chunks
+# deliberately smaller so each request is simple and deterministic.
+ZALO_WEATHER_CHUNK_MAX_CHARS = 800
 ZALO_TEXT_CHUNK_SEND_DELAY_SECONDS = 0.15
+# Serialize actual HTTP requests per account and leave a small quiet interval
+# between them. This protects zalo_bot's per-account session from back-to-back
+# Weather/Calendar/reminder sends without materially delaying normal replies.
+ZALO_TEXT_MIN_SEND_INTERVAL_SECONDS = 0.8
 # Zalo typing is cosmetic and must never delay command execution. Dispatch it
 # non-blocking with a very short caller timeout. Final text delivery remains a
 # blocking action, but uses a tighter timeout than generic Home Assistant calls.
@@ -239,6 +248,11 @@ ZALO_SEND_TIMEOUT_SECONDS = 15
 # reliable without retrying permanent configuration errors.
 ZALO_SEND_RETRY_ATTEMPTS = 3
 ZALO_SEND_RETRY_BASE_DELAY_SECONDS = 0.8
+# Scheduled weather is proactive: if the Zalo session is briefly unavailable,
+# it is better to deliver a little late than drop the bulletin. Backoff sleeps
+# are asynchronous and the per-account HTTP lock is released between attempts,
+# so interactive Zalo replies are not blocked while Weather waits to retry.
+ZALO_WEATHER_SEND_RETRY_DELAYS_SECONDS = (2.0, 8.0, 30.0, 90.0)
 
 # Refresh the native Zalo typing indicator while a command is still being
 # processed. The task is created only for an active webhook request and is

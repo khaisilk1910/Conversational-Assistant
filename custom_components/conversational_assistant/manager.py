@@ -239,7 +239,9 @@ from .const import (
     ZALO_SERVICE_SEND_TYPING_EVENT,
     ZALO_TEXT_CHUNK_MAX_CHARS,
     ZALO_GUIDE_CHUNK_MAX_CHARS,
+    ZALO_WEATHER_CHUNK_MAX_CHARS,
     ZALO_TEXT_CHUNK_SEND_DELAY_SECONDS,
+    ZALO_TEXT_MIN_SEND_INTERVAL_SECONDS,
     ZALO_CHAT_IDLE_TIMEOUT_SECONDS,
     ZALO_CHAT_REENGAGE_TIMEOUT_SECONDS,
     ZALO_IMAGE_TIMEOUT_SECONDS,
@@ -247,6 +249,7 @@ from .const import (
     ZALO_SEND_TIMEOUT_SECONDS,
     ZALO_SEND_RETRY_ATTEMPTS,
     ZALO_SEND_RETRY_BASE_DELAY_SECONDS,
+    ZALO_WEATHER_SEND_RETRY_DELAYS_SECONDS,
     ZALO_TYPING_REFRESH_SECONDS,
     ZALO_TYPING_TIMEOUT_SECONDS,
     ZALO_TYPE_GROUP,
@@ -1690,8 +1693,11 @@ class ConversationalAssistantManager(NoteManagerMixin, YouTubeManagerMixin):
         # text sends from this integration per sending account so simultaneous
         # 07:00 weather/calendar/reminder jobs cannot race the same Zalo
         # session and intermittently trigger server-side HTTP 500 responses.
-        # Different Zalo accounts remain fully concurrent.
+        # Different Zalo accounts remain fully concurrent. The lock covers only
+        # one HTTP attempt; retry backoff happens outside it so a temporarily
+        # failing scheduled bulletin cannot block an interactive reply.
         self._zalo_text_send_locks: dict[str, asyncio.Lock] = {}
+        self._zalo_text_last_attempt_at: dict[str, float] = {}
         self._zalo_background_tasks: set[asyncio.Task[Any]] = set()
         self._ai_converse_tasks: set[asyncio.Task[Any]] = set()
         self._ai_converse_task_agents: dict[asyncio.Task[Any], str] = {}
@@ -6517,14 +6523,17 @@ class ConversationalAssistantManager(NoteManagerMixin, YouTubeManagerMixin):
         message: str,
         service_context: Context | None = None,
         max_chars: int = ZALO_TEXT_CHUNK_MAX_CHARS,
+        retry_attempts: int = ZALO_SEND_RETRY_ATTEMPTS,
+        retry_delays_seconds: tuple[float, ...] | None = None,
     ) -> tuple[bool, str | None]:
-        """Send text reliably, serialized per account with bounded retries.
+        """Send text reliably with per-account pacing and bounded retries.
 
-        The helper intentionally does not dispatch a typing event.  Scheduled
+        The helper intentionally does not dispatch a typing event. Scheduled
         and background messages previously fired the non-blocking typing action
         immediately before ``send_message``; both requests could then overlap on
-        the same zalo_bot account session.  Removing that cosmetic race and
-        serializing all text sends is more important than a typing indicator.
+        the same zalo_bot account session. Actual HTTP attempts are serialized
+        per account, but retry sleeps happen outside the lock so a temporarily
+        failing proactive message never stalls an interactive reply.
         """
         thread_id = str(thread_id or "").strip()
         account_selection = str(account_selection or "").strip()
@@ -6543,72 +6552,97 @@ class ConversationalAssistantManager(NoteManagerMixin, YouTubeManagerMixin):
             )
 
         chunks = self._split_zalo_text(message, max_chars=max_chars)
-        # The server/account session is the shared resource, not the thread.
-        # Therefore one account lock safely covers different destinations while
-        # still allowing independent bot accounts to send concurrently.
         lock = self._zalo_text_send_locks.setdefault(
             account_selection, asyncio.Lock()
         )
-        async with lock:
-            for chunk_index, chunk in enumerate(chunks, start=1):
-                last_error: Exception | None = None
-                attempts_used = 0
-                for attempt in range(1, ZALO_SEND_RETRY_ATTEMPTS + 1):
-                    attempts_used = attempt
-                    try:
-                        await self._async_call_service(
-                            ZALO_DOMAIN,
-                            ZALO_SERVICE_SEND_MESSAGE,
-                            {
-                                "type": zalo_type,
-                                "ttl": 0,
-                                "message": chunk,
-                                "thread_id": thread_id,
-                                "account_selection": account_selection,
-                            },
-                            blocking=True,
-                            context=service_context,
-                            timeout_seconds=ZALO_SEND_TIMEOUT_SECONDS,
+        attempts_limit = max(1, int(retry_attempts or 1))
+        custom_delays = tuple(retry_delays_seconds or ())
+
+        for chunk_index, chunk in enumerate(chunks, start=1):
+            last_error: Exception | None = None
+            attempts_used = 0
+            for attempt in range(1, attempts_limit + 1):
+                attempts_used = attempt
+                try:
+                    # Only the real HTTP attempt is mutually exclusive. Holding
+                    # the lock during a long retry backoff would make a scheduled
+                    # Weather failure freeze unrelated interactive replies.
+                    async with lock:
+                        last_attempt = self._zalo_text_last_attempt_at.get(
+                            account_selection, 0.0
                         )
-                        last_error = None
+                        remaining = (
+                            ZALO_TEXT_MIN_SEND_INTERVAL_SECONDS
+                            - (monotonic() - last_attempt)
+                        )
+                        if remaining > 0:
+                            await asyncio.sleep(remaining)
+                        try:
+                            await self._async_call_service(
+                                ZALO_DOMAIN,
+                                ZALO_SERVICE_SEND_MESSAGE,
+                                {
+                                    "type": zalo_type,
+                                    "ttl": 0,
+                                    "message": chunk,
+                                    "thread_id": thread_id,
+                                    "account_selection": account_selection,
+                                },
+                                blocking=True,
+                                context=service_context,
+                                timeout_seconds=ZALO_SEND_TIMEOUT_SECONDS,
+                            )
+                        finally:
+                            # Pace both successful and failed requests. A generic
+                            # HTTP 500 can be the server's response to a busy
+                            # per-account Zalo session.
+                            self._zalo_text_last_attempt_at[
+                                account_selection
+                            ] = monotonic()
+                    last_error = None
+                    break
+                except asyncio.CancelledError:
+                    raise
+                except Exception as err:  # noqa: BLE001 - classify below
+                    last_error = err
+                    retryable = self._zalo_text_send_error_is_transient(err)
+                    if not retryable or attempt >= attempts_limit:
                         break
-                    except asyncio.CancelledError:
-                        raise
-                    except Exception as err:  # noqa: BLE001 - classify below
-                        last_error = err
-                        retryable = self._zalo_text_send_error_is_transient(err)
-                        if (
-                            not retryable
-                            or attempt >= ZALO_SEND_RETRY_ATTEMPTS
-                        ):
-                            break
+                    if attempt - 1 < len(custom_delays):
+                        delay = max(0.0, float(custom_delays[attempt - 1]))
+                    else:
                         delay = ZALO_SEND_RETRY_BASE_DELAY_SECONDS * attempt
-                        _LOGGER.warning(
-                            "Transient Zalo text send failure to thread %s "
-                            "(chunk %s/%s, attempt %s/%s): %s; retrying in %.1fs",
-                            thread_id,
-                            chunk_index,
-                            len(chunks),
-                            attempt,
-                            ZALO_SEND_RETRY_ATTEMPTS,
-                            str(err) or err.__class__.__name__,
-                            delay,
-                        )
-                        await asyncio.sleep(delay)
-                if last_error is not None:
-                    detail = (
-                        str(last_error).strip()
-                        or last_error.__class__.__name__
-                    )
-                    _LOGGER.error(
-                        "Zalo text send failed to thread %s after %s attempt(s): %s",
+                    _LOGGER.warning(
+                        "Transient Zalo text send failure to thread %s "
+                        "(chunk %s/%s, %s chars/%s bytes, attempt %s/%s): "
+                        "%s; retrying in %.1fs",
                         thread_id,
-                        attempts_used,
-                        detail,
+                        chunk_index,
+                        len(chunks),
+                        len(chunk),
+                        len(chunk.encode("utf-8")),
+                        attempt,
+                        attempts_limit,
+                        str(err) or err.__class__.__name__,
+                        delay,
                     )
-                    return False, detail
-                if chunk_index < len(chunks):
-                    await asyncio.sleep(ZALO_TEXT_CHUNK_SEND_DELAY_SECONDS)
+                    await asyncio.sleep(delay)
+            if last_error is not None:
+                detail = str(last_error).strip() or last_error.__class__.__name__
+                _LOGGER.error(
+                    "Zalo text send failed to thread %s "
+                    "(chunk %s/%s, %s chars/%s bytes) after %s attempt(s): %s",
+                    thread_id,
+                    chunk_index,
+                    len(chunks),
+                    len(chunk),
+                    len(chunk.encode("utf-8")),
+                    attempts_used,
+                    detail,
+                )
+                return False, detail
+            if chunk_index < len(chunks):
+                await asyncio.sleep(ZALO_TEXT_CHUNK_SEND_DELAY_SECONDS)
         return True, None
 
     async def _async_send_zalo_webhook_reply(
@@ -11816,6 +11850,12 @@ class ConversationalAssistantManager(NoteManagerMixin, YouTubeManagerMixin):
                 account_selection=account_selection,
                 zalo_type=zalo_type,
                 message=formatted,
+                # Multi-day native forecasts are dense styled messages. Smaller
+                # chunks avoid zalo_bot/Zalo server HTTP 500 responses that do
+                # not occur with the shorter interactive one-day forecast.
+                max_chars=ZALO_WEATHER_CHUNK_MAX_CHARS,
+                retry_attempts=len(ZALO_WEATHER_SEND_RETRY_DELAYS_SECONDS) + 1,
+                retry_delays_seconds=ZALO_WEATHER_SEND_RETRY_DELAYS_SECONDS,
             )
             if sent:
                 sent_count += 1
