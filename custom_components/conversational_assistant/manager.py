@@ -245,6 +245,8 @@ from .const import (
     ZALO_IMAGE_TIMEOUT_SECONDS,
     ZALO_SEARCH_TIMEOUT_SECONDS,
     ZALO_SEND_TIMEOUT_SECONDS,
+    ZALO_SEND_RETRY_ATTEMPTS,
+    ZALO_SEND_RETRY_BASE_DELAY_SECONDS,
     ZALO_TYPING_REFRESH_SECONDS,
     ZALO_TYPING_TIMEOUT_SECONDS,
     ZALO_TYPE_GROUP,
@@ -395,6 +397,93 @@ from .zalo_home_assistant import (
 )
 
 _LOGGER = logging.getLogger(__name__)
+
+
+# Exact, normalized replies that belong to an active multi-turn flow.  These
+# must win over top-level Home Assistant classification.  In particular,
+# Vietnamese ``tất cả`` normalizes to ``tat ca`` and used to be mistaken for
+# the ``tắt ...`` device-control prefix, causing the pending selection to be
+# discarded while English ``all`` worked.
+_PENDING_CONTROL_REPLY_ALIASES = frozenset(
+    {
+        # Select all / both.
+        "all",
+        "everything",
+        "everywhere",
+        "both",
+        "tat ca",
+        "toan bo",
+        "het",
+        "ca hai",
+        # Approve / continue.
+        "yes",
+        "agree",
+        "approved",
+        "confirm",
+        "confirmed",
+        "go ahead",
+        "proceed",
+        "continue",
+        "ok",
+        "okay",
+        "oke",
+        "co",
+        "dong y",
+        "toi dong y",
+        "xac nhan",
+        "toi xac nhan",
+        "duoc",
+        "duoc roi",
+        "vang",
+        "tien hanh",
+        "thuc hien",
+        # Safe mutation choices.
+        "edit",
+        "update",
+        "delete",
+        "remove",
+        "skip",
+        "sua",
+        "chinh sua",
+        "xoa",
+        "bo qua",
+        "xac nhan xoa",
+        "confirm delete",
+        "xac nhan sua",
+        "confirm edit",
+        "confirm update",
+        # Door confirmation.
+        "open",
+        "open it",
+        "open door",
+        "mo",
+        "mo di",
+        "mo cua",
+        "mo cua di",
+        "hay mo",
+        # Explicit negative/cancel variants not already caught globally.
+        "no",
+        "khong",
+        "khong dong y",
+        "khong xoa",
+        "huy xoa",
+        "thoi khong xoa",
+        "dong y xoa",
+        "yes delete",
+        "khong chup",
+        "khong chup anh",
+        "khong quay",
+        "khong quay video",
+        "khong gui",
+        "khong gui zalo",
+        "khong phat",
+        "giu nguyen",
+        "do not capture",
+        "do not send",
+        "do not delete",
+        "never mind",
+    }
+)
 
 
 _INTEGRATION_COMMANDS_EXACT_PHRASES = frozenset(
@@ -1597,6 +1686,12 @@ class ConversationalAssistantManager(NoteManagerMixin, YouTubeManagerMixin):
         # Unrelated users, groups, and accounts continue concurrently.
         self._zalo_processing_locks: dict[str, asyncio.Lock] = {}
         self._zalo_processing_lock_users: dict[str, int] = {}
+        # zalo_bot keeps an authenticated session per account.  Serialize all
+        # text sends from this integration per sending account so simultaneous
+        # 07:00 weather/calendar/reminder jobs cannot race the same Zalo
+        # session and intermittently trigger server-side HTTP 500 responses.
+        # Different Zalo accounts remain fully concurrent.
+        self._zalo_text_send_locks: dict[str, asyncio.Lock] = {}
         self._zalo_background_tasks: set[asyncio.Task[Any]] = set()
         self._ai_converse_tasks: set[asyncio.Task[Any]] = set()
         self._ai_converse_task_agents: dict[asyncio.Task[Any], str] = {}
@@ -3520,11 +3615,11 @@ class ConversationalAssistantManager(NoteManagerMixin, YouTubeManagerMixin):
             lines.append(f"{index} - {name}")
         prefix = "Lựa chọn Zalo chưa hợp lệ. " if invalid else ""
         instruction = (
-            "Hãy nói một hoặc nhiều số hoặc tên Zalo, nói tất cả để chọn "
-            "mọi nơi, hoặc nói hủy để dừng."
+            "Hãy nói một hoặc nhiều số hoặc tên Zalo, nói Tất cả / All để "
+            "chọn mọi nơi, hoặc nói Hủy / Cancel để dừng."
             if voice
-            else "Gửi một hoặc nhiều số hoặc tên Zalo, Tất cả để chọn mọi "
-            "nơi, hoặc Hủy để dừng."
+            else "Gửi một hoặc nhiều số hoặc tên Zalo, **Tất cả / All** để "
+            "chọn mọi nơi, hoặc **Hủy / Cancel** để dừng."
         )
         return (
             f"{prefix}Đã hiểu lịch chụp {names} lúc "
@@ -3652,7 +3747,8 @@ class ConversationalAssistantManager(NoteManagerMixin, YouTubeManagerMixin):
             return (
                 f"{prefix}Sẽ xóa {len(selected)} lịch: "
                 + "; ".join(names)
-                + ". Hãy trả lời xác nhận xóa để xóa, hoặc hủy để giữ lại."
+                + ". Hãy trả lời **Xác nhận xóa / Confirm delete** để xóa, "
+                "hoặc **Hủy / Cancel** để giữ lại."
             )
         lines = ["Chọn lịch chụp camera cần xóa:"]
         for index, item in enumerate(pending.schedules, start=1):
@@ -3668,7 +3764,10 @@ class ConversationalAssistantManager(NoteManagerMixin, YouTubeManagerMixin):
             lines.append(f"{index} - {when} - {cameras}")
         if invalid:
             lines.insert(0, "Lựa chọn chưa hợp lệ.")
-        lines.append("Chọn một hoặc nhiều số, hoặc Tất cả. Gửi Hủy để dừng.")
+        lines.append(
+            "Chọn một hoặc nhiều số, hoặc **Tất cả / All**. "
+            "Gửi **Hủy / Cancel** để dừng."
+        )
         return "\n".join(lines)
 
     @staticmethod
@@ -4028,6 +4127,7 @@ class ConversationalAssistantManager(NoteManagerMixin, YouTubeManagerMixin):
         self._zalo_chat_locks.clear()
         self._zalo_processing_locks.clear()
         self._zalo_processing_lock_users.clear()
+        self._zalo_text_send_locks.clear()
         self._unsubs.clear()
         self._pending.clear()
         self._pending_deletions.clear()
@@ -5821,7 +5921,9 @@ class ConversationalAssistantManager(NoteManagerMixin, YouTubeManagerMixin):
         if zalo:
             lines.extend((
                 "",
-                "⏳ Tôi sẽ chờ câu trả lời tiếp theo trong 120 giây; không cần nhập lại từ khóa gọi Zalo. Gửi **Hủy** để dừng.",
+                "⏳ Tôi sẽ chờ câu trả lời tiếp theo trong 120 giây; "
+                "không cần nhập lại từ khóa gọi Zalo. "
+                "Gửi **Hủy / Cancel** để dừng.",
             ))
         else:
             lines.extend(("", "Hãy nói lại yêu cầu rõ hơn; nói `Các lệnh tích hợp` nếu muốn nghe danh sách tính năng."))
@@ -5838,7 +5940,7 @@ class ConversationalAssistantManager(NoteManagerMixin, YouTubeManagerMixin):
         return (
             "⌨️ **CÁC LỆNH TÍCH HỢP**\n\n"
             f"{zalo_rule}\n"
-            "🛑 Khi đang ở bất kỳ phiên nào, gửi **Hủy** để dừng ngay; "
+            "🛑 Khi đang ở bất kỳ phiên nào, gửi **Hủy / Cancel** để dừng ngay; "
             "không cần nhập lại từ khóa gọi Zalo.\n\n"
             "📘 **Hướng dẫn** — trợ giúp, hướng dẫn, hướng dẫn sử dụng, "
             "hướng dẫn tích hợp.\nVD: `Hướng dẫn tích hợp`\n\n"
@@ -5958,9 +6060,10 @@ class ConversationalAssistantManager(NoteManagerMixin, YouTubeManagerMixin):
             "`Xem lệnh tích hợp` hoặc `Xem lệnh của tích hợp` để xem toàn bộ "
             "từ khóa; mỗi tính năng có một ví dụ.\n\n"
             "🛑 **Hủy phiên ngay lập tức**\n"
-            "• Trong bất kỳ bước nào, gửi **Hủy**, **Hủy yêu cầu**, "
-            "**Hủy phiên**, **Dừng yêu cầu**, **Dừng phiên**, "
-            "**Kết thúc phiên** hoặc **Bỏ yêu cầu vừa rồi**.\n"
+            "• Trong bất kỳ bước nào, gửi **Hủy / Cancel**, **Hủy yêu cầu / "
+            "Cancel request**, **Hủy phiên**, **Dừng yêu cầu / Stop request**, "
+            "**Dừng phiên**, **Kết thúc phiên** hoặc **Bỏ yêu cầu vừa rồi / "
+            "Never mind**.\n"
             "• Lệnh hủy không cần từ khóa gọi Zalo và được ưu tiên trước mọi "
             "lựa chọn, xác nhận, ghi chú, nhắc hẹn, thiết bị, lịch, camera, "
             "gửi Zalo, thông báo loa, trò chuyện và tác vụ AI đang xử lý.\n"
@@ -6123,8 +6226,8 @@ class ConversationalAssistantManager(NoteManagerMixin, YouTubeManagerMixin):
         )
         return (
             f"{prefix}{chr(10).join(lines)}\n"
-            "Trả lời số cần xóa, ví dụ 1, 1 và 3, hoặc **tất cả**. "
-            "Gửi **không xóa** để **hủy**."
+            "Trả lời số cần xóa, ví dụ 1, 1 và 3, hoặc **Tất cả / All**. "
+            "Gửi **Không xóa / No / Cancel** để hủy."
         )
 
     def _zalo_pending_creation(
@@ -6382,6 +6485,132 @@ class ConversationalAssistantManager(NoteManagerMixin, YouTubeManagerMixin):
             *self._configured_speaker_targets(),
         ]
 
+    @staticmethod
+    def _zalo_text_send_error_is_transient(err: Exception) -> bool:
+        """Return True only for retryable Zalo transport/server failures."""
+        if isinstance(err, TimeoutError):
+            return True
+        detail = str(err or "").casefold()
+        return any(
+            token in detail
+            for token in (
+                "http 429",
+                "http 500",
+                "http 502",
+                "http 503",
+                "http 504",
+                "timed out",
+                "timeout",
+                "connection",
+                "temporar",
+                "lỗi không xác định",
+                "loi khong xac dinh",
+            )
+        )
+
+    async def _async_send_zalo_text_to_target(
+        self,
+        *,
+        thread_id: str,
+        account_selection: str,
+        zalo_type: str,
+        message: str,
+        service_context: Context | None = None,
+        max_chars: int = ZALO_TEXT_CHUNK_MAX_CHARS,
+    ) -> tuple[bool, str | None]:
+        """Send text reliably, serialized per account with bounded retries.
+
+        The helper intentionally does not dispatch a typing event.  Scheduled
+        and background messages previously fired the non-blocking typing action
+        immediately before ``send_message``; both requests could then overlap on
+        the same zalo_bot account session.  Removing that cosmetic race and
+        serializing all text sends is more important than a typing indicator.
+        """
+        thread_id = str(thread_id or "").strip()
+        account_selection = str(account_selection or "").strip()
+        zalo_type = str(zalo_type or DEFAULT_ZALO_TYPE).strip()
+        message = str(message or "").strip()
+        if not thread_id or not account_selection:
+            return False, "thiếu thread_id hoặc account_selection"
+        if not message:
+            return False, "nội dung tin nhắn trống"
+        if not self.hass.services.has_service(
+            ZALO_DOMAIN, ZALO_SERVICE_SEND_MESSAGE
+        ):
+            return (
+                False,
+                f"Service {ZALO_DOMAIN}.{ZALO_SERVICE_SEND_MESSAGE} không khả dụng",
+            )
+
+        chunks = self._split_zalo_text(message, max_chars=max_chars)
+        # The server/account session is the shared resource, not the thread.
+        # Therefore one account lock safely covers different destinations while
+        # still allowing independent bot accounts to send concurrently.
+        lock = self._zalo_text_send_locks.setdefault(
+            account_selection, asyncio.Lock()
+        )
+        async with lock:
+            for chunk_index, chunk in enumerate(chunks, start=1):
+                last_error: Exception | None = None
+                attempts_used = 0
+                for attempt in range(1, ZALO_SEND_RETRY_ATTEMPTS + 1):
+                    attempts_used = attempt
+                    try:
+                        await self._async_call_service(
+                            ZALO_DOMAIN,
+                            ZALO_SERVICE_SEND_MESSAGE,
+                            {
+                                "type": zalo_type,
+                                "ttl": 0,
+                                "message": chunk,
+                                "thread_id": thread_id,
+                                "account_selection": account_selection,
+                            },
+                            blocking=True,
+                            context=service_context,
+                            timeout_seconds=ZALO_SEND_TIMEOUT_SECONDS,
+                        )
+                        last_error = None
+                        break
+                    except asyncio.CancelledError:
+                        raise
+                    except Exception as err:  # noqa: BLE001 - classify below
+                        last_error = err
+                        retryable = self._zalo_text_send_error_is_transient(err)
+                        if (
+                            not retryable
+                            or attempt >= ZALO_SEND_RETRY_ATTEMPTS
+                        ):
+                            break
+                        delay = ZALO_SEND_RETRY_BASE_DELAY_SECONDS * attempt
+                        _LOGGER.warning(
+                            "Transient Zalo text send failure to thread %s "
+                            "(chunk %s/%s, attempt %s/%s): %s; retrying in %.1fs",
+                            thread_id,
+                            chunk_index,
+                            len(chunks),
+                            attempt,
+                            ZALO_SEND_RETRY_ATTEMPTS,
+                            str(err) or err.__class__.__name__,
+                            delay,
+                        )
+                        await asyncio.sleep(delay)
+                if last_error is not None:
+                    detail = (
+                        str(last_error).strip()
+                        or last_error.__class__.__name__
+                    )
+                    _LOGGER.error(
+                        "Zalo text send failed to thread %s after %s attempt(s): %s",
+                        thread_id,
+                        attempts_used,
+                        detail,
+                    )
+                    return False, detail
+                if chunk_index < len(chunks):
+                    await asyncio.sleep(ZALO_TEXT_CHUNK_SEND_DELAY_SECONDS)
+        return True, None
+
     async def _async_send_zalo_webhook_reply(
         self,
         context: ZaloWebhookContext,
@@ -6411,34 +6640,20 @@ class ConversationalAssistantManager(NoteManagerMixin, YouTubeManagerMixin):
             )
             return False
 
-        chunks = self._split_zalo_text(message, max_chars=max_chars)
-        for index, chunk in enumerate(chunks, start=1):
-            try:
-                await self._async_call_service(
-                    ZALO_DOMAIN,
-                    ZALO_SERVICE_SEND_MESSAGE,
-                    {
-                        "type": context.thread_type,
-                        "ttl": 0,
-                        "message": chunk,
-                        "thread_id": context.thread_id,
-                        "account_selection": account_selection,
-                    },
-                    blocking=True,
-                    timeout_seconds=ZALO_SEND_TIMEOUT_SECONDS,
-                )
-            except Exception:  # noqa: BLE001 - webhook must still return HTTP 200
-                _LOGGER.exception(
-                    "Failed to reply to Zalo webhook thread %s "
-                    "while sending text chunk %s/%s",
-                    context.thread_id,
-                    index,
-                    len(chunks),
-                )
-                return False
-            if index < len(chunks):
-                await asyncio.sleep(ZALO_TEXT_CHUNK_SEND_DELAY_SECONDS)
-        return True
+        sent, error = await self._async_send_zalo_text_to_target(
+            thread_id=context.thread_id,
+            account_selection=account_selection,
+            zalo_type=context.thread_type,
+            message=message,
+            max_chars=max_chars,
+        )
+        if not sent:
+            _LOGGER.error(
+                "Failed to reply to Zalo webhook thread %s: %s",
+                context.thread_id,
+                error or "unknown error",
+            )
+        return sent
 
     async def _async_send_integration_commands_to_zalo(
         self, context: ZaloWebhookContext
@@ -7009,8 +7224,8 @@ class ConversationalAssistantManager(NoteManagerMixin, YouTubeManagerMixin):
             f"{prefix}{chr(10).join(lines)}\n"
             "\n📝 **Cách chọn camera:**\n"
             "• Gửi một hoặc nhiều số hoặc tên camera, ví dụ: `1 3 10`.\n"
-            "• Gửi **Tất cả** để chụp mọi camera khả dụng.\n"
-            "• Gửi **Không chụp** hoặc **Hủy** để dừng."
+            "• Gửi **Tất cả / All** để chụp mọi camera khả dụng.\n"
+            "• Gửi **Không chụp / No / Cancel / Hủy** để dừng."
         )
 
     @staticmethod
@@ -7030,8 +7245,8 @@ class ConversationalAssistantManager(NoteManagerMixin, YouTubeManagerMixin):
         return (
             f"{prefix}{chr(10).join(lines)}\n"
             "Hãy nói một hoặc nhiều số hoặc tên camera, ví dụ 1 và 3. "
-            "Bạn cũng có thể nói **tất cả**, hoặc nói **không chụp** "
-            "để **hủy**."
+            "Bạn cũng có thể nói **Tất cả / All**, hoặc nói "
+            "**Không chụp / No / Cancel / Hủy** để dừng."
         )
 
     @staticmethod
@@ -7052,8 +7267,8 @@ class ConversationalAssistantManager(NoteManagerMixin, YouTubeManagerMixin):
             f"{prefix}{chr(10).join(lines)}\n"
             "\n📝 **Cách chọn camera quay video:**\n"
             "• Gửi một hoặc nhiều số hoặc tên camera, ví dụ: `1 3`.\n"
-            "• Gửi **Tất cả** để quay mọi camera khả dụng.\n"
-            "• Gửi **Không quay** hoặc **Hủy** để dừng."
+            "• Gửi **Tất cả / All** để quay mọi camera khả dụng.\n"
+            "• Gửi **Không quay / No / Cancel / Hủy** để dừng."
         )
 
     @staticmethod
@@ -7073,7 +7288,8 @@ class ConversationalAssistantManager(NoteManagerMixin, YouTubeManagerMixin):
         return (
             f"{prefix}{chr(10).join(lines)}\n"
             "Hãy nói một hoặc nhiều số hoặc tên camera, ví dụ 1 và 3. "
-            "Bạn cũng có thể nói tất cả, hoặc nói không quay hay hủy để dừng."
+            "Bạn cũng có thể nói **Tất cả / All**, hoặc nói "
+            "**Không quay / No / Cancel / Hủy** để dừng."
         )
 
     @staticmethod
@@ -7097,8 +7313,8 @@ class ConversationalAssistantManager(NoteManagerMixin, YouTubeManagerMixin):
         return (
             f"{prefix}Bạn đã chọn {camera_names}. "
             f"Ảnh sẽ được gửi lên Zalo đến {destination_names}. "
-            "Hãy nói **đồng ý** để chụp và gửi, hoặc nói "
-            "**không chụp** để **hủy**."
+            "Hãy nói **Đồng ý / Yes / Confirm** để chụp và gửi, hoặc nói "
+            "**Không chụp / No / Cancel / Hủy** để dừng."
         )
 
     @staticmethod
@@ -7126,8 +7342,8 @@ class ConversationalAssistantManager(NoteManagerMixin, YouTubeManagerMixin):
             f"{prefix}Bạn đã chọn camera {camera_names}.\n"
             "Hãy chọn Zalo sẽ nhận ảnh:\n"
             f"{chr(10).join(lines)}\n"
-            "Hãy nói một hoặc nhiều số hoặc tên nơi nhận, nói **tất cả** "
-            "để chọn mọi nơi, hoặc nói **không gửi** hay **hủy** để dừng."
+            "Hãy nói một hoặc nhiều số hoặc tên nơi nhận, nói **Tất cả / All** "
+            "để chọn mọi nơi, hoặc nói **Không gửi / No / Cancel / Hủy** để dừng."
         )
 
     @staticmethod
@@ -7151,8 +7367,8 @@ class ConversationalAssistantManager(NoteManagerMixin, YouTubeManagerMixin):
             f"{prefix}Đã chọn camera {camera_names}.\n"
             "Hãy chọn Zalo sẽ nhận ảnh:\n"
             f"{chr(10).join(lines)}\n"
-            "Gửi một hoặc nhiều số hoặc tên Zalo, **Tất cả** để gửi mọi nơi, "
-            "hoặc **Hủy** để dừng."
+            "Gửi một hoặc nhiều số hoặc tên Zalo, **Tất cả / All** để gửi mọi nơi, "
+            "hoặc **Hủy / Cancel** để dừng."
         )
 
     @staticmethod
@@ -7176,8 +7392,8 @@ class ConversationalAssistantManager(NoteManagerMixin, YouTubeManagerMixin):
             f"{prefix}Đã chọn camera {camera_names}.\n"
             "Hãy chọn Zalo sẽ nhận video 10 giây:\n"
             f"{chr(10).join(lines)}\n"
-            "Gửi một hoặc nhiều số hoặc tên Zalo, **Tất cả** để gửi mọi nơi, "
-            "hoặc **Hủy** để dừng."
+            "Gửi một hoặc nhiều số hoặc tên Zalo, **Tất cả / All** để gửi mọi nơi, "
+            "hoặc **Hủy / Cancel** để dừng."
         )
 
     @staticmethod
@@ -7201,8 +7417,8 @@ class ConversationalAssistantManager(NoteManagerMixin, YouTubeManagerMixin):
             f"{prefix}Đã chọn camera {camera_names}.\n"
             "Hãy chọn Zalo sẽ nhận video 10 giây:\n"
             f"{chr(10).join(lines)}\n"
-            "Hãy nói một hoặc nhiều số hoặc tên Zalo, nói tất cả để gửi mọi "
-            "nơi, hoặc nói hủy để dừng."
+            "Hãy nói một hoặc nhiều số hoặc tên Zalo, nói **Tất cả / All** "
+            "để gửi mọi nơi, hoặc nói **Hủy / Cancel** để dừng."
         )
 
     @staticmethod
@@ -8263,8 +8479,8 @@ class ConversationalAssistantManager(NoteManagerMixin, YouTubeManagerMixin):
             f"{prefix}{chr(10).join(lines)}\n"
             "\n📝 **Cách chọn camera:**\n"
             "• Gửi một hoặc nhiều số hoặc tên camera, ví dụ: `1 3 10`.\n"
-            "• Gửi **Tất cả** để phân tích mọi camera khả dụng.\n"
-            "• Gửi **Hủy** để dừng."
+            "• Gửi **Tất cả / All** để phân tích mọi camera khả dụng.\n"
+            "• Gửi **Hủy / Cancel** để dừng."
         )
 
     @staticmethod
@@ -8284,7 +8500,7 @@ class ConversationalAssistantManager(NoteManagerMixin, YouTubeManagerMixin):
         return (
             f"{prefix}{chr(10).join(lines)}\n"
             "Hãy nói một hoặc nhiều số hoặc tên camera, ví dụ 1 và 3. "
-            "Bạn cũng có thể nói **tất cả**, hoặc nói **hủy**."
+            "Bạn cũng có thể nói **Tất cả / All**, hoặc nói **Hủy / Cancel**."
         )
 
     @staticmethod
@@ -8304,8 +8520,8 @@ class ConversationalAssistantManager(NoteManagerMixin, YouTubeManagerMixin):
         return (
             f"{prefix}Bạn có muốn gửi ảnh và nội dung phân tích lên Zalo không?\n"
             f"{chr(10).join(lines)}\n"
-            "Hãy nói một hoặc nhiều số hoặc tên nơi nhận, nói **tất cả** "
-            "để gửi mọi nơi, hoặc nói **không gửi** để kết thúc."
+            "Hãy nói một hoặc nhiều số hoặc tên nơi nhận, nói **Tất cả / All** "
+            "để gửi mọi nơi, hoặc nói **Không gửi / No / Cancel** để kết thúc."
         )
 
     def _camera_analysis_unavailable_text(self) -> str:
@@ -11582,7 +11798,6 @@ class ConversationalAssistantManager(NoteManagerMixin, YouTubeManagerMixin):
                 f"Service {ZALO_DOMAIN}.{ZALO_SERVICE_SEND_MESSAGE} không khả dụng"
             ]
         formatted = self._prepare_zalo_message(message)
-        chunks = self._split_zalo_text(formatted)
         sent_count = 0
         errors: list[str] = []
         for target in targets:
@@ -11596,31 +11811,16 @@ class ConversationalAssistantManager(NoteManagerMixin, YouTubeManagerMixin):
             if not thread_id or not account_selection:
                 errors.append("Nơi nhận Zalo thiếu thread_id hoặc tài khoản gửi")
                 continue
-            try:
-                await self._async_send_zalo_typing_to_target(
-                    thread_id, account_selection
-                )
-                for chunk in chunks:
-                    await self._async_call_service(
-                        ZALO_DOMAIN,
-                        ZALO_SERVICE_SEND_MESSAGE,
-                        {
-                            "type": zalo_type,
-                            "ttl": 0,
-                            "message": chunk,
-                            "thread_id": thread_id,
-                            "account_selection": account_selection,
-                        },
-                        blocking=True,
-                    )
+            sent, error = await self._async_send_zalo_text_to_target(
+                thread_id=thread_id,
+                account_selection=account_selection,
+                zalo_type=zalo_type,
+                message=formatted,
+            )
+            if sent:
                 sent_count += 1
-            except Exception as err:  # noqa: BLE001 - continue other targets
-                errors.append(
-                    f"Zalo {thread_id}: {str(err) or err.__class__.__name__}"
-                )
-                _LOGGER.exception(
-                    "Failed sending scheduled weather message to %s", thread_id
-                )
+                continue
+            errors.append(f"Zalo {thread_id}: {error or 'lỗi gửi không xác định'}")
         return sent_count, errors
 
     @callback
@@ -13648,8 +13848,8 @@ class ConversationalAssistantManager(NoteManagerMixin, YouTubeManagerMixin):
             "⚠️ **Cần xác nhận mở cửa cuốn**\n\n"
             f"{prefix}**Thao tác:** {summary}\n"
             f"**Thiết bị:** {names}{schedule_line}\n\n"
-            "Trả lời **Có**, **Đồng ý** hoặc **Mở** để thực hiện; "
-            "trả lời **Hủy** để dừng."
+            "Trả lời **Có / Yes**, **Đồng ý / Agree** hoặc **Mở / Open** "
+            "để thực hiện; trả lời **Hủy / Cancel** để dừng."
         )
 
     @staticmethod
@@ -16309,30 +16509,17 @@ class ConversationalAssistantManager(NoteManagerMixin, YouTubeManagerMixin):
             if not thread_id or not account_selection:
                 errors.append("Nơi nhận Zalo thiếu thread_id hoặc tài khoản gửi")
                 continue
-            try:
-                await self._async_send_zalo_typing_to_target(
-                    thread_id, account_selection
-                )
-                await self._async_call_service(
-                    ZALO_DOMAIN,
-                    ZALO_SERVICE_SEND_MESSAGE,
-                    {
-                        "type": zalo_type,
-                        "ttl": 0,
-                        "message": message,
-                        "thread_id": thread_id,
-                        "account_selection": account_selection,
-                    },
-                    blocking=True,
-                )
+            sent, error = await self._async_send_zalo_text_to_target(
+                thread_id=thread_id,
+                account_selection=account_selection,
+                zalo_type=zalo_type,
+                message=message,
+            )
+            if sent:
                 sent_count += 1
-            except Exception as err:  # noqa: BLE001 - keep other targets working
+            else:
                 errors.append(
-                    f"Zalo {thread_id}: {str(err) or err.__class__.__name__}"
-                )
-                _LOGGER.exception(
-                    "Failed sending calendar summary to Zalo thread %s",
-                    thread_id,
+                    f"Zalo {thread_id}: {error or 'lỗi gửi không xác định'}"
                 )
         return sent_count, errors
 
@@ -17373,8 +17560,8 @@ class ConversationalAssistantManager(NoteManagerMixin, YouTubeManagerMixin):
         else:
             reply_hint = "số lịch"
         lines.append(
-            f"\nTrả lời {reply_hint} (ví dụ **1**), hoặc **xác nhận** khi "
-            "chỉ có một lựa chọn. Gửi **hủy** để dừng."
+            f"\nTrả lời {reply_hint} (ví dụ **1**), hoặc **Xác nhận / Confirm** "
+            "khi chỉ có một lựa chọn. Gửi **Hủy / Cancel** để dừng."
         )
         return "\n".join(lines)
 
@@ -17555,7 +17742,18 @@ class ConversationalAssistantManager(NoteManagerMixin, YouTubeManagerMixin):
             if len(indexes) > 1:
                 indexes = []
         if not indexes and len(pending.calendars) == 1 and normalized in {
-            "xac nhan", "dong y", "ok", "yes", "them", "tao", "1"
+            "xac nhan",
+            "confirm",
+            "dong y",
+            "agree",
+            "ok",
+            "okay",
+            "yes",
+            "them",
+            "add",
+            "tao",
+            "create",
+            "1",
         }:
             indexes = [0]
         if not indexes:
@@ -17745,19 +17943,19 @@ class ConversationalAssistantManager(NoteManagerMixin, YouTubeManagerMixin):
             if can_delete and can_update:
                 reply += (
                     "\n\n🗑️ **Bạn có muốn xóa hoặc sửa sự kiện vừa tra cứu không?**\n"
-                    "Trả lời **Xóa** để chọn sự kiện rồi xác nhận xóa, "
-                    "**Sửa** để chỉnh sửa hoặc **Bỏ qua**."
+                    "Trả lời **Xóa / Delete** để chọn sự kiện rồi xác nhận xóa, "
+                    "**Sửa / Edit** để chỉnh sửa hoặc **Bỏ qua / Skip**."
                 )
             elif can_delete:
                 reply += (
                     "\n\n🗑️ **Bạn có muốn xóa sự kiện vừa tra cứu không?**\n"
-                    "Trả lời **Xóa** để chọn sự kiện rồi xác nhận xóa, "
-                    "hoặc **Bỏ qua**."
+                    "Trả lời **Xóa / Delete** để chọn sự kiện rồi xác nhận xóa, "
+                    "hoặc **Bỏ qua / Skip**."
                 )
             else:
                 reply += (
                     "\n\n✏️ **Bạn có muốn sửa sự kiện vừa tra cứu không?**\n"
-                    "Trả lời **Sửa** hoặc **Bỏ qua**."
+                    "Trả lời **Sửa / Edit** hoặc **Bỏ qua / Skip**."
                 )
         else:
             self._zalo_pending_calendar_managements.pop(context.owner_key, None)
@@ -17786,7 +17984,7 @@ class ConversationalAssistantManager(NoteManagerMixin, YouTubeManagerMixin):
                 f"{index}. **{event.summary}** — {time_text} "
                 f"({event.calendar_name})"
             )
-        lines.append("\nTrả lời **Hủy** để dừng.")
+        lines.append("\nTrả lời **Hủy / Cancel** để dừng.")
         return "\n".join(lines)
 
     @staticmethod
@@ -17906,12 +18104,14 @@ class ConversationalAssistantManager(NoteManagerMixin, YouTubeManagerMixin):
                         f"⚠️ **Xác nhận xóa sự kiện**\n"
                         f"**Nội dung:** {event.summary}\n"
                         f"**Lịch:** {event.calendar_name}\n\n"
-                        "Trả lời **Xác nhận xóa** để thực hiện hoặc **Hủy**."
+                        "Trả lời **Xác nhận xóa / Confirm delete** để thực hiện "
+                        "hoặc **Hủy / Cancel**."
                     )
                 pending.phase = "select_delete"
                 return self._calendar_management_event_prompt(candidates, "delete")
             return (
-                "Hãy trả lời **Sửa**, **Xóa** hoặc **Bỏ qua** để tôi thao tác "
+                "Hãy trả lời **Sửa / Edit**, **Xóa / Delete** hoặc "
+                "**Bỏ qua / Skip** để tôi thao tác "
                 "đúng sự kiện."
             )
 
@@ -17932,7 +18132,8 @@ class ConversationalAssistantManager(NoteManagerMixin, YouTubeManagerMixin):
                     f"⚠️ **Xác nhận xóa sự kiện**\n"
                     f"**Nội dung:** {event.summary}\n"
                     f"**Lịch:** {event.calendar_name}\n\n"
-                    "Trả lời **Xác nhận xóa** để thực hiện hoặc **Hủy**."
+                    "Trả lời **Xác nhận xóa / Confirm delete** để thực hiện "
+                    "hoặc **Hủy / Cancel**."
                 )
             pending.phase = "edit_details"
             return (
@@ -17953,7 +18154,10 @@ class ConversationalAssistantManager(NoteManagerMixin, YouTubeManagerMixin):
 
         if pending.phase == "confirm_delete":
             if text not in {"xac nhan xoa", "dong y xoa", "yes delete", "confirm delete"}:
-                return "Hãy trả lời **Xác nhận xóa** hoặc **Hủy**."
+                return (
+                    "Hãy trả lời **Xác nhận xóa / Confirm delete** hoặc "
+                    "**Hủy / Cancel**."
+                )
             try:
                 async with asyncio.timeout(CALENDAR_SERVICE_TIMEOUT_SECONDS):
                     await entity.async_delete_event(
@@ -17986,7 +18190,8 @@ class ConversationalAssistantManager(NoteManagerMixin, YouTubeManagerMixin):
             if request is None:
                 return self._append_ai_attempt_summary(
                     "Tôi chưa hiểu đủ thay đổi. Hãy nêu **nội dung mới** và "
-                    "**mốc thời gian mới** rõ hơn, hoặc trả lời **Hủy**.",
+                    "**mốc thời gian mới** rõ hơn, hoặc trả lời "
+                    "**Hủy / Cancel**.",
                     attempted, language=_request_language(context.text),
                     zalo=True,
                 )
@@ -18210,6 +18415,10 @@ class ConversationalAssistantManager(NoteManagerMixin, YouTubeManagerMixin):
             if self.zalo_home_assistant_enabled
             else None
         )
+        pending_control_reply = (
+            self._zalo_owner_has_pending_confirmation(context.owner_key)
+            and self._is_pending_control_reply_text(context.text)
+        )
         if (
             context.owner_key in self._zalo_chat_sessions
             and not self._zalo_chat_yields_to_home_assistant(
@@ -18243,6 +18452,7 @@ class ConversationalAssistantManager(NoteManagerMixin, YouTubeManagerMixin):
         if (
             self.zalo_invocation_keyword_enabled
             and not context.active_flow_reply
+            and not pending_control_reply
             and context.owner_key not in self._zalo_chat_sessions
             and command is None
             and explicit_ha_kind is None
@@ -18270,7 +18480,7 @@ class ConversationalAssistantManager(NoteManagerMixin, YouTubeManagerMixin):
         pending_calendar_management = self._zalo_pending_calendar_management(
             context.owner_key
         )
-        flow_reply = context.active_flow_reply
+        flow_reply = context.active_flow_reply or pending_control_reply
         if (
             pending_youtube is not None
             and (
@@ -19476,7 +19686,8 @@ class ConversationalAssistantManager(NoteManagerMixin, YouTubeManagerMixin):
         return (
             f"{prefix}{chr(10).join(lines)}\n"
             f"**Nội dung:** {pending.content}{schedule}\n"
-            "Trả lời số, tên Zalo hoặc **tất cả**. Gửi **Hủy** để bỏ yêu cầu."
+            "Trả lời số, tên Zalo hoặc **Tất cả / All**. "
+            "Gửi **Hủy / Cancel** để bỏ yêu cầu."
         )
 
     async def _async_deliver_zalo_send(
@@ -19510,26 +19721,19 @@ class ConversationalAssistantManager(NoteManagerMixin, YouTubeManagerMixin):
             if not thread_id or not account_selection:
                 failures.append(f"{target.display_name}: cấu hình thiếu")
                 continue
-            try:
-                await self._async_call_service(
-                    ZALO_DOMAIN,
-                    ZALO_SERVICE_SEND_MESSAGE,
-                    {
-                        "type": zalo_type,
-                        "ttl": 0,
-                        "message": pending.content,
-                        "thread_id": thread_id,
-                        "account_selection": account_selection,
-                    },
-                    blocking=True,
-                )
+            sent, error = await self._async_send_zalo_text_to_target(
+                thread_id=thread_id,
+                account_selection=account_selection,
+                zalo_type=zalo_type,
+                message=pending.content,
+            )
+            if sent:
                 sent_names.append(target.display_name)
-            except Exception:  # noqa: BLE001 - continue other destinations
-                _LOGGER.exception(
-                    "Failed direct Zalo message to configured thread %s",
-                    thread_id,
+            else:
+                failures.append(
+                    f"{target.display_name}: gửi tin thất bại"
+                    + (f" ({error})" if error else "")
                 )
-                failures.append(f"{target.display_name}: gửi tin thất bại")
                 continue
 
             if pending.remind_at is None:
@@ -19724,7 +19928,8 @@ class ConversationalAssistantManager(NoteManagerMixin, YouTubeManagerMixin):
         return (
             f"{prefix}{chr(10).join(lines)}\n"
             f"**Nội dung:** {pending.content}\n"
-            "Trả lời số, tên loa hoặc **tất cả**. Gửi **Hủy** để bỏ yêu cầu."
+            "Trả lời số, tên loa hoặc **Tất cả / All**. "
+            "Gửi **Hủy / Cancel** để bỏ yêu cầu."
         )
 
     def _new_speaker_announcement_pending(
@@ -20165,27 +20370,19 @@ class ConversationalAssistantManager(NoteManagerMixin, YouTubeManagerMixin):
         prepared = self._prepare_zalo_message(
             self._address_response(message)
         )
-        for chunk in self._split_zalo_text(prepared):
-            try:
-                await self._async_call_service(
-                    ZALO_DOMAIN,
-                    ZALO_SERVICE_SEND_MESSAGE,
-                    {
-                        "type": zalo_type,
-                        "ttl": 0,
-                        "message": chunk,
-                        "thread_id": thread_id,
-                        "account_selection": account_selection,
-                    },
-                    blocking=True,
-                )
-            except Exception:  # noqa: BLE001 - use persistent fallback below
-                _LOGGER.exception(
-                    "Failed reporting Voice Assist speaker error to first Zalo target %s",
-                    thread_id,
-                )
-                return False
-        return True
+        sent, error = await self._async_send_zalo_text_to_target(
+            thread_id=thread_id,
+            account_selection=account_selection,
+            zalo_type=zalo_type,
+            message=prepared,
+        )
+        if not sent:
+            _LOGGER.error(
+                "Failed reporting Voice Assist speaker error to first Zalo target %s: %s",
+                thread_id,
+                error or "unknown error",
+            )
+        return sent
 
     async def _async_process_speaker_announcement_task(
         self,
@@ -20695,34 +20892,23 @@ class ConversationalAssistantManager(NoteManagerMixin, YouTubeManagerMixin):
             if not thread_id or not account_selection:
                 _LOGGER.error("Skipping invalid stored Zalo target: %s", target)
                 continue
-            try:
-                # Scheduled reminders are also Zalo features, so briefly show
-                # typing before delivering the reminder to each destination.
-                await self._async_send_zalo_typing_to_target(
-                    thread_id, account_selection
-                )
-                await self._async_call_service(
-                    ZALO_DOMAIN,
-                    ZALO_SERVICE_SEND_MESSAGE,
-                    {
-                        "type": zalo_type,
-                        "ttl": 0,
-                        "message": self._prepare_zalo_message(
-                            "⏰ **Nhắc nhở**\n"
-                            f"📝 **{reminder.message.strip()}**"
-                        ),
-                        "thread_id": thread_id,
-                        "account_selection": account_selection,
-                    },
-                    blocking=True,
-                )
+            message = self._prepare_zalo_message(
+                "⏰ **Nhắc nhở**\n"
+                f"📝 **{reminder.message.strip()}**"
+            )
+            delivered, error = await self._async_send_zalo_text_to_target(
+                thread_id=thread_id,
+                account_selection=account_selection,
+                zalo_type=zalo_type,
+                message=message,
+            )
+            if delivered:
                 sent = True
-            except Exception:  # noqa: BLE001 - keep other targets working
-                _LOGGER.exception(
-                    "Failed to send Conversational Assistant via %s.%s to thread %s",
-                    ZALO_DOMAIN,
-                    ZALO_SERVICE_SEND_MESSAGE,
+            else:
+                _LOGGER.error(
+                    "Failed to send reminder to Zalo thread %s: %s",
                     thread_id,
+                    error or "unknown error",
                 )
         return sent
 
@@ -21809,8 +21995,8 @@ class ConversationalAssistantManager(NoteManagerMixin, YouTubeManagerMixin):
         return (
             f"{prefix}Các nơi nhận là:\n{options}\n"
             "Bạn có thể trả lời **1 và 3**, **1 phẩy 3**, "
-            "**chọn 1 và 3**, **chọn tất cả loa**, **chọn tất cả**, "
-            "hoặc **bỏ yêu cầu vừa rồi**."
+            "**chọn 1 và 3**, **chọn tất cả loa / all speakers**, "
+            "**chọn tất cả / all**, hoặc **bỏ yêu cầu vừa rồi / cancel**."
         )
 
     @staticmethod
@@ -21847,8 +22033,8 @@ class ConversationalAssistantManager(NoteManagerMixin, YouTubeManagerMixin):
         return (
             f"{prefix}{chr(10).join(lines)}\n"
             "Hãy trả lời số cần xóa, ví dụ **1**, **1 và 3**, "
-            "hoặc **tất cả**. Nói **bỏ yêu cầu vừa rồi** "
-            "để **không xóa**."
+            "hoặc **Tất cả / All**. Nói **Bỏ yêu cầu vừa rồi / Cancel** "
+            "để không xóa."
         )
 
     async def _async_voice_response(
@@ -22864,6 +23050,33 @@ class ConversationalAssistantManager(NoteManagerMixin, YouTubeManagerMixin):
             "xoa toan bo nhac nho",
         }
         return normalized in exact or normalized.startswith(prefixes)
+
+    @staticmethod
+    def _is_pending_control_reply_text(text: str) -> bool:
+        """Return True for a bilingual reply reserved by active pending flows."""
+        normalized = normalize_text(text)
+        if normalized in _PENDING_CONTROL_REPLY_ALIASES:
+            return True
+        padded = f" {normalized} "
+        # Selection phrases may include a category (for example ``tất cả loa``
+        # or ``all cameras``) or a leading verb such as ``chọn tất cả``.  When
+        # a pending flow exists these must remain in that flow instead of being
+        # reclassified as a new top-level command.
+        return any(
+            f" {phrase} " in padded
+            for phrase in (
+                "tat ca",
+                "toan bo",
+                "moi loa",
+                "moi dien thoai",
+                "moi zalo",
+                "ca hai",
+                "all",
+                "everything",
+                "everywhere",
+                "both",
+            )
+        )
 
     @staticmethod
     def _is_global_cancel_text(text: str) -> bool:

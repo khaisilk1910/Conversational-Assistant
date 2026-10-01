@@ -233,6 +233,12 @@ ZALO_TEXT_CHUNK_SEND_DELAY_SECONDS = 0.15
 # blocking action, but uses a tighter timeout than generic Home Assistant calls.
 ZALO_TYPING_TIMEOUT_SECONDS = 1.5
 ZALO_SEND_TIMEOUT_SECONDS = 15
+# Zalo Bot may transiently return HTTP 429/5xx while its per-account session
+# is busy. Text sends are serialized per sending account and retried only for
+# transient failures so scheduled weather/calendar/reminder delivery remains
+# reliable without retrying permanent configuration errors.
+ZALO_SEND_RETRY_ATTEMPTS = 3
+ZALO_SEND_RETRY_BASE_DELAY_SECONDS = 0.8
 
 # Refresh the native Zalo typing indicator while a command is still being
 # processed. The task is created only for an active webhook request and is

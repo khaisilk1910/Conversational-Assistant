@@ -111,15 +111,28 @@ def parse_target_selection(selection: str, target_names: list[str]) -> list[int]
             ("zalo ",),
         ),
     )
+
+    def contains_phrase(haystack: str, phrase: str) -> bool:
+        # Whole-token matching prevents an English ``all`` reply from firing
+        # on a target/name such as ``Hall`` or another word containing ``all``.
+        return f" {phrase} " in f" {haystack} "
+
     for phrases, prefixes in category_phrases:
-        if any(phrase in normalized for phrase in phrases):
+        matched_phrases = [
+            phrase for phrase in phrases if contains_phrase(normalized, phrase)
+        ]
+        if matched_phrases:
             add_category(prefixes)
             category_requested = True
-            for phrase in phrases:
-                remaining = remaining.replace(phrase, " ")
+            for phrase in matched_phrases:
+                remaining = re.sub(
+                    rf"(?<![a-z0-9]){re.escape(phrase)}(?![a-z0-9])",
+                    " ",
+                    remaining,
+                )
 
     if not category_requested and any(
-        phrase in normalized
+        contains_phrase(normalized, phrase)
         for phrase in (
             "tat ca",
             "toan bo",

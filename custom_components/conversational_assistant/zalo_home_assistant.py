@@ -269,6 +269,23 @@ def explicit_home_assistant_request_kind(text: str) -> str | None:
     if not normalized:
         return None
 
+    # ``tất cả`` loses its accents as ``tat ca`` during normalization and can
+    # otherwise collide with the Vietnamese ``tắt ...`` (turn off) prefix.
+    # Selection replies such as ``tất cả`` or ``tất cả camera`` belong to an
+    # active selection flow, not to the Home Assistant command router.
+    if normalized == "tat ca" or normalized.startswith("tat ca "):
+        return None
+    if normalized in {
+        "all",
+        "everything",
+        "everywhere",
+        "both",
+        "toan bo",
+        "het",
+        "ca hai",
+    }:
+        return None
+
     if _is_camera_analysis_request(normalized):
         return "camera_analysis"
 
