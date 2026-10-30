@@ -210,6 +210,11 @@ from .const import (
     WEATHER_SERVICE_GET_FORECASTS,
     MEDIA_PLAYER_DOMAIN,
     PENDING_FOLLOWUP_SENTENCES,
+    PENDING_DEVICE_FOLLOWUP_SENTENCES,
+    PENDING_NOTE_FOLLOWUP_SENTENCES,
+    PENDING_YOUTUBE_FOLLOWUP_SENTENCES,
+    QUERY_FOLLOWUP_SENTENCES,
+    QUERY_TIME_FOLLOWUP_SENTENCES,
     PENDING_CONFIRMATION_TIMEOUT_SECONDS,
     QUERY_CONTEXT_TIMEOUT_SECONDS,
     SEARCH_SENTENCES,
@@ -1728,7 +1733,11 @@ class ConversationalAssistantManager(NoteManagerMixin, YouTubeManagerMixin):
         self._storage_load_task: asyncio.Task[Any] | None = None
         self._unsub_timer: Callable[[], None] | None = None
         self._unsub_pending_trigger: Callable[[], None] | None = None
+        self._unsub_query_followup_trigger: Callable[[], None] | None = None
+        self._pending_trigger_sentences: tuple[str, ...] = ()
+        self._query_trigger_sentences: tuple[str, ...] = ()
         self._unsub_pending_expiry_timer: Callable[[], None] | None = None
+        self._pending_expiry_at: datetime | None = None
         self._unsub_calendar_refresh_interval: Callable[[], None] | None = None
         self._unsub_calendar_notification_timer: Callable[[], None] | None = None
         self._weather_schedule_unsubs: list[Callable[[], None]] = []
@@ -4087,9 +4096,15 @@ class ConversationalAssistantManager(NoteManagerMixin, YouTubeManagerMixin):
         if self._unsub_pending_expiry_timer is not None:
             self._unsub_pending_expiry_timer()
             self._unsub_pending_expiry_timer = None
+        self._pending_expiry_at = None
         if self._unsub_pending_trigger is not None:
             self._unsub_pending_trigger()
             self._unsub_pending_trigger = None
+        if self._unsub_query_followup_trigger is not None:
+            self._unsub_query_followup_trigger()
+            self._unsub_query_followup_trigger = None
+        self._pending_trigger_sentences = ()
+        self._query_trigger_sentences = ()
         if self._unsub_calendar_refresh_interval is not None:
             self._unsub_calendar_refresh_interval()
             self._unsub_calendar_refresh_interval = None
@@ -21661,10 +21676,6 @@ class ConversationalAssistantManager(NoteManagerMixin, YouTubeManagerMixin):
     @callback
     def _schedule_pending_expiry(self) -> None:
         """Schedule cleanup for the earliest pending confirmation."""
-        if self._unsub_pending_expiry_timer is not None:
-            self._unsub_pending_expiry_timer()
-            self._unsub_pending_expiry_timer = None
-
         pending_items = [
             *self._pending.values(),
             *self._pending_deletions.values(),
@@ -21689,19 +21700,28 @@ class ConversationalAssistantManager(NoteManagerMixin, YouTubeManagerMixin):
             *self._voice_query_contexts.values(),
             *self._zalo_query_contexts.values(),
         ]
-        if not pending_items:
+        expires_at = min((item.expires_at for item in pending_items), default=None)
+        # Reusing an unchanged deadline avoids continuous timer churn on STT
+        # follow-ups (and zero extra work during a normal clean startup).
+        if self._pending_expiry_at == expires_at:
             return
-
-        expires_at = min(item.expires_at for item in pending_items)
-        self._unsub_pending_expiry_timer = async_track_point_in_time(
-            self.hass,
-            self._async_pending_expired,
-            expires_at,
-        )
+        if self._unsub_pending_expiry_timer is not None:
+            self._unsub_pending_expiry_timer()
+            self._unsub_pending_expiry_timer = None
+        self._pending_expiry_at = expires_at
+        if expires_at is not None:
+            self._unsub_pending_expiry_timer = async_track_point_in_time(
+                self.hass, self._async_pending_expired, expires_at
+            )
 
     @callback
     def _sync_pending_followup_trigger(self) -> None:
-        """Enable catch-all while a confirmation or query context is active."""
+        """Register only bounded, state-relevant follow-up sentences.
+
+        Home Assistant consumes a matched sentence trigger even if its
+        callback returns None. A catch-all therefore cannot safely delegate
+        a new request to the native agent, an LLM or another integration.
+        """
         self._purge_expired_query_contexts()
         has_pending = bool(
             self._pending
@@ -21713,25 +21733,57 @@ class ConversationalAssistantManager(NoteManagerMixin, YouTubeManagerMixin):
             or self._pending_voice_speaker_announcements
             or self._pending_voice_youtube
             or self._has_pending_notes()
-            or self._voice_query_contexts
         )
-        if has_pending and self._unsub_pending_trigger is None:
-            self._unsub_pending_trigger = get_agent_manager(
-                self.hass
-            ).register_trigger(
-                PENDING_FOLLOWUP_SENTENCES,
-                self._async_pending_followup_from_voice,
-            )
-        elif not has_pending and self._unsub_pending_trigger is not None:
-            self._unsub_pending_trigger()
-            self._unsub_pending_trigger = None
+        pending_sentences = list(PENDING_FOLLOWUP_SENTENCES) if has_pending else []
+        if self._pending_voice_device_controls:
+            pending_sentences.extend(PENDING_DEVICE_FOLLOWUP_SENTENCES)
+        if self._has_pending_notes():
+            pending_sentences.extend(PENDING_NOTE_FOLLOWUP_SENTENCES)
+        if self._pending_voice_youtube:
+            pending_sentences.extend(PENDING_YOUTUBE_FOLLOWUP_SENTENCES)
+
+        # General topic context must never activate an unconstrained wildcard.
+        query_sentences = (
+            list(QUERY_FOLLOWUP_SENTENCES) if self._voice_query_contexts else []
+        )
+        if any(
+            active.feature in {ACTION_WEATHER, ACTION_CALENDAR}
+            for active in self._voice_query_contexts.values()
+        ):
+            query_sentences.extend(QUERY_TIME_FOLLOWUP_SENTENCES)
+
+        agent_manager = None
+        new_pending_sentences = tuple(pending_sentences)
+        if new_pending_sentences != self._pending_trigger_sentences:
+            if self._unsub_pending_trigger is not None:
+                self._unsub_pending_trigger()
+                self._unsub_pending_trigger = None
+            if new_pending_sentences:
+                agent_manager = get_agent_manager(self.hass)
+                self._unsub_pending_trigger = agent_manager.register_trigger(
+                    pending_sentences, self._async_pending_followup_from_voice
+                )
+            self._pending_trigger_sentences = new_pending_sentences
+
+        new_query_sentences = tuple(query_sentences)
+        if new_query_sentences != self._query_trigger_sentences:
+            if self._unsub_query_followup_trigger is not None:
+                self._unsub_query_followup_trigger()
+                self._unsub_query_followup_trigger = None
+            if new_query_sentences:
+                agent_manager = agent_manager or get_agent_manager(self.hass)
+                self._unsub_query_followup_trigger = agent_manager.register_trigger(
+                    query_sentences, self._async_pending_followup_from_voice
+                )
+            self._query_trigger_sentences = new_query_sentences
 
         self._schedule_pending_expiry()
 
     @callback
     def _async_pending_expired(self, _now: datetime) -> None:
-        """Remove expired confirmations and disable the temporary trigger."""
+        """Remove expired confirmations and disable temporary triggers."""
         self._unsub_pending_expiry_timer = None
+        self._pending_expiry_at = None
         self._purge_expired_pending()
 
     def _purge_expired_pending(self) -> None:
@@ -23320,7 +23372,19 @@ class ConversationalAssistantManager(NoteManagerMixin, YouTubeManagerMixin):
                     self._source_keys(user_input)
                 )
             self._sync_pending_followup_trigger()
-            return None
+            # A sentence trigger has *already consumed* this utterance. Returning
+            # None would produce Home Assistant's generic "Done"/"Xong" even
+            # though no request was handled. Give an actionable clarification
+            # for a short reply from another/expired conversation instead.
+            language = str(user_input.language or "vi").casefold()
+            clarification = (
+                "There is no active follow-up for this conversation. "
+                "Please state your full request."
+                if language.startswith("en")
+                else "Không có yêu cầu tiếp nối đang chờ trong hội thoại này. "
+                "Hãy nói rõ yêu cầu đầy đủ."
+            )
+            return await self._async_voice_response(user_input, clarification)
 
         if (
             camera_pending is not None

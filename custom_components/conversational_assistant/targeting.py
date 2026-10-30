@@ -74,6 +74,12 @@ def parse_target_selection(selection: str, target_names: list[str]) -> list[int]
     if not normalized:
         return []
 
+    # STT sometimes transcribes "lăm" instead of "năm" in a numbered
+    # choice. Only correct it after an explicit number/selection prefix; a
+    # bare "lăm" might be the real configured name of a speaker or device.
+    if normalized in {"so lam", "chon lam"}:
+        normalized = "nam"
+
     selected: set[int] = set()
     remaining = normalized
 

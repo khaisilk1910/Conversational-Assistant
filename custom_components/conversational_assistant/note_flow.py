@@ -1004,8 +1004,25 @@ class NoteManagerMixin:
             return await self._async_voice_response(
                 user_input, "Không có yêu cầu ghi chú nào đang chờ."
             )
+        reply_text = user_input.text
+        # Only remove a clearly spoken content cue in free-text stages. This
+        # allows an explicit, narrow STT grammar instead of intercepting every
+        # utterance with the unsafe {selection} wildcard. Never rewrite names,
+        # general instructions, or passwords outside these stages.
+        if pending.stage in {"content", "new_content"}:
+            folded = normalize_text(reply_text)
+            for prefix in (
+                "noi dung ", "sua thanh ", "doi thanh ",
+                "thay bang ", "content ", "replace with ", "change to ",
+            ):
+                if folded.startswith(prefix):
+                    raw_words = reply_text.split()
+                    prefix_words = len(prefix.split())
+                    if len(raw_words) > prefix_words:
+                        reply_text = " ".join(raw_words[prefix_words:])
+                    break
         response = await self._async_process_note_pending_text(
-            pending, user_input.text
+            pending, reply_text
         )
         return await self._async_voice_response(user_input, response)
 

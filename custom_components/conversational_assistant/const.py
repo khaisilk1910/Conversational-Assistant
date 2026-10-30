@@ -340,8 +340,69 @@ PENDING_CONFIRMATION_TIMEOUT_SECONDS = 120
 # delays Home Assistant startup.
 QUERY_CONTEXT_TIMEOUT_SECONDS = 120
 
-# Registered only while a confirmation or natural conversation context is active.
-PENDING_FOLLOWUP_SENTENCES = ["{selection}"]
+# Only register these narrow grammars while the corresponding state exists.
+# A bare "{selection}" matches EVERY utterance, and Home Assistant's sentence
+# trigger dispatcher consumes the utterance even when callbacks return None.
+# That causes the default translated "Done"/"Xong" response and masks Gemini.
+# Keep sentence templates short and explicit; dynamic registration is not part
+# of the normal Home Assistant startup path.
+PENDING_FOLLOWUP_SENTENCES = [
+    # Numbered choices are short and common STT transcripts.
+    "(1|2|3|4|5|6|7|8|9|10|11|12|13|14|15|16|17|18|19|20)",
+    "(một|mốt|mot|hai|ba|bốn|bon|tư|năm|nam|sáu|sau|bảy|bay|tám|tam|chín|chin|mười|muoi)",
+    "(1|2|3|4|5|6|7|8|9|10) (và|phẩy|chấm|and) {selection}",
+    "(một|hai|ba|bốn|tư|năm|sáu|bảy|tám|chín|mười) (và|and) {selection}",
+    # Free-form target names need a distinctive selection prefix.
+    "[tôi ](chọn|chon|lựa chọn|lua chon|xác nhận|xac nhan) {selection}",
+    "[hãy ](gửi đến|gửi cho|thông báo đến|phát đến) {selection}",
+    "(số|so|mục|muc|cái thứ|cai thu|lựa chọn số) {selection}",
+    "(select|choose|confirm|send to|notify) {selection}",
+    "(tất cả|toàn bộ|cả hai|mọi loa|mọi điện thoại|mọi zalo)",
+    "(all|everything|everywhere|both|all speakers|all cameras|all phones)",
+    # Confirmation replies have meaning ONLY within an active pending flow.
+    "(có|vâng|vâng ạ|đồng ý|tôi đồng ý|xác nhận|được|được rồi|ok|oke)",
+    "(yes|agree|approved|confirm|confirmed|go ahead|proceed)",
+    "(không|không đồng ý|không gửi|không lưu|thôi|hủy|hủy bỏ|bỏ qua)",
+    "(no|no thanks|cancel|never mind|stop)",
+]
+
+# Additional templates are registered only for particular pending flows.
+PENDING_DEVICE_FOLLOWUP_SENTENCES = [
+    # Door-opening confirmation accepts these explicit spoken approvals.
+    "(mở|mở đi|mở cửa|mở cửa đi|hãy mở|tiến hành|thực hiện)",
+    "(open|open it|open door|open door now)",
+    "(đặt|chỉnh) {selection} độ",
+    "(tăng lên|giảm xuống|chuyển sang|đổi sang) {selection}",
+    "(set to|increase to|decrease to|change to) {selection}",
+]
+PENDING_NOTE_FOLLOWUP_SENTENCES = [
+    "(nội dung|sửa thành|đổi thành|thay bằng|mật khẩu|pass) {selection}",
+    "(content|replace with|change to|password) {selection}",
+    "(công khai|bảo mật|riêng tư|giữ nguyên|không bảo mật)",
+    "(public|private|keep current|keep original)",
+]
+PENDING_YOUTUBE_FOLLOWUP_SENTENCES = [
+    "(bài|bài hát|video|ca sĩ|kênh) {selection}",
+    "(song|track|artist|channel) {selection}",
+]
+
+# Deliberately do not intercept ordinary standalone questions. Natural
+# continuity is only explicitly signalled or short and referential.
+QUERY_FOLLOWUP_SENTENCES = [
+    "(còn|vậy còn|thế còn|rồi còn) {selection}",
+    "(vậy|thế thì|nếu|rồi|tiếp theo) {selection}",
+    "(what about|how about|and what about|what if|then) {selection}",
+    "(cái đó|cái này|việc đó|trường hợp đó) {selection}",
+    "(that|this|those|it) {selection}",
+    "(tại sao|vì sao|sao vậy|như thế nào|bao nhiêu|khi nào|ở đâu|ai vậy)",
+    "(why|how|when|where|who|anything else|another one)",
+    "(thêm nữa|còn gì nữa|còn nữa không|khác đi|phát lại|làm lại)",
+]
+QUERY_TIME_FOLLOWUP_SENTENCES = [
+    # Elliptical dates should only be captured after weather/calendar topics.
+    "(hôm nay|ngày mai|ngày kia|hôm sau|tuần sau|tháng sau)",
+    "(today|tomorrow|the day after tomorrow|next week|next month)",
+]
 
 # Voice Assist already handles ordinary on/off commands, target temperature,
 # fan percentage, and simple delayed commands. These triggers intentionally
