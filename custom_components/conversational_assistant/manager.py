@@ -1730,6 +1730,15 @@ class ConversationalAssistantManager(NoteManagerMixin, YouTubeManagerMixin):
             f"{STORAGE_KEY_PREFIX}.{entry.entry_id}",
         )
         self._storage_loaded = False
+        self._storage_error: str | None = None
+        self._storage_load_retries = 0
+        self._unsub_storage_retry: Callable[[], None] | None = None
+        self._unloading = False
+        self._assist_triggers_ready = False
+        self._assist_registration_task: asyncio.Task[None] | None = None
+        self._assist_setup_ms: float | None = None
+        self._assist_groups_registered = 0
+        self._assist_groups_failed = 0
         self._storage_load_task: asyncio.Task[Any] | None = None
         self._unsub_timer: Callable[[], None] | None = None
         self._unsub_pending_trigger: Callable[[], None] | None = None
@@ -3795,11 +3804,22 @@ class ConversationalAssistantManager(NoteManagerMixin, YouTubeManagerMixin):
 
     def _apply_stored_data(self, stored: dict[str, Any]) -> None:
         """Merge persistent data into live state without clobbering new work."""
+        # A malformed collection must never be treated as an empty list and
+        # automatically persisted over the original Store contents.
+        for collection in (
+            "reminders",
+            "notes",
+            "learned_commands",
+            "camera_snapshot_schedules",
+            "scheduled_device_actions",
+        ):
+            if not isinstance(stored.get(collection, []), list):
+                raise ValueError(f"Invalid storage collection: {collection}")
         for item in stored.get("reminders", []):
             try:
                 reminder = Reminder.from_dict(item)
             except (KeyError, TypeError, ValueError):
-                _LOGGER.warning("Skipping invalid stored reminder: %s", item)
+                _LOGGER.warning("Skipping invalid stored reminder (malformed entry)")
                 continue
             self.reminders.setdefault(reminder.reminder_id, reminder)
         for item in stored.get("camera_snapshot_schedules", []):
@@ -3807,7 +3827,7 @@ class ConversationalAssistantManager(NoteManagerMixin, YouTubeManagerMixin):
                 schedule = CameraSnapshotSchedule.from_dict(item)
             except (KeyError, TypeError, ValueError):
                 _LOGGER.warning(
-                    "Skipping invalid stored camera snapshot schedule: %s", item
+                    "Skipping invalid stored camera snapshot schedule"
                 )
                 continue
             if schedule.next_run is not None:
@@ -3819,7 +3839,7 @@ class ConversationalAssistantManager(NoteManagerMixin, YouTubeManagerMixin):
             try:
                 command = LearnedCommand.from_dict(item)
             except (CommandMemoryError, KeyError, TypeError, ValueError):
-                _LOGGER.warning("Skipping invalid learned command: %s", item)
+                _LOGGER.warning("Skipping invalid learned command")
                 continue
             self.learned_commands.setdefault(command.command_id, command)
         for item in stored.get("scheduled_device_actions", []):
@@ -3827,7 +3847,7 @@ class ConversationalAssistantManager(NoteManagerMixin, YouTubeManagerMixin):
                 scheduled = ScheduledDeviceAction.from_dict(item)
             except (KeyError, TypeError, ValueError):
                 _LOGGER.warning(
-                    "Skipping invalid scheduled device action: %s", item
+                    "Skipping invalid scheduled device action"
                 )
                 continue
             self._scheduled_device_actions.setdefault(
@@ -3856,22 +3876,46 @@ class ConversationalAssistantManager(NoteManagerMixin, YouTubeManagerMixin):
         try:
             stored = done_task.result()
         except TimeoutError:
-            _LOGGER.error(
-                "Timed out loading Conversational Assistant storage after %s "
-                "seconds; integration remains available",
+            self._storage_error = "timeout"
+            _LOGGER.warning(
+                "Storage restore timed out after %s seconds (attempt %s); "
+                "integration remains usable, persistence awaits retry",
                 STORAGE_LOAD_TIMEOUT_SECONDS,
+                self._storage_load_retries + 1,
             )
+            self._schedule_storage_retry()
             return
-        except Exception:  # noqa: BLE001 - Store failure must not kill entry
+        except Exception as err:  # noqa: BLE001 - storage must not prevent setup
+            self._storage_error = type(err).__name__
             _LOGGER.exception(
-                "Failed loading Conversational Assistant storage; integration "
-                "remains available"
+                "Storage restore failed (attempt %s); persistence awaits retry",
+                self._storage_load_retries + 1,
             )
+            self._schedule_storage_retry()
             return
 
-        self._apply_stored_data(stored)
+        try:
+            self._apply_stored_data(stored)
+        except Exception as err:  # noqa: BLE001 - preserve the original Store
+            self._storage_error = type(err).__name__
+            _LOGGER.exception(
+                "Stored data could not be applied safely; existing Store "
+                "contents will not be overwritten"
+            )
+            self._schedule_storage_retry()
+            return
         self._storage_loaded = True
-        self._sync_learned_command_triggers()
+        self._storage_error = None
+        if self._assist_triggers_ready:
+            self._sync_learned_command_triggers()
+        _LOGGER.info(
+            "Storage restored: reminders=%s, learned_commands=%s, notes=%s, "
+            "camera_schedules=%s",
+            len(self.reminders),
+            len(self.learned_commands),
+            len(self.notes),
+            len(self.camera_snapshot_schedules),
+        )
         if self.hass.state is CoreState.running:
             self._schedule_next()
             self._schedule_next_camera_snapshot()
@@ -3880,6 +3924,34 @@ class ConversationalAssistantManager(NoteManagerMixin, YouTubeManagerMixin):
         # Persist a merged snapshot so requests created while the Store read was
         # in flight are not lost.
         self._save_later()
+
+    @callback
+    def _schedule_storage_retry(self) -> None:
+        """Retry a failed Store read outside setup, without overwriting old data."""
+        if self._unloading or self._storage_loaded:
+            return
+        if self._storage_load_retries >= 3:
+            _LOGGER.error(
+                "Storage restore failed after 4 attempts; no writes will be "
+                "made to protect existing stored data. Reload this integration "
+                "after fixing the storage issue."
+            )
+            return
+        self._storage_load_retries += 1
+        delay_seconds = 30 * 4 ** (self._storage_load_retries - 1)
+        _LOGGER.warning("Retrying storage restore in %s seconds", delay_seconds)
+        self._unsub_storage_retry = async_track_point_in_time(
+            self.hass,
+            self._async_retry_storage_restore,
+            dt_util.utcnow() + timedelta(seconds=delay_seconds),
+        )
+
+    @callback
+    def _async_retry_storage_restore(self, _now: datetime) -> None:
+        """Start a new bounded load when the retry timer fires."""
+        self._unsub_storage_retry = None
+        if not self._unloading and not self._storage_loaded:
+            self._start_background_storage_restore()
 
     def _start_background_storage_restore(
         self,
@@ -3892,6 +3964,7 @@ class ConversationalAssistantManager(NoteManagerMixin, YouTubeManagerMixin):
             self.hass,
             self._async_load_storage_payload(),
             "conversational_assistant_storage_restore",
+            eager_start=False,
         )
         self._storage_load_task = task
         task.add_done_callback(self._finish_storage_load_task)
@@ -3935,24 +4008,28 @@ class ConversationalAssistantManager(NoteManagerMixin, YouTubeManagerMixin):
         try:
             unsub = agent_manager.register_trigger(sentences, registered_handler)
         except Exception:  # noqa: BLE001 - one grammar must not break startup
+            self._assist_groups_failed += 1
             _LOGGER.exception(
-                "Failed registering Conversational Assistant trigger group %s; "
+                "Failed registering Assist trigger group %s; "
                 "continuing with the remaining features",
                 label,
             )
             return
+        self._assist_groups_registered += 1
         self._unsubs.append(unsub)
 
     async def async_setup(self) -> None:
-        """Register listeners immediately and restore Store in background."""
+        """Register lightweight listeners; defer heavy Assist grammar work."""
         # Store I/O is intentionally detached from config-entry setup. A slow or
         # temporarily unavailable storage backend must never hold Home Assistant
         # startup in SETUP_IN_PROGRESS/NOT_LOADED. The config-entry-owned
         # background task applies the data and refreshes sensors when it finishes.
         self._start_background_storage_restore()
 
-        agent_manager = get_agent_manager(self.hass)
-        trigger_specs = (
+        # Keep grammar registration off Home Assistant's startup critical path.
+        # register_trigger() notifies subscribers on every call; a voice agent
+        # can rebuild the recognition index many times with a large grammar.
+        self._assist_trigger_specs = (
             (
                 COMMAND_LEARN_SENTENCES,
                 self._async_learn_command_from_voice,
@@ -4047,11 +4124,6 @@ class ConversationalAssistantManager(NoteManagerMixin, YouTubeManagerMixin):
                 "note_view",
             ),
         )
-        for sentences, handler, label in trigger_specs:
-            self._register_static_trigger(
-                agent_manager, sentences, handler, label
-            )
-
         self._unsubs.extend(
             (
                 self.hass.bus.async_listen(
@@ -4062,7 +4134,6 @@ class ConversationalAssistantManager(NoteManagerMixin, YouTubeManagerMixin):
                 ),
             )
         )
-        self._sync_learned_command_triggers(agent_manager)
         self._unsubs.append(
             async_at_started(self.hass, self._async_home_assistant_started)
         )
@@ -4071,9 +4142,47 @@ class ConversationalAssistantManager(NoteManagerMixin, YouTubeManagerMixin):
         # Do not scan Mobile App devices, speakers, TTS entities, or cameras
         # here.  Those optional resources are resolved lazily on first use.
 
+    async def _async_register_assist_triggers(self) -> None:
+        """Register Assist grammar cooperatively after Home Assistant starts."""
+        started = monotonic()
+        try:
+            agent_manager = get_agent_manager(self.hass)
+            for index, (sentences, handler, label) in enumerate(
+                self._assist_trigger_specs
+            ):
+                self._register_static_trigger(agent_manager, sentences, handler, label)
+                # Let other Home Assistant work run between small grammar batches.
+                if index % 2:
+                    await asyncio.sleep(0)
+            self._sync_learned_command_triggers(agent_manager)
+        except Exception:  # noqa: BLE001 - log failure in background setup
+            self._assist_groups_failed += 1
+            _LOGGER.exception(
+                "Assist trigger initialization failed after Home Assistant "
+                "started; other integration features remain available"
+            )
+            return
+        finally:
+            self._assist_setup_ms = round((monotonic() - started) * 1000, 1)
+        self._assist_triggers_ready = True
+        _LOGGER.info(
+            "Assist trigger registration complete: groups=%s, failures=%s, "
+            "duration_ms=%.1f",
+            self._assist_groups_registered,
+            self._assist_groups_failed,
+            self._assist_setup_ms,
+        )
+
     @callback
     def _async_home_assistant_started(self, _hass: HomeAssistant) -> None:
-        """Start reminder, device-action, and calendar scheduling."""
+        """Start scheduled work and non-blocking Assist registration."""
+        if not self._unloading and self._assist_registration_task is None:
+            self._assist_registration_task = self.entry.async_create_background_task(
+                self.hass,
+                self._async_register_assist_triggers(),
+                "conversational_assistant_assist_triggers",
+                eager_start=False,
+            )
         self._schedule_next()
         self._schedule_next_camera_snapshot()
         self._schedule_all_device_actions()
@@ -4082,6 +4191,16 @@ class ConversationalAssistantManager(NoteManagerMixin, YouTubeManagerMixin):
 
     async def async_unload(self) -> None:
         """Unload listeners and timer."""
+        self._unloading = True
+        assist_task = self._assist_registration_task
+        if assist_task is not None:
+            assist_task.cancel()
+            await asyncio.gather(assist_task, return_exceptions=True)
+            self._assist_registration_task = None
+        self._assist_triggers_ready = False
+        if self._unsub_storage_retry is not None:
+            self._unsub_storage_retry()
+            self._unsub_storage_retry = None
         storage_load_task = self._storage_load_task
         if storage_load_task is not None:
             storage_load_task.cancel()
@@ -4396,8 +4515,7 @@ class ConversationalAssistantManager(NoteManagerMixin, YouTubeManagerMixin):
                 )
             except Exception:  # noqa: BLE001 - keep other aliases active
                 _LOGGER.exception(
-                    "Failed to register learned command phrase %s",
-                    command.phrase,
+                    "Failed to register one learned Assist command"
                 )
                 continue
             self._learned_trigger_unsubs.append(unsub)

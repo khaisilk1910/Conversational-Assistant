@@ -1,7 +1,7 @@
 # Conversational Assistant
 
-[![Home Assistant](https://img.shields.io/badge/Home%20Assistant-2026.8.0%2B-41BDF5.svg)](https://www.home-assistant.io/)
-[![HACS](https://img.shields.io/badge/HACS-Custom-41BDF5.svg)](https://hacs.xyz/)
+[![Home Assistant](https://img.shields.io/badge/Home%20Assistant-2026.7.0%2B-41BDF5.svg)](https://www.home-assistant.io/)
+[![Home Assistant Marketplace](https://img.shields.io/badge/Marketplace-HA%202026.11%2B-41BDF5.svg)](https://www.home-assistant.io/integrations/marketplace)
 [![Languages](https://img.shields.io/badge/ngôn%20ngữ-Tiếng%20Việt%20%7C%20English-red.svg)](#ngôn-ngữ)
 
 [**Tiếng Việt**](README.md) | [English](Readme/README_EN.md) | [Hướng Dẫn Lệnh](Readme/huongdanlenh.md)
@@ -78,16 +78,20 @@ max: 50
 
 ## Cài đặt
 
-### Cài tự động
+### Cài qua Marketplace (Home Assistant 2026.11 trở lên)
 
-  - Nhấn nút bên dưới để thêm vào HACS trên Home Assistant.
+  - Vào **Settings > Marketplace**, thêm kho GitHub tùy chỉnh `https://github.com/khaisilk1910/Conversational-Assistant` (nếu chưa có trong catalog). Nếu được hỏi, hãy kết nối GitHub.
+  - Chọn **Install**, sau đó vào **Settings > Devices & services > Add integration** để thêm `Conversational Assistant`.
+  - Giữ nguyên config entry và thư mục `.storage` khi nâng cấp. Không cần cài HACS riêng trên 2026.11 trở lên.
+  - Với Home Assistant 2026.10 trở xuống, vẫn có thể sử dụng HACS bản cũ nếu phiên bản hệ thống tương thích.
+
+  - Nút chuyển hướng đến kho cài đặt (HACS cũ sẽ tự chuyển sang Marketplace khi nâng cấp):
 
   [![Open your Home Assistant instance and open a repository inside the Home Assistant Community Store.](https://my.home-assistant.io/badges/hacs_repository.svg)](https://my.home-assistant.io/redirect/hacs_repository/?owner=khaisilk1910&repository=Conversational-Assistant&category=integration)
 
-  - Sau khi thêm trong HACS và khởi động lại Home Assistant
-     
-  - Vào Settings -> Integrations -> Add integration -> Tìm `Conversational Assistant`
-  - 
+  - Sau khi cập nhật, khởi động lại Home Assistant nếu giao diện yêu cầu.
+  - Mở **Settings > Devices & services > Integrations** để quản lý cấu hình hiện có; không tạo cấu hình mới nếu tích hợp đã được thiết lập.
+
 ---
 
 ## Mục lục
@@ -1101,3 +1105,23 @@ Google Cast speakers now receive a short Home Assistant MP3 transcode stream (`a
 - Nếu Cast vẫn từ chối M4A, file local được chuyển sang MP3 rồi thử lại mà không phải tải YouTube lần nữa.
 - File tạm được tự xóa sau khi loa kết thúc phát; TTL 8 giờ và dọn file bỏ dở cũ hơn 12 giờ để tránh rác sau crash/restart.
 - Tất cả tải/remux/transcode vẫn lazy khi có lệnh YouTube, không chạy lúc Home Assistant khởi động.
+
+
+## Chẩn đoán và thu thập log (2026.11)
+
+**Diagnostics:** Vào **Settings > Devices & services > Conversational Assistant > ... > Download diagnostics**. Tập tin chỉ chứa thống kê kỹ thuật (kết quả tải lưu trữ, số nhóm câu lệnh Assist, thời gian đăng ký, số nhắc nhở/ghi chú), không chứa nội dung tin nhắn, mật khẩu hoặc API key.
+
+**Log chi tiết:** Thêm vào `configuration.yaml` nếu cần truy vết trong thời gian ngắn:
+
+```yaml
+logger:
+  default: warning
+  logs:
+    custom_components.conversational_assistant: debug
+```
+
+Sau khi phát hiện lỗi, khôi phục mức log `info` hoặc xóa cấu hình debug. Khi gửi log hỗ trợ, hãy kiểm tra và loại bỏ dữ liệu cá nhân, ID luồng, URL có token, và tên thiết bị nhạy cảm.
+
+Các dòng log quan trọng gồm `Conversational Assistant setup complete ...`, `Storage restored ...`, `Assist trigger registration complete ...`, hoặc `Storage restore failed ...`. Đăng ký câu lệnh Assist được chạy sau khi Home Assistant đã khởi động nên có một khoảng rất ngắn sau khi khởi động mà câu lệnh chưa sẵn sàng.
+
+**Phát hành Marketplace:** mỗi GitHub Release cần có tag trùng `version` trong `manifest.json` (ví dụ `v2026.11.7.1`); phải commit file manifest *trước* khi tạo tag. Không ghi đè (`force push`) tag đã phát hành. Hai workflow `validate.yml` và `update-manifest-version.yml` sẽ kiểm tra repository và đối chiếu phiên bản. Chỉ đưa bản này lên Marketplace sau khi các kiểm tra GitHub Actions thành công.

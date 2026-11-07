@@ -5,6 +5,7 @@ from __future__ import annotations
 from copy import deepcopy
 import json
 import logging
+from time import monotonic
 from typing import Any
 
 import voluptuous as vol
@@ -97,7 +98,13 @@ async def async_setup(hass: HomeAssistant, _config: ConfigType) -> bool:
         result = await manager.async_process_zalo_webhook_payload(
             payload, call.context
         )
-        _LOGGER.debug("Processed existing Zalo webhook payload: %s", result)
+        # Log status only; webhook responses may later contain private fields.
+        _LOGGER.debug(
+            "Processed Zalo webhook: ok=%s handled=%s reason=%s",
+            result.get("ok"),
+            result.get("handled"),
+            result.get("reason"),
+        )
 
     # Register the critical Zalo action first.  Optional YouTube HTTP proxy
     # setup must never be able to remove the integration's core actions.
@@ -184,6 +191,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             title=INTEGRATION_NAME,
         )
 
+    start = monotonic()
     manager = ConversationalAssistantManager(hass, entry)
     entry.runtime_data = manager
     try:
@@ -209,7 +217,13 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                 entry.entry_id,
                 exc_info=True,
             )
+        _LOGGER.exception("Failed setting up Conversational Assistant config entry")
         raise
+    _LOGGER.info(
+        "Conversational Assistant setup complete in %.1f ms; "
+        "Assist triggers will register after Home Assistant startup",
+        (monotonic() - start) * 1000,
+    )
     return True
 
 

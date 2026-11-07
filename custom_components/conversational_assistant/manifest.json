@@ -1,7 +1,9 @@
 {
   "domain": "conversational_assistant",
   "name": "Conversational Assistant",
-  "codeowners": [],
+  "codeowners": [
+    "@khaisilk1910"
+  ],
   "config_flow": true,
   "dependencies": [
     "conversation",
@@ -10,5 +12,12 @@
   "integration_type": "service",
   "iot_class": "local_push",
   "requirements": [],
-  "version": "2026.10.30.1540"
+  "version": "2026.11.7.1",
+  "categories": [
+    "ai_voice.voice_assistants",
+    "messaging_notifications.chat_apps",
+    "productivity_information.calendars_todos"
+  ],
+  "documentation": "https://github.com/khaisilk1910/Conversational-Assistant#readme",
+  "issue_tracker": "https://github.com/khaisilk1910/Conversational-Assistant/issues"
 }

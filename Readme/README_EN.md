@@ -1,3 +1,5 @@
+> **Home Assistant 2026.11+ / Marketplace:** Open **Settings > Marketplace** and add the custom GitHub repository `https://github.com/khaisilk1910/Conversational-Assistant` (connect GitHub if prompted). Install the integration, then configure it in **Settings > Devices & services**. The standalone HACS integration is replaced by Marketplace on Home Assistant 2026.11 and later. Existing config entries and `.storage` should be preserved. Diagnostics are available on the integration page and contain only technical status/counters, not private messages or API keys. The Assist grammar is registered cooperatively after HA starts to avoid blocking startup. See the Vietnamese README for release instructions and detailed logging guidance.
+
 # Conversational Assistant
 
 [![Home Assistant](https://img.shields.io/badge/Home%20Assistant-2026.7.0%2B-41BDF5.svg)](https://www.home-assistant.io/)
